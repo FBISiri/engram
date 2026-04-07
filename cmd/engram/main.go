@@ -2,10 +2,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/anthropics/engram/pkg/config"
+	"github.com/anthropics/engram/pkg/embedding"
+	"github.com/anthropics/engram/pkg/qdrant"
+	"github.com/anthropics/engram/pkg/server"
 )
 
 func main() {
@@ -35,18 +39,53 @@ func main() {
 }
 
 func serve(cfg *config.Config) error {
-	fmt.Printf("Starting Engram server (transport: %s)\n", cfg.Transport)
-	fmt.Printf("  Qdrant:     %s (collection: %s)\n", cfg.QdrantURL, cfg.CollectionName)
-	fmt.Printf("  Embedding:  %s (%dd)\n", cfg.EmbeddingModel, cfg.EmbeddingDimension)
-	fmt.Printf("  Scoring:    relevance=%.1f recency=%.1f importance=%.1f\n",
+	fmt.Fprintf(os.Stderr, "Starting Engram server (transport: %s)\n", cfg.Transport)
+	fmt.Fprintf(os.Stderr, "  Qdrant:     %s (collection: %s)\n", cfg.QdrantURL, cfg.CollectionName)
+	fmt.Fprintf(os.Stderr, "  Embedding:  %s (%dd)\n", cfg.EmbeddingModel, cfg.EmbeddingDimension)
+	fmt.Fprintf(os.Stderr, "  Scoring:    relevance=%.1f recency=%.1f importance=%.1f\n",
 		cfg.Weights.Relevance, cfg.Weights.Recency, cfg.Weights.Importance)
 
-	// TODO: Initialize store, embedder, and server
 	// 1. Create Qdrant store
-	// 2. Create OpenAI embedder
-	// 3. Start MCP/HTTP server based on transport config
+	store, err := qdrant.New(qdrant.Config{
+		URL:            cfg.QdrantURL,
+		APIKey:         cfg.QdrantAPIKey,
+		CollectionName: cfg.CollectionName,
+		Dimension:      uint64(cfg.EmbeddingDimension),
+	})
+	if err != nil {
+		return fmt.Errorf("create qdrant store: %w", err)
+	}
+	defer store.Close()
 
-	return fmt.Errorf("server not yet implemented — scaffold only")
+	// Ensure collection exists
+	ctx := context.Background()
+	if err := store.EnsureCollection(ctx); err != nil {
+		return fmt.Errorf("ensure collection: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Collection: ready\n")
+
+	// 2. Create embedder
+	embedder := embedding.NewOpenAI(embedding.OpenAIConfig{
+		APIKey:    cfg.OpenAIAPIKey,
+		Model:     cfg.EmbeddingModel,
+		BaseURL:   cfg.OpenAIBaseURL,
+		Dimension: cfg.EmbeddingDimension,
+	})
+
+	// 3. Create and start server
+	srv := server.NewServer(store, embedder, cfg)
+
+	switch cfg.Transport {
+	case "stdio":
+		fmt.Fprintf(os.Stderr, "  Transport:  stdio (ready)\n")
+		return srv.ServeStdio()
+	case "http":
+		return fmt.Errorf("HTTP transport not yet implemented")
+	case "both":
+		return fmt.Errorf("dual transport not yet implemented")
+	default:
+		return fmt.Errorf("unknown transport: %s", cfg.Transport)
+	}
 }
 
 func printUsage() {
