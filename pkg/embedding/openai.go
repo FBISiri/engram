@@ -104,15 +104,20 @@ func (o *OpenAI) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		Input: texts,
 		Model: o.model,
 	}
-	// Only send dimensions for models that natively support it (text-embedding-3-*).
-	// When using a proxy like OpenRouter, the model name has a provider prefix
-	// (e.g. "openai/text-embedding-3-small"), and the dimensions parameter may
-	// not be forwarded correctly, resulting in empty embeddings.
+	// Only send dimensions when ALL of these conditions are met:
+	// 1. dimension > 0
+	// 2. The model supports it (text-embedding-3-*)
+	// 3. We're calling OpenAI directly (not through a proxy like OpenRouter)
+	//
+	// Proxies like OpenRouter may not forward the dimensions parameter correctly,
+	// resulting in empty embeddings. When dimension matches the model's default
+	// (1536 for text-embedding-3-small), omitting it is safe.
+	isDirectOpenAI := strings.Contains(o.baseURL, "api.openai.com")
 	modelSuffix := o.model
 	if idx := strings.LastIndex(o.model, "/"); idx >= 0 {
 		modelSuffix = o.model[idx+1:]
 	}
-	if o.dimension > 0 && strings.HasPrefix(modelSuffix, "text-embedding-3-") {
+	if o.dimension > 0 && strings.HasPrefix(modelSuffix, "text-embedding-3-") && isDirectOpenAI {
 		reqBody.Dimensions = o.dimension
 	}
 
