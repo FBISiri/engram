@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -103,8 +104,15 @@ func (o *OpenAI) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		Input: texts,
 		Model: o.model,
 	}
-	// Only send dimensions for models that support it (text-embedding-3-*)
-	if o.dimension > 0 {
+	// Only send dimensions for models that natively support it (text-embedding-3-*).
+	// When using a proxy like OpenRouter, the model name has a provider prefix
+	// (e.g. "openai/text-embedding-3-small"), and the dimensions parameter may
+	// not be forwarded correctly, resulting in empty embeddings.
+	modelSuffix := o.model
+	if idx := strings.LastIndex(o.model, "/"); idx >= 0 {
+		modelSuffix = o.model[idx+1:]
+	}
+	if o.dimension > 0 && strings.HasPrefix(modelSuffix, "text-embedding-3-") {
 		reqBody.Dimensions = o.dimension
 	}
 
@@ -159,10 +167,10 @@ func (o *OpenAI) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		vectors[d.Index] = d.Embedding
 	}
 
-	// Validate all slots were filled.
+	// Validate all slots were filled and non-empty.
 	for i, v := range vectors {
-		if v == nil {
-			return nil, fmt.Errorf("openai: missing embedding at index %d", i)
+		if len(v) == 0 {
+			return nil, fmt.Errorf("openai: missing or empty embedding at index %d", i)
 		}
 	}
 

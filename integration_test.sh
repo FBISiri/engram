@@ -54,7 +54,11 @@ info "Using test collection: $COLLECTION"
 export ENGRAM_QDRANT_URL=localhost:6334
 export ENGRAM_COLLECTION_NAME="$COLLECTION"
 export ENGRAM_OPENAI_API_KEY
+export ENGRAM_OPENAI_BASE_URL="${ENGRAM_OPENAI_BASE_URL:-https://api.openai.com/v1}"
+export ENGRAM_EMBEDDING_MODEL="${ENGRAM_EMBEDDING_MODEL:-text-embedding-3-small}"
 export ENGRAM_TRANSPORT=stdio
+
+info "Embedding endpoint: $ENGRAM_OPENAI_BASE_URL (model: $ENGRAM_EMBEDDING_MODEL)"
 
 cleanup() {
     info "Cleaning up test collection: $COLLECTION"
