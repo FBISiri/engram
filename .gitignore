@@ -18,3 +18,8 @@ Thumbs.db
 
 # Environment
 .env
+.env.*
+!.env.example
+
+# Docker
+qdrant_data/

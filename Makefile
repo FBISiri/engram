@@ -1,4 +1,4 @@
-.PHONY: build test lint clean
+.PHONY: build test lint clean docker integration-test
 
 BINARY=engram
 VERSION=0.1.0
@@ -17,3 +17,17 @@ clean:
 
 tidy:
 	go mod tidy
+
+# Docker targets
+docker:
+	docker build -t engram:$(VERSION) .
+
+docker-up:
+	docker-compose up -d qdrant
+
+docker-down:
+	docker-compose down
+
+# Integration test (requires ENGRAM_OPENAI_API_KEY and Qdrant running)
+integration-test: build
+	./integration_test.sh

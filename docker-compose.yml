@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.9.7
+    security_opt:
+      - seccomp:unconfined
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  engram:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    environment:
+      - ENGRAM_QDRANT_URL=qdrant:6334
+      - ENGRAM_QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - ENGRAM_COLLECTION_NAME=${ENGRAM_COLLECTION_NAME:-engram}
+      - ENGRAM_OPENAI_API_KEY=${ENGRAM_OPENAI_API_KEY}
+      - ENGRAM_OPENAI_BASE_URL=${ENGRAM_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - ENGRAM_EMBEDDING_MODEL=${ENGRAM_EMBEDDING_MODEL:-text-embedding-3-small}
+      - ENGRAM_EMBEDDING_DIMENSION=${ENGRAM_EMBEDDING_DIMENSION:-1536}
+      - ENGRAM_TRANSPORT=stdio
+    # stdio mode: the container reads/writes JSON-RPC via stdin/stdout.
+    # For direct MCP client usage, run:
+    #   docker compose run --rm engram serve
+    # For integration testing, this just keeps the container definition ready.
+    stdin_open: true
+    restart: "no"
+
+volumes:
+  qdrant_data:

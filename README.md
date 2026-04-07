@@ -17,23 +17,100 @@ Engram provides a vector-based memory system that lets AI agents store, retrieve
 
 ## Quick Start
 
+### Option A: Docker Compose (recommended)
+
 ```bash
-# Prerequisites: Qdrant running locally
-docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+# Clone the repo
+git clone https://github.com/FBISiri/engram.git
+cd engram
 
-# Install
-go install github.com/anthropics/engram/cmd/engram@latest
+# Create .env file
+cat > .env << EOF
+ENGRAM_OPENAI_API_KEY=sk-...
+EOF
 
-# Configure
+# Start Qdrant + build Engram image
+docker-compose up -d qdrant
+
+# Wait for Qdrant to be healthy, then run Engram interactively (MCP stdio)
+docker-compose run --rm engram serve
+```
+
+### Option B: Binary + Docker Qdrant
+
+```bash
+# 1. Start Qdrant
+docker run -d --name engram-qdrant \
+  --security-opt seccomp=unconfined \
+  -p 6333:6333 -p 6334:6334 \
+  -v engram_qdrant_data:/qdrant/storage \
+  qdrant/qdrant:v1.9.7
+
+# 2. Build Engram
+go build -o engram ./cmd/engram/
+
+# 3. Configure
 export ENGRAM_QDRANT_URL=localhost:6334
 export ENGRAM_OPENAI_API_KEY=sk-...
 
-# Run as MCP server (stdio)
-engram serve --transport stdio
-
-# Or as REST API
-engram serve --transport http --port 8080
+# 4. Run as MCP server (stdio)
+./engram serve
 ```
+
+### Option C: Go Install
+
+```bash
+# Prerequisites: Qdrant running on localhost:6334
+go install github.com/anthropics/engram/cmd/engram@latest
+
+export ENGRAM_QDRANT_URL=localhost:6334
+export ENGRAM_OPENAI_API_KEY=sk-...
+
+engram serve
+```
+
+### Using with MCP Clients
+
+Add Engram to your MCP client config (e.g., Claude Desktop, Army of the Agent):
+
+```json
+{
+  "mcpServers": {
+    "engram": {
+      "command": "/path/to/engram",
+      "args": ["serve"],
+      "env": {
+        "ENGRAM_QDRANT_URL": "localhost:6334",
+        "ENGRAM_OPENAI_API_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+
+Or in YAML (Army of the Agent):
+
+```yaml
+mcp_servers:
+  - name: "engram"
+    transport: stdio
+    command: /path/to/engram
+    args: ["serve"]
+    env:
+      ENGRAM_QDRANT_URL: "localhost:6334"
+      ENGRAM_OPENAI_API_KEY: "sk-..."
+```
+
+## Integration Test
+
+Run the full end-to-end integration test against a live Qdrant instance:
+
+```bash
+# Ensure Qdrant is running on localhost:6333/6334
+ENGRAM_OPENAI_API_KEY=sk-... ./integration_test.sh
+```
+
+This tests all 4 MCP tools (search, add, update, delete) including dedup detection.
 
 ## Memory Types
 
@@ -53,11 +130,11 @@ Use **tags** for further classification: `["relationship", "person:Alice"]`, `["
 | Tool | Description |
 |------|-------------|
 | `memory.search` | Semantic search with type/tag/time filters |
-| `memory.add` | Store one or more memories (batch supported) |
+| `memory.add` | Store a memory (auto-deduplicates) |
 | `memory.update` | Find old memories by meaning → replace with new |
 | `memory.delete` | Find memories by meaning → delete |
 
-### REST API
+### REST API (planned)
 
 ```
 POST   /v1/memory/search    Search memories
@@ -87,7 +164,9 @@ All via environment variables:
 | `ENGRAM_QDRANT_URL` | `localhost:6334` | Qdrant gRPC address |
 | `ENGRAM_COLLECTION_NAME` | `engram` | Qdrant collection name |
 | `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `ENGRAM_EMBEDDING_DIMENSION` | `1536` | Embedding vector size |
 | `ENGRAM_OPENAI_API_KEY` | — | OpenAI API key |
+| `ENGRAM_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI API base URL |
 | `ENGRAM_DEDUP_THRESHOLD` | `0.92` | Cosine similarity for dedup |
 | `ENGRAM_TRANSPORT` | `stdio` | Server transport: stdio, http, both |
 | `ENGRAM_HTTP_PORT` | `8080` | REST API port |
@@ -101,12 +180,15 @@ See [full configuration reference](docs/configuration.md) for all options.
 engram/
 ├── cmd/engram/          CLI entry point
 ├── pkg/
-│   ├── memory/          Core types, scoring, dedup
-│   ├── embedding/       Embedder interface + OpenAI
+│   ├── memory/          Core types, scoring, dedup, MMR
+│   ├── embedding/       Embedder interface + OpenAI + Voyage AI
 │   ├── qdrant/          Qdrant Store implementation
-│   ├── server/          MCP + REST servers
+│   ├── server/          MCP server (stdio transport)
 │   ├── reflection/      Optional reflection engine
-│   └── config/          Configuration
+│   └── config/          Configuration from env vars
+├── Dockerfile           Multi-stage build
+├── docker-compose.yml   Engram + Qdrant
+└── integration_test.sh  End-to-end MCP test
 ```
 
 ## Background
