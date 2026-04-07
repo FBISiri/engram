@@ -302,13 +302,13 @@ func callTool(srv *Server, toolName string, args map[string]any) (*mcp.CallToolR
 
 	// Find and call the handler
 	switch toolName {
-	case "memory.search":
+	case "memory_search":
 		return srv.handleSearch(ctx, request)
-	case "memory.add":
+	case "memory_add":
 		return srv.handleAdd(ctx, request)
-	case "memory.update":
+	case "memory_update":
 		return srv.handleUpdate(ctx, request)
-	case "memory.delete":
+	case "memory_delete":
 		return srv.handleDelete(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", toolName)
@@ -335,7 +335,7 @@ func extractText(result *mcp.CallToolResult) string {
 func TestAddMemory(t *testing.T) {
 	srv, store := newTestServer()
 
-	result, err := callTool(srv, "memory.add", map[string]any{
+	result, err := callTool(srv, "memory_add", map[string]any{
 		"content":    "User's name is Frank",
 		"type":       "identity",
 		"importance": float64(9),
@@ -379,7 +379,7 @@ func TestAddMemory(t *testing.T) {
 func TestAddMemoryDefaults(t *testing.T) {
 	srv, _ := newTestServer()
 
-	result, err := callTool(srv, "memory.add", map[string]any{
+	result, err := callTool(srv, "memory_add", map[string]any{
 		"content": "Something happened",
 	})
 	if err != nil {
@@ -409,7 +409,7 @@ func TestAddMemoryDefaults(t *testing.T) {
 func TestAddMemoryMissingContent(t *testing.T) {
 	srv, _ := newTestServer()
 
-	result, err := callTool(srv, "memory.add", map[string]any{})
+	result, err := callTool(srv, "memory_add", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestAddMemoryDedup(t *testing.T) {
 	srv, _ := newTestServer()
 
 	// Add first memory
-	_, err := callTool(srv, "memory.add", map[string]any{
+	_, err := callTool(srv, "memory_add", map[string]any{
 		"content": "User's name is Frank",
 	})
 	if err != nil {
@@ -431,7 +431,7 @@ func TestAddMemoryDedup(t *testing.T) {
 	}
 
 	// Add exact same content — should be detected as duplicate
-	result, err := callTool(srv, "memory.add", map[string]any{
+	result, err := callTool(srv, "memory_add", map[string]any{
 		"content": "User's name is Frank",
 	})
 	if err != nil {
@@ -461,14 +461,14 @@ func TestSearchMemory(t *testing.T) {
 		{"content": "Discussed trip planning to Japan", "type": "event", "importance": float64(5)},
 	}
 	for _, m := range memories {
-		_, err := callTool(srv, "memory.add", m)
+		_, err := callTool(srv, "memory_add", m)
 		if err != nil {
 			t.Fatalf("add failed: %v", err)
 		}
 	}
 
 	// Search
-	result, err := callTool(srv, "memory.search", map[string]any{
+	result, err := callTool(srv, "memory_search", map[string]any{
 		"query": "user name",
 		"limit": float64(5),
 	})
@@ -508,17 +508,17 @@ func TestSearchWithTypeFilter(t *testing.T) {
 	srv, _ := newTestServer()
 
 	// Add memories of different types
-	callTool(srv, "memory.add", map[string]any{
+	callTool(srv, "memory_add", map[string]any{
 		"content": "User lives in Shanghai",
 		"type":    "identity",
 	})
-	callTool(srv, "memory.add", map[string]any{
+	callTool(srv, "memory_add", map[string]any{
 		"content": "Went to Shanghai for a trip",
 		"type":    "event",
 	})
 
 	// Search only for identity type
-	result, err := callTool(srv, "memory.search", map[string]any{
+	result, err := callTool(srv, "memory_search", map[string]any{
 		"query": "Shanghai",
 		"types": []interface{}{"identity"},
 	})
@@ -540,7 +540,7 @@ func TestSearchWithTypeFilter(t *testing.T) {
 func TestSearchMissingQuery(t *testing.T) {
 	srv, _ := newTestServer()
 
-	result, err := callTool(srv, "memory.search", map[string]any{})
+	result, err := callTool(srv, "memory_search", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestUpdateMemory(t *testing.T) {
 	srv, store := newTestServer()
 
 	// Add initial memory
-	_, err := callTool(srv, "memory.add", map[string]any{
+	_, err := callTool(srv, "memory_add", map[string]any{
 		"content":    "User lives in Beijing",
 		"type":       "identity",
 		"importance": float64(8),
@@ -567,7 +567,7 @@ func TestUpdateMemory(t *testing.T) {
 	}
 
 	// Update: move from Beijing to Shanghai
-	result, err := callTool(srv, "memory.update", map[string]any{
+	result, err := callTool(srv, "memory_update", map[string]any{
 		"old_content":          "User lives in Beijing",
 		"new_content":          "User lives in Shanghai",
 		"type":                 "identity",
@@ -615,7 +615,7 @@ func TestDeleteMemory(t *testing.T) {
 	// The issue is our mock embedder generates similar vectors for similar content.
 	// Instead, just add one memory and delete it.
 
-	result1, err := callTool(srv, "memory.add", map[string]any{
+	result1, err := callTool(srv, "memory_add", map[string]any{
 		"content":    "User prefers drinking espresso every morning at 7am",
 		"type":       "identity",
 		"importance": float64(7),
@@ -633,7 +633,7 @@ func TestDeleteMemory(t *testing.T) {
 	}
 
 	// Delete it
-	result, err := callTool(srv, "memory.delete", map[string]any{
+	result, err := callTool(srv, "memory_delete", map[string]any{
 		"query":                "espresso coffee morning drink preference",
 		"similarity_threshold": float64(0.3),
 		"limit":                float64(10),
@@ -670,7 +670,7 @@ func TestDeleteNoMatches(t *testing.T) {
 	srv, _ := newTestServer()
 
 	// Delete from empty store
-	result, err := callTool(srv, "memory.delete", map[string]any{
+	result, err := callTool(srv, "memory_delete", map[string]any{
 		"query": "something that doesn't exist",
 	})
 	if err != nil {
@@ -703,7 +703,7 @@ func TestGetMCPServer(t *testing.T) {
 func TestInvalidMemoryType(t *testing.T) {
 	srv, _ := newTestServer()
 
-	result, err := callTool(srv, "memory.add", map[string]any{
+	result, err := callTool(srv, "memory_add", map[string]any{
 		"content": "test",
 		"type":    "invalid_type",
 	})
@@ -723,7 +723,7 @@ func TestImportanceClamping(t *testing.T) {
 	srv, _ := newTestServer()
 
 	// Test importance > 10 gets clamped
-	result, err := callTool(srv, "memory.add", map[string]any{
+	result, err := callTool(srv, "memory_add", map[string]any{
 		"content":    "test clamping",
 		"importance": float64(15),
 	})

@@ -59,8 +59,8 @@ func (s *Server) ServeStdio() error {
 
 // registerTools adds all 4 memory tools to the MCP server.
 func (s *Server) registerTools() {
-	// Tool 1: memory.search
-	searchTool := mcp.NewTool("memory.search",
+	// Tool 1: memory_search
+	searchTool := mcp.NewTool("memory_search",
 		mcp.WithDescription("Semantic search over stored memories. Returns scored results combining relevance, recency, and importance."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query text for semantic similarity matching.")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of results to return. Default: 5.")),
@@ -71,8 +71,8 @@ func (s *Server) registerTools() {
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
-	// Tool 2: memory.add
-	addTool := mcp.NewTool("memory.add",
+	// Tool 2: memory_add
+	addTool := mcp.NewTool("memory_add",
 		mcp.WithDescription("Store a new memory. Automatically deduplicates against existing memories."),
 		mcp.WithString("content", mcp.Required(), mcp.Description("The memory content text.")),
 		mcp.WithString("type", mcp.Description("Memory type."), mcp.Enum("identity", "event", "insight", "directive")),
@@ -82,8 +82,8 @@ func (s *Server) registerTools() {
 	)
 	s.mcpServer.AddTool(addTool, s.handleAdd)
 
-	// Tool 3: memory.update
-	updateTool := mcp.NewTool("memory.update",
+	// Tool 3: memory_update
+	updateTool := mcp.NewTool("memory_update",
 		mcp.WithDescription("Update memories by semantic search. Finds old memories matching old_content, deletes them, and stores new_content."),
 		mcp.WithString("old_content", mcp.Required(), mcp.Description("Search query to find old memories to replace.")),
 		mcp.WithString("new_content", mcp.Required(), mcp.Description("New memory content to store.")),
@@ -94,8 +94,8 @@ func (s *Server) registerTools() {
 	)
 	s.mcpServer.AddTool(updateTool, s.handleUpdate)
 
-	// Tool 4: memory.delete
-	deleteTool := mcp.NewTool("memory.delete",
+	// Tool 4: memory_delete
+	deleteTool := mcp.NewTool("memory_delete",
 		mcp.WithDescription("Delete memories by semantic search. Finds memories matching the query above the similarity threshold and removes them."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query to find memories to delete.")),
 		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum cosine similarity for deletion. Default: 0.7.")),
