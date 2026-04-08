@@ -33,15 +33,19 @@ var ValidTypes = map[MemoryType]bool{
 
 // Memory is a single unit of stored knowledge.
 type Memory struct {
-	ID         string         `json:"id"`
-	Type       MemoryType     `json:"type"`
-	Content    string         `json:"content"`
-	Source     string         `json:"source"`     // "user", "agent", "system"
-	Importance float64        `json:"importance"`  // 1-10
-	Tags       []string       `json:"tags"`
-	CreatedAt  float64        `json:"created_at"`  // UTC Unix timestamp
-	UpdatedAt  float64        `json:"updated_at"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	ID             string         `json:"id"`
+	Type           MemoryType     `json:"type"`
+	Content        string         `json:"content"`
+	Source         string         `json:"source"`              // "user", "agent", "system"
+	Importance     float64        `json:"importance"`           // 1-10
+	Tags           []string       `json:"tags"`
+	CreatedAt      float64        `json:"created_at"`           // UTC Unix timestamp
+	UpdatedAt      float64        `json:"updated_at"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	ValidUntil     float64        `json:"valid_until,omitempty"`      // 0 = never expires
+	SupersededBy   string         `json:"superseded_by,omitempty"`    // "" = not superseded
+	AccessCount    int64          `json:"access_count"`               // search hit count
+	LastAccessedAt float64        `json:"last_accessed_at,omitempty"` // 0 = never accessed
 }
 
 // New creates a new Memory with defaults.
@@ -67,11 +71,12 @@ func New(content string, opts ...Option) *Memory {
 // Option configures a Memory during creation.
 type Option func(*Memory)
 
-func WithType(t MemoryType) Option      { return func(m *Memory) { m.Type = t } }
-func WithSource(s string) Option        { return func(m *Memory) { m.Source = s } }
-func WithImportance(i float64) Option   { return func(m *Memory) { m.Importance = i } }
-func WithTags(tags ...string) Option    { return func(m *Memory) { m.Tags = tags } }
+func WithType(t MemoryType) Option          { return func(m *Memory) { m.Type = t } }
+func WithSource(s string) Option            { return func(m *Memory) { m.Source = s } }
+func WithImportance(i float64) Option       { return func(m *Memory) { m.Importance = i } }
+func WithTags(tags ...string) Option        { return func(m *Memory) { m.Tags = tags } }
 func WithMetadata(md map[string]any) Option { return func(m *Memory) { m.Metadata = md } }
+func WithValidUntil(t float64) Option       { return func(m *Memory) { m.ValidUntil = t } }
 
 // Validate checks that a Memory has valid fields.
 func (m *Memory) Validate() error {

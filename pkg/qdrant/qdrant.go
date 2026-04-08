@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/qdrant/go-client/qdrant"
 
@@ -80,40 +81,42 @@ func (s *Store) Close() error {
 
 // payloadFields defines the payload field names stored alongside each point.
 const (
-	fieldID         = "id"
-	fieldType       = "type"
-	fieldContent    = "content"
-	fieldSource     = "source"
-	fieldImportance = "importance"
-	fieldTags       = "tags"
-	fieldCreatedAt  = "created_at"
-	fieldUpdatedAt  = "updated_at"
-	fieldMetadata   = "metadata"
+	fieldID            = "id"
+	fieldType          = "type"
+	fieldContent       = "content"
+	fieldSource        = "source"
+	fieldImportance    = "importance"
+	fieldTags          = "tags"
+	fieldCreatedAt     = "created_at"
+	fieldUpdatedAt     = "updated_at"
+	fieldMetadata      = "metadata"
+	fieldValidUntil    = "valid_until"
+	fieldSupersededBy  = "superseded_by"
+	fieldAccessCount   = "access_count"
+	fieldLastAccessedAt = "last_accessed_at"
 )
 
-// EnsureCollection creates the collection and payload indexes if they don't exist.
+// EnsureCollection creates the collection if it doesn't exist, and idempotently
+// creates all payload indexes (safe to call on existing collections).
 func (s *Store) EnsureCollection(ctx context.Context) error {
 	exists, err := s.client.CollectionExists(ctx, s.collection)
 	if err != nil {
 		return fmt.Errorf("qdrant: check collection: %w", err)
 	}
-	if exists {
-		return nil
+	if !exists {
+		err = s.client.CreateCollection(ctx, &qdrant.CreateCollection{
+			CollectionName: s.collection,
+			VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+				Size:     s.dimension,
+				Distance: qdrant.Distance_Cosine,
+			}),
+		})
+		if err != nil {
+			return fmt.Errorf("qdrant: create collection: %w", err)
+		}
 	}
 
-	// Create collection with cosine distance.
-	err = s.client.CreateCollection(ctx, &qdrant.CreateCollection{
-		CollectionName: s.collection,
-		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
-			Size:     s.dimension,
-			Distance: qdrant.Distance_Cosine,
-		}),
-	})
-	if err != nil {
-		return fmt.Errorf("qdrant: create collection: %w", err)
-	}
-
-	// Create payload indexes for fields we filter on.
+	// Idempotently create all payload indexes; ignore errors for already-existing ones.
 	indexes := []struct {
 		field     string
 		fieldType qdrant.FieldType
@@ -123,17 +126,17 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldTags, qdrant.FieldType_FieldTypeKeyword},
 		{fieldCreatedAt, qdrant.FieldType_FieldTypeFloat},
 		{fieldImportance, qdrant.FieldType_FieldTypeFloat},
+		{fieldValidUntil, qdrant.FieldType_FieldTypeFloat},
+		{fieldAccessCount, qdrant.FieldType_FieldTypeInteger},
+		{fieldLastAccessedAt, qdrant.FieldType_FieldTypeFloat},
 	}
 
 	for _, idx := range indexes {
-		_, err := s.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
+		_, _ = s.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
 			CollectionName: s.collection,
 			FieldName:      idx.field,
 			FieldType:      qdrant.PtrOf(idx.fieldType),
 		})
-		if err != nil {
-			return fmt.Errorf("qdrant: create index %s: %w", idx.field, err)
-		}
 	}
 
 	return nil
@@ -155,13 +158,35 @@ func (s *Store) Insert(ctx context.Context, mem *memory.Memory, vector []float32
 
 // Search returns scored memories matching the query vector.
 // Results are ordered by raw cosine similarity (descending).
+// Expired (valid_until > 0 && valid_until < now) and superseded memories are always excluded.
 func (s *Store) Search(ctx context.Context, vector []float32, opts memory.SearchOptions) ([]memory.ScoredMemory, error) {
 	limit := uint64(opts.Limit)
 	if limit == 0 {
 		limit = 10
 	}
 
-	filter := buildFilter(opts.Filters)
+	// Combine user filters (Must) with system filters.
+	userFilter := buildFilter(opts.Filters)
+	var mustConds []*qdrant.Condition
+	if userFilter != nil {
+		mustConds = append(mustConds, userFilter.Must...)
+	}
+	// Exclude superseded memories (superseded_by field is absent for valid memories).
+	mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	// Exclude expired memories: MustNot (valid_until > 0 AND valid_until < now).
+	now := float64(time.Now().Unix())
+	mustNotConds := []*qdrant.Condition{
+		qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
+			},
+		}),
+	}
+	filter := &qdrant.Filter{
+		Must:    mustConds,
+		MustNot: mustNotConds,
+	}
 
 	results, err := s.client.Query(ctx, &qdrant.QueryPoints{
 		CollectionName: s.collection,
@@ -392,17 +417,27 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 	}
 
 	payload := map[string]any{
-		fieldID:         mem.ID,
-		fieldType:       string(mem.Type),
-		fieldContent:    mem.Content,
-		fieldSource:     mem.Source,
-		fieldImportance: mem.Importance,
-		fieldTags:       tags,
-		fieldCreatedAt:  mem.CreatedAt,
-		fieldUpdatedAt:  mem.UpdatedAt,
+		fieldID:          mem.ID,
+		fieldType:        string(mem.Type),
+		fieldContent:     mem.Content,
+		fieldSource:      mem.Source,
+		fieldImportance:  mem.Importance,
+		fieldTags:        tags,
+		fieldCreatedAt:   mem.CreatedAt,
+		fieldUpdatedAt:   mem.UpdatedAt,
+		fieldAccessCount: mem.AccessCount,
 	}
 	if len(mem.Metadata) > 0 {
 		payload[fieldMetadata] = mem.Metadata
+	}
+	if mem.ValidUntil > 0 {
+		payload[fieldValidUntil] = mem.ValidUntil
+	}
+	if mem.SupersededBy != "" {
+		payload[fieldSupersededBy] = mem.SupersededBy
+	}
+	if mem.LastAccessedAt > 0 {
+		payload[fieldLastAccessedAt] = mem.LastAccessedAt
 	}
 
 	return &qdrant.PointStruct{
@@ -431,6 +466,18 @@ func pointToMemory(id *qdrant.PointId, payload map[string]*qdrant.Value) *memory
 	}
 	if v, ok := payload[fieldUpdatedAt]; ok {
 		mem.UpdatedAt = v.GetDoubleValue()
+	}
+	if v, ok := payload[fieldValidUntil]; ok {
+		mem.ValidUntil = v.GetDoubleValue()
+	}
+	if v, ok := payload[fieldSupersededBy]; ok {
+		mem.SupersededBy = v.GetStringValue()
+	}
+	if v, ok := payload[fieldAccessCount]; ok {
+		mem.AccessCount = v.GetIntegerValue()
+	}
+	if v, ok := payload[fieldLastAccessedAt]; ok {
+		mem.LastAccessedAt = v.GetDoubleValue()
 	}
 
 	return mem

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -79,6 +80,7 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("importance", mcp.Description("Importance score from 1-10. Default: 5.")),
 		mcp.WithArray("tags", mcp.Description("Tags for classification."), mcp.WithStringItems()),
 		mcp.WithString("source", mcp.Description("Source of the memory: user, agent, or system. Default: agent.")),
+		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = never expires.")),
 	)
 	s.mcpServer.AddTool(addTool, s.handleAdd)
 
@@ -202,6 +204,23 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		results = results[:limit]
 	}
 
+	// Async update access_count and last_accessed_at for returned memories.
+	if len(results) > 0 {
+		toUpdate := make([]string, len(results))
+		for i, r := range results {
+			toUpdate[i] = r.ID
+		}
+		go func() {
+			now := float64(time.Now().Unix())
+			for i, id := range toUpdate {
+				_ = s.store.Update(context.Background(), id, map[string]any{
+					"access_count":     results[i].AccessCount + 1,
+					"last_accessed_at": now,
+				})
+			}
+		}()
+	}
+
 	// Format output
 	type searchResult struct {
 		ID         string         `json:"id"`
@@ -260,14 +279,19 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 
 	source := request.GetString("source", "agent")
 	tags := getStringSlice(request, "tags")
+	validUntil := request.GetFloat("valid_until", 0)
 
 	// Create the memory
-	mem := memory.New(content,
+	opts := []memory.Option{
 		memory.WithType(memType),
 		memory.WithImportance(importance),
 		memory.WithSource(source),
 		memory.WithTags(tags...),
-	)
+	}
+	if validUntil > 0 {
+		opts = append(opts, memory.WithValidUntil(validUntil))
+	}
+	mem := memory.New(content, opts...)
 
 	// Embed content
 	vec, err := s.embedder.Embed(ctx, content)
