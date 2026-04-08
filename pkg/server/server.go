@@ -93,6 +93,7 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("importance", mcp.Description("Importance score for the new memory (1-10). Default: 5.")),
 		mcp.WithArray("tags", mcp.Description("Tags for the new memory."), mcp.WithStringItems()),
 		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum cosine similarity for deletion. Default: 0.7.")),
+		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = inherit from old memory.")),
 	)
 	s.mcpServer.AddTool(updateTool, s.handleUpdate)
 
@@ -223,29 +224,37 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Format output
 	type searchResult struct {
-		ID         string         `json:"id"`
-		Type       string         `json:"type"`
-		Content    string         `json:"content"`
-		Source     string         `json:"source"`
-		Importance float64        `json:"importance"`
-		Tags       []string       `json:"tags"`
-		CreatedAt  float64        `json:"created_at"`
-		Score      float64        `json:"score"`
-		Metadata   map[string]any `json:"metadata,omitempty"`
+		ID             string         `json:"id"`
+		Type           string         `json:"type"`
+		Content        string         `json:"content"`
+		Source         string         `json:"source"`
+		Importance     float64        `json:"importance"`
+		Tags           []string       `json:"tags"`
+		CreatedAt      float64        `json:"created_at"`
+		UpdatedAt      float64        `json:"updated_at"`
+		Score          float64        `json:"score"`
+		ValidUntil     float64        `json:"valid_until,omitempty"`
+		AccessCount    int64          `json:"access_count"`
+		LastAccessedAt float64        `json:"last_accessed_at,omitempty"`
+		Metadata       map[string]any `json:"metadata,omitempty"`
 	}
 
 	output := make([]searchResult, len(results))
 	for i, r := range results {
 		output[i] = searchResult{
-			ID:         r.ID,
-			Type:       string(r.Type),
-			Content:    r.Content,
-			Source:     r.Source,
-			Importance: r.Importance,
-			Tags:       r.Tags,
-			CreatedAt:  r.CreatedAt,
-			Score:      r.Score,
-			Metadata:   r.Metadata,
+			ID:             r.ID,
+			Type:           string(r.Type),
+			Content:        r.Content,
+			Source:         r.Source,
+			Importance:     r.Importance,
+			Tags:           r.Tags,
+			CreatedAt:      r.CreatedAt,
+			UpdatedAt:      r.UpdatedAt,
+			Score:          r.Score,
+			ValidUntil:     r.ValidUntil,
+			AccessCount:    r.AccessCount,
+			LastAccessedAt: r.LastAccessedAt,
+			Metadata:       r.Metadata,
 		}
 	}
 
@@ -369,6 +378,7 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		importance = 10
 	}
 	tags := getStringSlice(request, "tags")
+	validUntil := request.GetFloat("valid_until", 0)
 
 	// Step 1: Embed old_content and find matching memories
 	oldVec, err := s.embedder.Embed(ctx, oldContent)
@@ -403,11 +413,19 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	// Step 3: Create new memory
-	mem := memory.New(newContent,
+	// Inherit valid_until from old memory if user didn't explicitly set a new value
+	if validUntil == 0 && len(deletedMemories) > 0 {
+		validUntil = deletedMemories[0].ValidUntil
+	}
+	opts := []memory.Option{
 		memory.WithType(memType),
 		memory.WithImportance(importance),
 		memory.WithTags(tags...),
-	)
+	}
+	if validUntil > 0 {
+		opts = append(opts, memory.WithValidUntil(validUntil))
+	}
+	mem := memory.New(newContent, opts...)
 
 	newVec, err := s.embedder.Embed(ctx, newContent)
 	if err != nil {
@@ -420,16 +438,18 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Format deleted items for response
 	type deletedItem struct {
-		ID      string  `json:"id"`
-		Content string  `json:"content"`
-		Score   float64 `json:"score"`
+		ID         string  `json:"id"`
+		Content    string  `json:"content"`
+		Score      float64 `json:"score"`
+		ValidUntil float64 `json:"valid_until,omitempty"`
 	}
 	deleted := make([]deletedItem, len(deletedMemories))
 	for i, d := range deletedMemories {
 		deleted[i] = deletedItem{
-			ID:      d.ID,
-			Content: d.Content,
-			Score:   d.Score,
+			ID:         d.ID,
+			Content:    d.Content,
+			Score:      d.Score,
+			ValidUntil: d.ValidUntil,
 		}
 	}
 
@@ -481,9 +501,10 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	// Filter by similarity threshold
 	var toDelete []string
 	type deletedItem struct {
-		ID      string  `json:"id"`
-		Content string  `json:"content"`
-		Score   float64 `json:"score"`
+		ID         string  `json:"id"`
+		Content    string  `json:"content"`
+		Score      float64 `json:"score"`
+		ValidUntil float64 `json:"valid_until,omitempty"`
 	}
 	var deletedItems []deletedItem
 
@@ -491,9 +512,10 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 		if r.Score >= threshold {
 			toDelete = append(toDelete, r.ID)
 			deletedItems = append(deletedItems, deletedItem{
-				ID:      r.ID,
-				Content: r.Content,
-				Score:   r.Score,
+				ID:         r.ID,
+				Content:    r.Content,
+				Score:      r.Score,
+				ValidUntil: r.ValidUntil,
 			})
 		}
 	}
