@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.47.0
 	github.com/qdrant/go-client v1.17.1
+	go.etcd.io/bbolt v1.4.3
 )
 
 require (

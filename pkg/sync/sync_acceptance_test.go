@@ -14,12 +14,13 @@ package sync_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	engram_sync "github.com/FBISiri/engram/pkg/sync"
 	"github.com/FBISiri/engram/pkg/memory"
+	engram_sync "github.com/FBISiri/engram/pkg/sync"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -329,37 +330,156 @@ func TestWriteThrough_SurvivesRestart(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test helpers (stubs — to be replaced by real implementations)
+// Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// closeable allows test helpers to close a WriteThroughStore that implements Close().
+type closeable interface {
+	Close() error
+}
+
+// prevStores tracks open stores by bolt path so we can close them before reopening.
+var prevStores = map[string]closeable{}
+
+// mockStore is a simple in-memory implementation of memory.Store for testing.
+type mockStore struct {
+	mu       sync.Mutex
+	memories map[string]storedPoint
+}
+
+type storedPoint struct {
+	mem    memory.Memory
+	vector []float32
+}
+
+func newMockStore() *mockStore {
+	return &mockStore{memories: make(map[string]storedPoint)}
+}
+
+func (s *mockStore) Insert(_ context.Context, mem *memory.Memory, vector []float32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.memories[mem.ID] = storedPoint{mem: *mem, vector: vector}
+	return nil
+}
+
+func (s *mockStore) Search(_ context.Context, _ []float32, _ memory.SearchOptions) ([]memory.ScoredMemory, error) {
+	return nil, nil
+}
+
+func (s *mockStore) Delete(_ context.Context, ids []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, id := range ids {
+		if _, ok := s.memories[id]; ok {
+			delete(s.memories, id)
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (s *mockStore) Update(_ context.Context, id string, fields map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.memories[id]; !ok {
+		return fmt.Errorf("not found: %s", id)
+	}
+	return nil
+}
+
+func (s *mockStore) SearchByIDs(_ context.Context, ids []string) ([]memory.Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []memory.Memory
+	for _, id := range ids {
+		if sp, ok := s.memories[id]; ok {
+			result = append(result, sp.mem)
+		}
+	}
+	return result, nil
+}
+
+func (s *mockStore) EnsureCollection(_ context.Context) error { return nil }
+func (s *mockStore) Stats(_ context.Context) (*memory.CollectionStats, error) {
+	return &memory.CollectionStats{}, nil
+}
+
+// failingLog is a CommitLog that always returns an error on Append.
+type failingLog struct{}
+
+func (f *failingLog) Append(_ context.Context, _ engram_sync.CommitEntry) error {
+	return fmt.Errorf("simulated commit log failure")
+}
+func (f *failingLog) ReadSince(_ context.Context, _ float64) ([]engram_sync.CommitEntry, error) {
+	return nil, nil
+}
+func (f *failingLog) Truncate(_ context.Context, _ float64) error { return nil }
+func (f *failingLog) Close() error                                { return nil }
+
+// cleanupStore registers a t.Cleanup to close the store's goroutine and bolt file.
+func cleanupStore(t *testing.T, store engram_sync.WriteThroughStore) {
+	t.Helper()
+	if c, ok := store.(closeable); ok {
+		t.Cleanup(func() { c.Close() })
+	}
+}
 
 // newTestStore creates a WriteThroughStore with default config and in-memory backends.
 func newTestStore(t *testing.T) (engram_sync.WriteThroughStore, engram_sync.CommitLog) {
 	t.Helper()
-	// Implementation: use in-memory Qdrant mock + in-memory BoltDB
-	// TODO: BMO to provide concrete constructor: sync.NewWriteThrough(store, boltPath, config)
-	t.Skip("requires concrete WriteThroughStore implementation by BMO")
-	return nil, nil
+	boltPath := t.TempDir() + "/test.bolt"
+	store, log, err := engram_sync.NewWriteThrough(newMockStore(), boltPath, engram_sync.DefaultRingBufferConfig())
+	if err != nil {
+		t.Fatalf("NewWriteThrough: %v", err)
+	}
+	cleanupStore(t, store)
+	return store, log
 }
 
 // newTestStoreWithFailingLog creates a store backed by a CommitLog that always fails.
 func newTestStoreWithFailingLog(t *testing.T) (engram_sync.WriteThroughStore, engram_sync.CommitLog) {
 	t.Helper()
-	t.Skip("requires concrete WriteThroughStore implementation by BMO")
-	return nil, nil
+	fl := &failingLog{}
+	store := engram_sync.NewWriteThroughWithLog(newMockStore(), fl, engram_sync.DefaultRingBufferConfig())
+	cleanupStore(t, store)
+	return store, fl
 }
 
 // newTestStoreWithConfig creates a store with a custom RingBufferConfig.
 func newTestStoreWithConfig(t *testing.T, cfg engram_sync.RingBufferConfig) (engram_sync.WriteThroughStore, engram_sync.CommitLog) {
 	t.Helper()
-	t.Skip("requires concrete WriteThroughStore implementation by BMO")
-	return nil, nil
+	boltPath := t.TempDir() + "/test.bolt"
+	store, log, err := engram_sync.NewWriteThrough(newMockStore(), boltPath, cfg)
+	if err != nil {
+		t.Fatalf("NewWriteThrough: %v", err)
+	}
+	cleanupStore(t, store)
+	return store, log
 }
 
 // newTestStoreAtPath creates a store backed by a BoltDB at the given path.
+// It closes any previous store opened at the same path (simulates OS releasing
+// file locks on crash).
 func newTestStoreAtPath(t *testing.T, path string) (engram_sync.WriteThroughStore, engram_sync.CommitLog) {
 	t.Helper()
-	t.Skip("requires concrete WriteThroughStore implementation by BMO")
-	return nil, nil
+	if prev, ok := prevStores[path]; ok {
+		prev.Close()
+		delete(prevStores, path)
+	}
+	store, log, err := engram_sync.NewWriteThrough(newMockStore(), path, engram_sync.DefaultRingBufferConfig())
+	if err != nil {
+		t.Fatalf("NewWriteThrough: %v", err)
+	}
+	if c, ok := store.(closeable); ok {
+		prevStores[path] = c
+		t.Cleanup(func() {
+			c.Close()
+			delete(prevStores, path)
+		})
+	}
+	return store, log
 }
 
 // fakeVector returns a zero-vector of the given dimension.
