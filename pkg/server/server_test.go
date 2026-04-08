@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/engram/pkg/config"
-	"github.com/anthropics/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/config"
+	"github.com/FBISiri/engram/pkg/memory"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 

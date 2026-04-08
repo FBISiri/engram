@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/anthropics/engram/pkg/config"
-	"github.com/anthropics/engram/pkg/embedding"
-	"github.com/anthropics/engram/pkg/qdrant"
-	"github.com/anthropics/engram/pkg/server"
+	"github.com/FBISiri/engram/pkg/config"
+	"github.com/FBISiri/engram/pkg/embedding"
+	"github.com/FBISiri/engram/pkg/qdrant"
+	"github.com/FBISiri/engram/pkg/server"
 )
 
 func main() {

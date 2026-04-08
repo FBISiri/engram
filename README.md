@@ -61,7 +61,7 @@ export ENGRAM_OPENAI_API_KEY=sk-...
 
 ```bash
 # Prerequisites: Qdrant running on localhost:6334
-go install github.com/anthropics/engram/cmd/engram@latest
+go install github.com/FBISiri/engram/cmd/engram@latest
 
 export ENGRAM_QDRANT_URL=localhost:6334
 export ENGRAM_OPENAI_API_KEY=sk-...
@@ -129,10 +129,10 @@ Use **tags** for further classification: `["relationship", "person:Alice"]`, `["
 
 | Tool | Description |
 |------|-------------|
-| `memory.search` | Semantic search with type/tag/time filters |
-| `memory.add` | Store a memory (auto-deduplicates) |
-| `memory.update` | Find old memories by meaning → replace with new |
-| `memory.delete` | Find memories by meaning → delete |
+| `memory_search` | Semantic search with type/tag/time filters |
+| `memory_add` | Store a memory (auto-deduplicates) |
+| `memory_update` | Find old memories by meaning → replace with new |
+| `memory_delete` | Find memories by meaning → delete |
 
 ### REST API (planned)
 
@@ -195,7 +195,7 @@ engram/
 
 Engram (noun): *The hypothetical physical or biochemical change in neural tissue that represents a memory.* — from neuroscience.
 
-This project was born from operating [chat2mem](https://github.com/anthropics/chat2mem) (a Python MCP memory server) in production for months. Engram is a ground-up redesign in Go, informed by real-world agent memory usage patterns and research from systems like Graphiti, Hindsight, MemOS, and Mem0.
+This project was born from operating [chat2mem](https://github.com/FBISiri/chat2mem) (a Python MCP memory server) in production for months. Engram is a ground-up redesign in Go, informed by real-world agent memory usage patterns and research from systems like Graphiti, Hindsight, MemOS, and Mem0.
 
 ## License
 

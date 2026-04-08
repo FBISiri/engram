@@ -1,4 +1,4 @@
-module github.com/anthropics/engram
+module github.com/FBISiri/engram
 
 go 1.24.0
 

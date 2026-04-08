@@ -10,9 +10,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
-	"github.com/anthropics/engram/pkg/config"
-	"github.com/anthropics/engram/pkg/embedding"
-	"github.com/anthropics/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/config"
+	"github.com/FBISiri/engram/pkg/embedding"
+	"github.com/FBISiri/engram/pkg/memory"
 )
 
 // Server wraps the MCP server with Engram's memory operations.
