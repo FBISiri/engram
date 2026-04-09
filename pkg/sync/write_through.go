@@ -158,6 +158,10 @@ func (w *writeThroughStore) Search(ctx context.Context, vector []float32, opts m
 	return w.store.Search(ctx, vector, opts)
 }
 
+func (w *writeThroughStore) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]memory.Memory, string, error) {
+	return w.store.Scroll(ctx, opts)
+}
+
 func (w *writeThroughStore) SearchByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
 	return w.store.SearchByIDs(ctx, ids)
 }

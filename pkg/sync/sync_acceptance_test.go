@@ -367,6 +367,10 @@ func (s *mockStore) Search(_ context.Context, _ []float32, _ memory.SearchOption
 	return nil, nil
 }
 
+func (s *mockStore) Scroll(_ context.Context, _ memory.ScrollOptions) ([]memory.Memory, string, error) {
+	return nil, "", nil
+}
+
 func (s *mockStore) Delete(_ context.Context, ids []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

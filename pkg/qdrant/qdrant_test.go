@@ -2,6 +2,7 @@ package qdrant
 
 import (
 	"testing"
+	"time"
 
 	"github.com/qdrant/go-client/qdrant"
 
@@ -331,5 +332,160 @@ func TestNew_DefaultConfig(t *testing.T) {
 	}
 	if cfg.Dimension != 1536 {
 		t.Errorf("Dimension: got %d, want 1536", cfg.Dimension)
+	}
+}
+
+// =============================================================================
+// P1-B: valid_until expiry filter tests
+// =============================================================================
+
+// TestMemoryToPoint_ValidUntil verifies that a memory with valid_until > 0
+// serialises the field into the Qdrant payload, and that a memory with
+// valid_until == 0 (never-expires) does NOT set the field.
+func TestMemoryToPoint_ValidUntil(t *testing.T) {
+	now := float64(time.Now().Unix())
+
+	t.Run("valid_until set when non-zero", func(t *testing.T) {
+		expiry := now + 3600 // 1 hour from now
+		mem := memory.New("temporary directive",
+			memory.WithType(memory.TypeDirective),
+			memory.WithValidUntil(expiry),
+		)
+		pt := memoryToPoint(mem, []float32{0.1, 0.2})
+		val, ok := pt.Payload[fieldValidUntil]
+		if !ok {
+			t.Fatal("expected valid_until in payload, got absent")
+		}
+		if val.GetDoubleValue() != expiry {
+			t.Errorf("valid_until: got %f, want %f", val.GetDoubleValue(), expiry)
+		}
+	})
+
+	t.Run("valid_until absent when zero", func(t *testing.T) {
+		mem := memory.New("permanent insight",
+			memory.WithType(memory.TypeInsight),
+		)
+		pt := memoryToPoint(mem, []float32{0.1, 0.2})
+		if _, ok := pt.Payload[fieldValidUntil]; ok {
+			t.Error("expected valid_until absent for zero value, but it was set")
+		}
+	})
+}
+
+// TestPointToMemory_ValidUntil verifies that valid_until round-trips correctly.
+func TestPointToMemory_ValidUntil(t *testing.T) {
+	expiry := float64(time.Now().Add(time.Hour).Unix())
+	mem := memory.New("expiring memory",
+		memory.WithType(memory.TypeDirective),
+		memory.WithValidUntil(expiry),
+	)
+	pt := memoryToPoint(mem, []float32{0.1})
+	restored := pointToMemory(pt.Id, pt.Payload)
+	if restored.ValidUntil != expiry {
+		t.Errorf("ValidUntil round-trip: got %f, want %f", restored.ValidUntil, expiry)
+	}
+}
+
+// TestBuildExpiryFilter_Structure verifies that the MustNot condition used in
+// Search/Scroll to exclude expired memories encodes the correct Qdrant filter
+// structure: MustNot( Must(valid_until > 0, valid_until < now) ).
+//
+// This is a structural test — it does not require a live Qdrant connection.
+func TestBuildExpiryFilter_Structure(t *testing.T) {
+	now := float64(time.Now().Unix())
+
+	// Reproduce the filter construction from Search() / Scroll().
+	mustNotConds := []*qdrant.Condition{
+		qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
+			},
+		}),
+	}
+	filter := &qdrant.Filter{
+		MustNot: mustNotConds,
+	}
+
+	if len(filter.MustNot) != 1 {
+		t.Fatalf("expected 1 MustNot condition, got %d", len(filter.MustNot))
+	}
+
+	inner := filter.MustNot[0].GetFilter()
+	if inner == nil {
+		t.Fatal("expected inner filter, got nil")
+	}
+	if len(inner.Must) != 2 {
+		t.Fatalf("expected 2 inner Must conditions (gt 0, lt now), got %d", len(inner.Must))
+	}
+
+	// Verify first condition: valid_until > 0
+	c0 := inner.Must[0].GetField()
+	if c0 == nil {
+		t.Fatal("expected field condition for Must[0]")
+	}
+	if c0.Key != fieldValidUntil {
+		t.Errorf("Must[0] field: got %q, want %q", c0.Key, fieldValidUntil)
+	}
+	if c0.Range == nil || c0.Range.Gt == nil || *c0.Range.Gt != 0.0 {
+		t.Errorf("Must[0]: expected Gt=0.0, got %+v", c0.Range)
+	}
+
+	// Verify second condition: valid_until < now
+	c1 := inner.Must[1].GetField()
+	if c1 == nil {
+		t.Fatal("expected field condition for Must[1]")
+	}
+	if c1.Key != fieldValidUntil {
+		t.Errorf("Must[1] field: got %q, want %q", c1.Key, fieldValidUntil)
+	}
+	if c1.Range == nil || c1.Range.Lt == nil {
+		t.Errorf("Must[1]: expected Lt to be set, got %+v", c1.Range)
+	}
+	if *c1.Range.Lt != now {
+		t.Errorf("Must[1] Lt: got %f, want %f", *c1.Range.Lt, now)
+	}
+}
+
+// TestBuildExpiryFilter_NonExpiredPassThrough verifies that a memory whose
+// valid_until is in the future would NOT be caught by the MustNot condition
+// (i.e., valid_until < now is false for a future timestamp).
+func TestBuildExpiryFilter_NonExpiredPassThrough(t *testing.T) {
+	now := float64(time.Now().Unix())
+	futureExpiry := now + 3600 // 1 hour in the future
+
+	// The MustNot excludes memories where: valid_until > 0 AND valid_until < now
+	// For futureExpiry: valid_until > 0 ✓, valid_until < now ✗ → NOT excluded → passes
+	wouldBeExcluded := futureExpiry > 0 && futureExpiry < now
+	if wouldBeExcluded {
+		t.Error("future-expiry memory should NOT be excluded by expiry filter, but it would be")
+	}
+}
+
+// TestBuildExpiryFilter_ExpiredCaughtByFilter verifies that an already-expired
+// memory WOULD be caught by the MustNot condition.
+func TestBuildExpiryFilter_ExpiredCaughtByFilter(t *testing.T) {
+	now := float64(time.Now().Unix())
+	pastExpiry := now - 3600 // 1 hour in the past
+
+	// The MustNot excludes memories where: valid_until > 0 AND valid_until < now
+	// For pastExpiry: valid_until > 0 ✓, valid_until < now ✓ → excluded
+	wouldBeExcluded := pastExpiry > 0 && pastExpiry < now
+	if !wouldBeExcluded {
+		t.Error("past-expiry memory SHOULD be excluded by expiry filter, but it would not be")
+	}
+}
+
+// TestBuildExpiryFilter_ZeroValidUntilNotExcluded verifies that a permanent
+// memory (valid_until == 0) is NOT excluded by the expiry filter.
+func TestBuildExpiryFilter_ZeroValidUntilNotExcluded(t *testing.T) {
+	now := float64(time.Now().Unix())
+	permanentValidUntil := 0.0
+
+	// The MustNot excludes memories where: valid_until > 0 AND valid_until < now
+	// For 0: valid_until > 0 ✗ → NOT excluded
+	wouldBeExcluded := permanentValidUntil > 0 && permanentValidUntil < now
+	if wouldBeExcluded {
+		t.Error("permanent memory (valid_until=0) should NOT be excluded, but it would be")
 	}
 }

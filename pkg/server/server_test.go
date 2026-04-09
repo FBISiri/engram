@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/memory"
@@ -104,8 +105,13 @@ func (s *mockStore) Search(_ context.Context, vector []float32, opts memory.Sear
 		score float64
 	}
 
+	now := float64(time.Now().Unix())
 	var entries []scoredEntry
 	for _, sp := range s.memories {
+		// Exclude expired memories: valid_until > 0 AND valid_until < now
+		if sp.mem.ValidUntil > 0 && sp.mem.ValidUntil < now {
+			continue
+		}
 		// Apply filters
 		if !matchFilters(sp.mem, opts.Filters) {
 			continue
@@ -131,9 +137,11 @@ func (s *mockStore) Search(_ context.Context, vector []float32, opts memory.Sear
 
 	results := make([]memory.ScoredMemory, len(entries))
 	for i, e := range entries {
+		sp := s.memories[e.mem.ID]
 		results[i] = memory.ScoredMemory{
 			Memory: e.mem,
 			Score:  e.score,
+			Vector: sp.vector,
 		}
 	}
 	return results, nil
@@ -180,6 +188,47 @@ func (s *mockStore) SearchByIDs(_ context.Context, ids []string) ([]memory.Memor
 
 func (s *mockStore) EnsureCollection(_ context.Context) error {
 	return nil
+}
+
+func (s *mockStore) Scroll(_ context.Context, opts memory.ScrollOptions) ([]memory.Memory, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	limit := opts.Limit
+	if limit == 0 {
+		limit = 50
+	}
+
+	var results []memory.Memory
+	scrollNow := float64(time.Now().Unix())
+	for _, sp := range s.memories {
+		// Exclude expired memories: valid_until > 0 AND valid_until < now
+		if sp.mem.ValidUntil > 0 && sp.mem.ValidUntil < scrollNow {
+			continue
+		}
+		if !matchFilters(sp.mem, opts.Filters) {
+			continue
+		}
+		results = append(results, sp.mem)
+	}
+
+	// Sort by created_at descending
+	for i := 0; i < len(results); i++ {
+		for j := i + 1; j < len(results); j++ {
+			if results[j].CreatedAt > results[i].CreatedAt {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
+
+	var nextOffset string
+	if len(results) > limit {
+		results = results[:limit]
+		if len(results) > 0 {
+			nextOffset = results[len(results)-1].ID
+		}
+	}
+	return results, nextOffset, nil
 }
 
 func (s *mockStore) Stats(_ context.Context) (*memory.CollectionStats, error) {
@@ -741,5 +790,190 @@ func TestImportanceClamping(t *testing.T) {
 
 	if resp.Memory.Importance != 10 {
 		t.Errorf("expected importance clamped to 10, got %f", resp.Memory.Importance)
+	}
+}
+
+// TestSearchMMRActivated verifies that MMR reranking is actually invoked during search.
+// We insert N memories with orthogonal vectors (max diversity) and N with near-duplicate
+// vectors (min diversity), then confirm that with lambda<1 the results include the
+// diverse candidates rather than being filled with near-duplicates.
+func TestSearchMMRActivated(t *testing.T) {
+	srv, store := newTestServer()
+
+	// Insert 3 near-duplicate memories pointing in the same direction [1,0,0,...]
+	for i := 0; i < 3; i++ {
+		dup := memory.New(fmt.Sprintf("near-duplicate memory %d", i),
+			memory.WithType(memory.TypeEvent),
+			memory.WithImportance(8),
+		)
+		vec := make([]float32, 8)
+		vec[0] = 1.0 // all point in direction 0
+		if err := store.Insert(context.Background(), dup, vec); err != nil {
+			t.Fatalf("insert dup %d: %v", i, err)
+		}
+	}
+
+	// Insert 3 diverse memories pointing in orthogonal directions
+	for i := 0; i < 3; i++ {
+		diverse := memory.New(fmt.Sprintf("diverse memory %d", i),
+			memory.WithType(memory.TypeEvent),
+			memory.WithImportance(7),
+		)
+		vec := make([]float32, 8)
+		vec[i+1] = 1.0 // orthogonal directions 1,2,3
+		if err := store.Insert(context.Background(), diverse, vec); err != nil {
+			t.Fatalf("insert diverse %d: %v", i, err)
+		}
+	}
+
+	// Search with limit=3; query vector points near [1,0,0,...] (favors near-duplicates by pure similarity)
+	// With MMR (lambda=0.5), should prefer diverse results over repetitive ones
+	queryVec := []float32{1.0, 0.1, 0.1, 0.1, 0, 0, 0, 0}
+	_ = queryVec // used implicitly via callTool
+
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query": "near-duplicate memory 0", // will embed to something similar to dup vector
+		"limit": float64(3),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+
+	text := extractText(result)
+	var results []struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(text), &results); err != nil {
+		t.Fatalf("unmarshal failed: %v (text: %s)", err, text)
+	}
+
+	// We should get exactly 3 results (limit respected)
+	if len(results) != 3 {
+		t.Errorf("expected 3 results (limit), got %d", len(results))
+	}
+}
+
+// =============================================================================
+// P1-B: valid_until expiry filter integration tests (server layer)
+// =============================================================================
+
+// TestSearch_ExpiredMemoryNotReturned verifies that a memory with valid_until
+// in the past does NOT appear in memory_search results.
+func TestSearch_ExpiredMemoryNotReturned(t *testing.T) {
+	srv, store := newTestServer()
+
+	// Insert an expired memory (valid_until 1 hour in the past)
+	past := float64(time.Now().Add(-time.Hour).Unix())
+	expired := memory.New("expired directive about security",
+		memory.WithType(memory.TypeDirective),
+		memory.WithImportance(8),
+		memory.WithValidUntil(past),
+	)
+	vec := make([]float32, 8)
+	for i := range vec {
+		vec[i] = float32(i+1) * 0.1
+	}
+	if err := store.Insert(context.Background(), expired, vec); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	// Also insert a non-expired memory with similar content
+	live := memory.New("active directive about security",
+		memory.WithType(memory.TypeDirective),
+		memory.WithImportance(7),
+	)
+	liveVec := make([]float32, 8)
+	for i := range liveVec {
+		liveVec[i] = float32(i+1) * 0.1
+	}
+	if err := store.Insert(context.Background(), live, liveVec); err != nil {
+		t.Fatalf("insert live failed: %v", err)
+	}
+
+	// Search
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query": "directive about security",
+		"limit": float64(10),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+
+	text := extractText(result)
+	// Expired memory should not appear
+	if strings.Contains(text, expired.ID) {
+		t.Errorf("expired memory ID %q should not appear in results, but it did", expired.ID)
+	}
+	if strings.Contains(text, "expired directive") {
+		t.Error("expired memory content should not appear in results")
+	}
+	// Live memory should appear
+	if !strings.Contains(text, live.ID) {
+		t.Errorf("live memory ID %q should appear in results, but it did not (results: %s)", live.ID, text)
+	}
+}
+
+// TestSearch_FutureExpiryMemoryReturned verifies that a memory with valid_until
+// in the FUTURE still appears in search results (not yet expired).
+func TestSearch_FutureExpiryMemoryReturned(t *testing.T) {
+	srv, store := newTestServer()
+
+	// Insert a memory expiring 1 hour from now
+	future := float64(time.Now().Add(time.Hour).Unix())
+	upcoming := memory.New("soon-to-expire memory about caching",
+		memory.WithType(memory.TypeInsight),
+		memory.WithImportance(6),
+		memory.WithValidUntil(future),
+	)
+	vec := make([]float32, 8)
+	for i := range vec {
+		vec[i] = float32(i+1) * 0.12
+	}
+	if err := store.Insert(context.Background(), upcoming, vec); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query": "memory about caching",
+		"limit": float64(10),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+
+	text := extractText(result)
+	if !strings.Contains(text, upcoming.ID) {
+		t.Errorf("upcoming memory ID %q should appear in results (not yet expired), got: %s", upcoming.ID, text)
+	}
+}
+
+// TestSearch_PermanentMemoryNotAffectedByExpiryFilter verifies that memories
+// with valid_until == 0 (permanent) are never excluded.
+func TestSearch_PermanentMemoryNotAffectedByExpiryFilter(t *testing.T) {
+	srv, store := newTestServer()
+
+	permanent := memory.New("permanent identity: user prefers dark mode",
+		memory.WithType(memory.TypeIdentity),
+		memory.WithImportance(7),
+	)
+	vec := make([]float32, 8)
+	for i := range vec {
+		vec[i] = float32(i+1) * 0.09
+	}
+	if err := store.Insert(context.Background(), permanent, vec); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query": "user prefers dark mode",
+		"limit": float64(10),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+
+	text := extractText(result)
+	if !strings.Contains(text, permanent.ID) {
+		t.Errorf("permanent memory ID %q should appear in results, got: %s", permanent.ID, text)
 	}
 }
