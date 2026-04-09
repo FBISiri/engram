@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 
+	"encoding/json"
+
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/dream"
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/qdrant"
+	"github.com/FBISiri/engram/pkg/reflection"
 	"github.com/FBISiri/engram/pkg/server"
 )
 
@@ -34,6 +37,16 @@ func main() {
 		}
 	case "dream-run":
 		if err := dreamRun(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case "reflection-check":
+		if err := reflectionCheck(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case "reflection-run":
+		if err := reflectionRun(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -215,9 +228,95 @@ func printUsage() {
 	fmt.Println(`Usage: engram <command>
 
 Commands:
-  serve        Start the memory server (MCP and/or REST)
-  dream-check  Check Triple Gate (outputs JSON: should_run, reason, etc.)
-  dream-run    Run Dream Engine (--dry-run, --phase <name>)
-  migrate      Migrate from chat2mem to Engram
-  version      Print version`)
+  serve             Start the memory server (MCP and/or REST)
+  dream-check       Check Triple Gate (outputs JSON: should_run, reason, etc.)
+  dream-run         Run Dream Engine (--dry-run, --phase <name>)
+  reflection-check  Check if Reflection Engine should run (outputs JSON)
+  reflection-run    Run Reflection Engine (--dry-run)
+  migrate           Migrate from chat2mem to Engram
+  version           Print version`)
+}
+
+// reflectionCheck evaluates whether the Reflection Engine should run now.
+// Outputs JSON: {should_trigger, skip_reason, unreflected_count, accumulated_importance, ...}
+func reflectionCheck(cfg *config.Config) error {
+	store, err := qdrant.New(qdrant.Config{
+		URL:            cfg.QdrantURL,
+		APIKey:         cfg.QdrantAPIKey,
+		CollectionName: cfg.CollectionName,
+		Dimension:      uint64(cfg.EmbeddingDimension),
+	})
+	if err != nil {
+		return fmt.Errorf("connect qdrant: %w", err)
+	}
+	defer store.Close()
+
+	eng := reflection.NewEngine(store, nil, reflection.DefaultConfig())
+	ctx := context.Background()
+	result, err := eng.Check(ctx)
+	if err != nil {
+		return fmt.Errorf("reflection check: %w", err)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
+}
+
+// reflectionRun executes one reflection cycle.
+// Outputs JSON RunResult.
+func reflectionRun(cfg *config.Config) error {
+	dryRun := false
+	for i := 2; i < len(os.Args); i++ {
+		if os.Args[i] == "--dry-run" {
+			dryRun = true
+		}
+	}
+
+	store, err := qdrant.New(qdrant.Config{
+		URL:            cfg.QdrantURL,
+		APIKey:         cfg.QdrantAPIKey,
+		CollectionName: cfg.CollectionName,
+		Dimension:      uint64(cfg.EmbeddingDimension),
+	})
+	if err != nil {
+		return fmt.Errorf("connect qdrant: %w", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.EnsureCollection(ctx); err != nil {
+		return fmt.Errorf("ensure collection: %w", err)
+	}
+
+	// Create embedder for storing new insights with proper vectors.
+	var embedder embedding.Embedder
+	switch cfg.EmbedderProvider {
+	case "voyage":
+		embedder = embedding.NewVoyage(embedding.VoyageConfig{
+			APIKey:    cfg.VoyageAPIKey,
+			Model:     cfg.EmbeddingModel,
+			Dimension: cfg.EmbeddingDimension,
+		})
+	default:
+		embedder = embedding.NewOpenAI(embedding.OpenAIConfig{
+			APIKey:    cfg.OpenAIAPIKey,
+			Model:     cfg.EmbeddingModel,
+			BaseURL:   cfg.OpenAIBaseURL,
+			Dimension: cfg.EmbeddingDimension,
+		})
+	}
+
+	reflCfg := reflection.DefaultConfig()
+	reflCfg.DryRun = dryRun
+
+	eng := reflection.NewEngine(store, embedder, reflCfg)
+	result, err := eng.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("reflection run: %w", err)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
