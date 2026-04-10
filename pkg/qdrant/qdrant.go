@@ -194,6 +194,7 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts memory.Search
 		Filter:         filter,
 		Limit:          qdrant.PtrOf(limit),
 		WithPayload:    qdrant.NewWithPayload(true),
+		WithVectors:    qdrant.NewWithVectors(true),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("qdrant: search: %w", err)
@@ -202,10 +203,17 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts memory.Search
 	scored := make([]memory.ScoredMemory, 0, len(results))
 	for _, pt := range results {
 		mem := pointToMemory(pt.Id, pt.Payload)
-		scored = append(scored, memory.ScoredMemory{
+		sm := memory.ScoredMemory{
 			Memory: *mem,
 			Score:  float64(pt.Score),
-		})
+		}
+		// Extract the dense vector from the result for MMR reranking.
+		if pt.Vectors != nil {
+			if dense := pt.Vectors.GetVector(); dense != nil {
+				sm.Vector = dense.GetData()
+			}
+		}
+		scored = append(scored, sm)
 	}
 	return scored, nil
 }
@@ -295,6 +303,66 @@ func (s *Store) SearchByIDs(ctx context.Context, ids []string) ([]memory.Memory,
 	return memories, nil
 }
 
+// Scroll returns memories matching filters without requiring a query vector.
+func (s *Store) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]memory.Memory, string, error) {
+	limit := uint32(opts.Limit)
+	if limit == 0 {
+		limit = 50
+	}
+
+	// Build filter from user options.
+	filter := buildFilter(opts.Filters)
+
+	// Exclude superseded and expired memories (same logic as Search).
+	var mustConds []*qdrant.Condition
+	if filter != nil {
+		mustConds = append(mustConds, filter.Must...)
+	}
+	mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	now := float64(time.Now().Unix())
+	mustNotConds := []*qdrant.Condition{
+		qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
+			},
+		}),
+	}
+
+	req := &qdrant.ScrollPoints{
+		CollectionName: s.collection,
+		Filter: &qdrant.Filter{
+			Must:    mustConds,
+			MustNot: mustNotConds,
+		},
+		Limit:       qdrant.PtrOf(limit),
+		WithPayload: qdrant.NewWithPayload(true),
+	}
+	if opts.Offset != "" {
+		req.Offset = qdrant.NewID(opts.Offset)
+	}
+
+	results, err := s.client.Scroll(ctx, req)
+	if err != nil {
+		return nil, "", fmt.Errorf("qdrant: scroll: %w", err)
+	}
+
+	memories := make([]memory.Memory, 0, len(results))
+	for _, pt := range results {
+		mem := pointToMemory(pt.Id, pt.Payload)
+		memories = append(memories, *mem)
+	}
+
+	// Qdrant Scroll returns the next offset via the ScrollPoints response.
+	// The go-client returns just the points; we use the last point's ID as offset.
+	var nextOffset string
+	if len(results) == int(limit) && len(results) > 0 {
+		nextOffset = extractString(results[len(results)-1].Id)
+	}
+
+	return memories, nextOffset, nil
+}
+
 // Stats returns collection statistics.
 func (s *Store) Stats(ctx context.Context) (*memory.CollectionStats, error) {
 	info, err := s.client.GetCollectionInfo(ctx, s.collection)
@@ -309,6 +377,79 @@ func (s *Store) Stats(ctx context.Context) (*memory.CollectionStats, error) {
 		SegmentCount: info.GetSegmentsCount(),
 		Status:       info.GetStatus().String(),
 	}, nil
+}
+
+// DeleteExpired removes all memories whose valid_until > 0 AND valid_until < now.
+// This is the physical cleanup counterpart to the soft-filter applied in Search/Scroll.
+// Returns the number of deleted points (always == points matched, since Qdrant delete is
+// idempotent and does not report per-point success).
+func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
+	now := float64(time.Now().Unix())
+
+	// First, scroll to collect the IDs of expired points so we can report a count.
+	expiredFilter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
+			qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
+		},
+	}
+
+	// Page through expired points in batches of 100.
+	const batchSize = uint32(100)
+	var allIDs []*qdrant.PointId
+	var offset *qdrant.PointId
+
+	for {
+		req := &qdrant.ScrollPoints{
+			CollectionName: s.collection,
+			Filter:         expiredFilter,
+			Limit:          qdrant.PtrOf(batchSize),
+			WithPayload:    qdrant.NewWithPayload(false),
+		}
+		if offset != nil {
+			req.Offset = offset
+		}
+
+		results, err := s.client.Scroll(ctx, req)
+		if err != nil {
+			return 0, fmt.Errorf("qdrant: delete_expired scroll: %w", err)
+		}
+		if len(results) == 0 {
+			break
+		}
+		for _, pt := range results {
+			allIDs = append(allIDs, pt.Id)
+		}
+		// If we got fewer than batchSize, we've reached the end.
+		if len(results) < int(batchSize) {
+			break
+		}
+		// Advance offset to the last seen ID.
+		offset = results[len(results)-1].Id
+	}
+
+	if len(allIDs) == 0 {
+		return 0, nil
+	}
+
+	// Delete all expired points.
+	wait := true
+	_, err := s.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: s.collection,
+		Wait:           &wait,
+		Points: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+				Points: &qdrant.PointsIdsList{
+					Ids: allIDs,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("qdrant: delete_expired delete: %w", err)
+	}
+
+	return len(allIDs), nil
 }
 
 // buildFilter converts memory.Filter slice into a Qdrant filter.

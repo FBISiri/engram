@@ -95,7 +95,8 @@ func (m *Memory) Validate() error {
 // ScoredMemory is a Memory with a computed relevance score.
 type ScoredMemory struct {
 	Memory
-	Score float64 `json:"score"` // Final weighted score
+	Score  float64   `json:"score"`            // Final weighted score
+	Vector []float32 `json:"vector,omitempty"` // Embedding vector (populated when with_vectors=true)
 }
 
 // DecayConfig holds per-type decay factors.

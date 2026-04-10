@@ -12,6 +12,10 @@ type Store interface {
 	// Results are ordered by raw cosine similarity (caller applies final scoring).
 	Search(ctx context.Context, vector []float32, opts SearchOptions) ([]ScoredMemory, error)
 
+	// Scroll returns memories matching filters without requiring a query vector.
+	// Results are ordered by creation time (newest first). Use offset for pagination.
+	Scroll(ctx context.Context, opts ScrollOptions) ([]Memory, string, error)
+
 	// Delete removes memories by IDs. Returns the number of successfully deleted items.
 	Delete(ctx context.Context, ids []string) (int, error)
 
@@ -26,6 +30,17 @@ type Store interface {
 
 	// Stats returns collection statistics.
 	Stats(ctx context.Context) (*CollectionStats, error)
+
+	// DeleteExpired removes all memories whose valid_until > 0 AND valid_until < now.
+	// Returns the number of deleted memories.
+	DeleteExpired(ctx context.Context) (int, error)
+}
+
+// ScrollOptions configures a filter-based scroll query (no vector needed).
+type ScrollOptions struct {
+	Limit   int
+	Filters []Filter
+	Offset  string // opaque offset token from previous Scroll call; empty for first page
 }
 
 // SearchOptions configures a vector search query.

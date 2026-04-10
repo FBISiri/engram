@@ -16,10 +16,12 @@ type Config struct {
 	CollectionName string
 
 	// Embedding
+	EmbedderProvider   string // "openai" | "voyage"
 	EmbeddingModel     string
 	EmbeddingDimension int
 	OpenAIAPIKey       string
 	OpenAIBaseURL      string
+	VoyageAPIKey       string
 
 	// Scoring
 	Weights memory.ScoringWeights
@@ -48,10 +50,12 @@ func Load() *Config {
 		CollectionName: envStr("ENGRAM_COLLECTION_NAME", "engram"),
 
 		// Embedding
+		EmbedderProvider:   envStr("ENGRAM_EMBEDDER_PROVIDER", "openai"),
 		EmbeddingModel:     envStr("ENGRAM_EMBEDDING_MODEL", "text-embedding-3-small"),
 		EmbeddingDimension: envInt("ENGRAM_EMBEDDING_DIMENSION", 1536),
 		OpenAIAPIKey:       envStr("ENGRAM_OPENAI_API_KEY", ""),
 		OpenAIBaseURL:      envStr("ENGRAM_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+		VoyageAPIKey:       envStr("ENGRAM_VOYAGE_API_KEY", ""),
 
 		// Scoring
 		Weights: memory.ScoringWeights{

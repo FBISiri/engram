@@ -174,6 +174,13 @@ func (w *writeThroughStore) Stats(ctx context.Context) (*memory.CollectionStats,
 	return w.store.Stats(ctx)
 }
 
+// DeleteExpired delegates to the underlying store.
+// Expiry cleanup is a bulk background operation; individual IDs are not written
+// to the commit log (they were already logged on original insert/update).
+func (w *writeThroughStore) DeleteExpired(ctx context.Context) (int, error) {
+	return w.store.DeleteExpired(ctx)
+}
+
 // Replay returns commit entries since the given timestamp from ring buffer or commit log.
 func (w *writeThroughStore) Replay(ctx context.Context, since float64) ([]CommitEntry, error) {
 	w.mu.Lock()

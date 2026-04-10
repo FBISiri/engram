@@ -240,6 +240,10 @@ func (s *mockStore) Stats(_ context.Context) (*memory.CollectionStats, error) {
 	}, nil
 }
 
+func (s *mockStore) DeleteExpired(_ context.Context) (int, error) {
+	return 0, nil
+}
+
 // count returns the number of memories in the store.
 func (s *mockStore) count() int {
 	s.mu.Lock()

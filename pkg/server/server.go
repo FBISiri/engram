@@ -198,10 +198,22 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return results[i].Score > results[j].Score
 	})
 
-	// For MMR, we need the vectors. Re-fetch them by searching with vectors included.
-	// Since we don't have vectors in the result, we skip MMR if we can't get vectors.
-	// For now, just truncate to limit.
-	if len(results) > limit {
+	// Apply MMR (Maximal Marginal Relevance) to rerank for relevance + diversity.
+	// Vectors are now returned by the store (with_vectors=true in Qdrant query).
+	// Extract vectors from results for MMR computation.
+	vectors := make([][]float32, len(results))
+	hasVectors := false
+	for i, r := range results {
+		if len(r.Vector) > 0 {
+			vectors[i] = r.Vector
+			hasVectors = true
+		}
+	}
+
+	if hasVectors && len(results) > limit {
+		results = memory.MMR(results, vectors, limit, s.mmrLambda)
+	} else if len(results) > limit {
+		// Fallback: simple truncation if vectors are missing
 		results = results[:limit]
 	}
 
