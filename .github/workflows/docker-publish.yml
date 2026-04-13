@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: fbisiri/engram
+  IMAGE_NAME: imsiri/engram
 
 jobs:
   build-and-push:
