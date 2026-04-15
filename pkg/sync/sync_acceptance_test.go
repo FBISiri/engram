@@ -409,6 +409,7 @@ func (s *mockStore) EnsureCollection(_ context.Context) error { return nil }
 func (s *mockStore) Stats(_ context.Context) (*memory.CollectionStats, error) {
 	return &memory.CollectionStats{}, nil
 }
+func (s *mockStore) DeleteExpired(_ context.Context) (int, error) { return 0, nil }
 
 // failingLog is a CommitLog that always returns an error on Append.
 type failingLog struct{}

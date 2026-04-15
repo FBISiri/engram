@@ -404,13 +404,12 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 				continue
 			}
 		} else {
-			// No embedder: store with zero vector (fallback, degraded mode).
-			zeroVec := make([]float32, 1536)
-			if storeErr := e.store.Insert(ctx, newMem, zeroVec); storeErr != nil {
-				items = append(items, fmt.Sprintf("  store error (no embedder) for tag=%q: %v", tag, storeErr))
-				skipped++
-				continue
-			}
+			// No embedder available: skip insertion rather than storing a
+			// zero vector. A zero vector with hardcoded dimension would fail
+			// if the collection dimension differs (e.g. 1536 != 1024).
+			items = append(items, fmt.Sprintf("  skipped (no embedder) for tag=%q", tag))
+			skipped++
+			continue
 		}
 
 		mergedCount += len(group)

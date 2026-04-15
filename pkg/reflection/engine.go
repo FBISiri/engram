@@ -183,8 +183,12 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 					continue
 				}
 			} else {
-				// Fallback: zero vector (degraded mode).
-				vec = make([]float32, 1536)
+				// No embedder available: skip insertion rather than storing a
+				// zero vector. A zero vector with hardcoded dimension would fail
+				// if the collection dimension differs (e.g. 1536 != 1024).
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("skipped insight (no embedder): %s", ins.Content[:min(40, len(ins.Content))]))
+				continue
 			}
 
 			if err := e.store.Insert(ctx, insightMem, vec); err != nil {
