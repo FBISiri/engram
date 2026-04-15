@@ -123,9 +123,19 @@ func serve(cfg *config.Config) error {
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio (ready)\n")
 		return srv.ServeStdio()
 	case "http":
-		return fmt.Errorf("HTTP transport not yet implemented")
+		fmt.Fprintf(os.Stderr, "  Transport:  http (port %d)\n", cfg.HTTPPort)
+		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
+		return httpSrv.ListenAndServe(serverCtx)
 	case "both":
-		return fmt.Errorf("dual transport not yet implemented")
+		// Start HTTP in background; MCP stdio in foreground.
+		fmt.Fprintf(os.Stderr, "  Transport:  stdio + http (port %d)\n", cfg.HTTPPort)
+		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
+		go func() {
+			if err := httpSrv.ListenAndServe(serverCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "http server error: %v\n", err)
+			}
+		}()
+		return srv.ServeStdio()
 	default:
 		return fmt.Errorf("unknown transport: %s", cfg.Transport)
 	}
