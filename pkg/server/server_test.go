@@ -363,6 +363,10 @@ func callTool(srv *Server, toolName string, args map[string]any) (*mcp.CallToolR
 		return srv.handleUpdate(ctx, request)
 	case "memory_delete":
 		return srv.handleDelete(ctx, request)
+	case "reflection_check":
+		return srv.handleReflectionCheck(ctx, request)
+	case "reflection_run":
+		return srv.handleReflectionRun(ctx, request)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", toolName)
 	}
@@ -979,5 +983,183 @@ func TestSearch_PermanentMemoryNotAffectedByExpiryFilter(t *testing.T) {
 	text := extractText(result)
 	if !strings.Contains(text, permanent.ID) {
 		t.Errorf("permanent memory ID %q should appear in results, got: %s", permanent.ID, text)
+	}
+}
+
+// =============================================================================
+// Reflection Tool Tests
+// =============================================================================
+
+// TestReflectionCheck_ReturnsValidJSON verifies that reflection_check returns
+// a JSON object with expected fields (should_trigger, skip_reason, etc.).
+func TestReflectionCheck_ReturnsValidJSON(t *testing.T) {
+	srv, _ := newTestServer()
+
+	result, err := callTool(srv, "reflection_check", nil)
+	if err != nil {
+		t.Fatalf("reflection_check failed: %v", err)
+	}
+
+	text := extractText(result)
+	if text == "" {
+		t.Fatal("reflection_check returned empty response")
+	}
+
+	var parsed struct {
+		ShouldTrigger         bool    `json:"should_trigger"`
+		SkipReason            string  `json:"skip_reason"`
+		UnreflectedCount      int     `json:"unreflected_count"`
+		AccumulatedImportance float64 `json:"accumulated_importance"`
+		Threshold             float64 `json:"threshold"`
+	}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("reflection_check response is not valid JSON: %v\nraw: %s", err, text)
+	}
+
+	// Default threshold should be 50.
+	if parsed.Threshold != 50.0 {
+		t.Errorf("expected threshold=50, got %.1f", parsed.Threshold)
+	}
+	// With empty store, should not trigger.
+	if parsed.ShouldTrigger {
+		t.Error("expected should_trigger=false with empty store")
+	}
+	if parsed.SkipReason == "" {
+		t.Error("expected non-empty skip_reason when not triggering")
+	}
+}
+
+// TestReflectionCheck_WithEnoughImportance verifies that when accumulated
+// importance >= threshold, should_trigger is true.
+// NOTE: This test uses the mock store's Scroll method, which returns all
+// inserted memories. We insert enough high-importance memories to exceed
+// the default threshold of 50.
+func TestReflectionCheck_WithEnoughImportance(t *testing.T) {
+	srv, store := newTestServer()
+
+	// Insert 6 memories with importance=10 each → total=60 >= threshold(50).
+	for i := 0; i < 6; i++ {
+		mem := memory.New(
+			fmt.Sprintf("high importance memory number %d about siri architecture decisions", i),
+			memory.WithType(memory.TypeInsight),
+			memory.WithImportance(10),
+		)
+		vec := make([]float32, 8)
+		for j := range vec {
+			vec[j] = float32(i*8+j+1) * 0.01
+		}
+		if err := store.Insert(context.Background(), mem, vec); err != nil {
+			t.Fatalf("insert failed: %v", err)
+		}
+	}
+
+	result, err := callTool(srv, "reflection_check", nil)
+	if err != nil {
+		t.Fatalf("reflection_check failed: %v", err)
+	}
+
+	text := extractText(result)
+	var parsed struct {
+		ShouldTrigger         bool    `json:"should_trigger"`
+		SkipReason            string  `json:"skip_reason"`
+		AccumulatedImportance float64 `json:"accumulated_importance"`
+	}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("failed to parse response: %v\nraw: %s", err, text)
+	}
+
+	if parsed.AccumulatedImportance < 50 {
+		t.Errorf("expected accumulated_importance >= 50, got %.1f", parsed.AccumulatedImportance)
+	}
+	// should_trigger may still be false if min-interval gate blocks it
+	// (e.g. last run was < 2h ago from a real ~/.siri file).
+	// We just verify accumulated_importance is correctly computed.
+	t.Logf("should_trigger=%v skip_reason=%q accumulated=%.1f",
+		parsed.ShouldTrigger, parsed.SkipReason, parsed.AccumulatedImportance)
+}
+
+// TestReflectionRun_DryRun verifies that reflection_run with dry_run=true
+// returns a valid RunResult and does NOT write any memories to the store.
+func TestReflectionRun_DryRun(t *testing.T) {
+	srv, store := newTestServer()
+
+	// Insert enough memories to potentially trigger reflection.
+	for i := 0; i < 6; i++ {
+		mem := memory.New(
+			fmt.Sprintf("unreflected event memory %d: siri completed task scheduling review", i),
+			memory.WithType(memory.TypeEvent),
+			memory.WithImportance(10),
+		)
+		vec := make([]float32, 8)
+		for j := range vec {
+			vec[j] = float32(i*8+j+1) * 0.02
+		}
+		if err := store.Insert(context.Background(), mem, vec); err != nil {
+			t.Fatalf("insert failed: %v", err)
+		}
+	}
+
+	countBefore := store.count()
+
+	result, err := callTool(srv, "reflection_run", map[string]any{
+		"dry_run": true,
+	})
+	if err != nil {
+		t.Fatalf("reflection_run failed: %v", err)
+	}
+
+	text := extractText(result)
+	if text == "" {
+		t.Fatal("reflection_run returned empty response")
+	}
+
+	var parsed struct {
+		DryRun          bool     `json:"dry_run"`
+		Triggered       bool     `json:"triggered"`
+		InsightsCreated int      `json:"insights_created"`
+		SourcesMarked   int      `json:"sources_marked"`
+		Duration        string   `json:"duration"`
+		SkipReason      string   `json:"skip_reason"`
+		Errors          []string `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatalf("failed to parse RunResult: %v\nraw: %s", err, text)
+	}
+
+	// dry_run field should be true.
+	if !parsed.DryRun {
+		t.Error("expected dry_run=true in response")
+	}
+
+	// Store count must not change (dry run = no writes).
+	countAfter := store.count()
+	if countAfter != countBefore {
+		t.Errorf("dry_run should not write to store: before=%d after=%d", countBefore, countAfter)
+	}
+
+	// Duration must be present.
+	if parsed.Duration == "" {
+		t.Error("expected non-empty duration in RunResult")
+	}
+
+	t.Logf("dry_run result: triggered=%v insights_would_create=%d skip_reason=%q errors=%v",
+		parsed.Triggered, parsed.InsightsCreated, parsed.SkipReason, parsed.Errors)
+}
+
+// TestReflectionRun_InvalidDryRunArg verifies that a non-boolean dry_run arg
+// is handled gracefully (defaults to false, does not panic).
+func TestReflectionRun_InvalidDryRunArg(t *testing.T) {
+	srv, _ := newTestServer()
+
+	// Pass string instead of bool — should be ignored, defaults to false (no panic).
+	result, err := callTool(srv, "reflection_run", map[string]any{
+		"dry_run": "yes",
+	})
+	if err != nil {
+		t.Fatalf("reflection_run should not error on invalid arg type: %v", err)
+	}
+	text := extractText(result)
+	if text == "" {
+		t.Fatal("expected non-empty response")
 	}
 }

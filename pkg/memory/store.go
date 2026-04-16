@@ -57,7 +57,8 @@ const (
 	OpIn    FilterOp = "in"
 	OpGte   FilterOp = "gte"
 	OpLte   FilterOp = "lte"
-	OpRange FilterOp = "range"
+	OpRange   FilterOp = "range"
+	OpIsEmpty FilterOp = "is_empty"
 )
 
 // Filter is a single field filter for search.

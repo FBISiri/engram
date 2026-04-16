@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/qdrant/go-client/qdrant"
@@ -94,6 +93,7 @@ const (
 	fieldSupersededBy  = "superseded_by"
 	fieldAccessCount   = "access_count"
 	fieldLastAccessedAt = "last_accessed_at"
+	fieldReflectedAt   = "reflected_at" // W16: replaces metadata["reflected"]
 )
 
 // EnsureCollection creates the collection if it doesn't exist, and idempotently
@@ -129,6 +129,7 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldValidUntil, qdrant.FieldType_FieldTypeFloat},
 		{fieldAccessCount, qdrant.FieldType_FieldTypeInteger},
 		{fieldLastAccessedAt, qdrant.FieldType_FieldTypeFloat},
+		{fieldReflectedAt, qdrant.FieldType_FieldTypeFloat}, // W16: enables O(K) unreflected query
 	}
 
 	for _, idx := range indexes {
@@ -544,6 +545,9 @@ func filterToCondition(f memory.Filter) *qdrant.Condition {
 				Lte: qdrant.PtrOf(r[1]),
 			})
 		}
+
+	case memory.OpIsEmpty:
+		return qdrant.NewIsEmpty(f.Field)
 	}
 
 	return nil
@@ -579,6 +583,9 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 	}
 	if mem.LastAccessedAt > 0 {
 		payload[fieldLastAccessedAt] = mem.LastAccessedAt
+	}
+	if mem.ReflectedAt > 0 {
+		payload[fieldReflectedAt] = mem.ReflectedAt
 	}
 
 	return &qdrant.PointStruct{
@@ -619,6 +626,9 @@ func pointToMemory(id *qdrant.PointId, payload map[string]*qdrant.Value) *memory
 	}
 	if v, ok := payload[fieldLastAccessedAt]; ok {
 		mem.LastAccessedAt = v.GetDoubleValue()
+	}
+	if v, ok := payload[fieldReflectedAt]; ok {
+		mem.ReflectedAt = v.GetDoubleValue()
 	}
 
 	return mem
@@ -712,20 +722,4 @@ func valueToInterface(v *qdrant.Value) any {
 	default:
 		return nil
 	}
-}
-
-// parseURL parses a Qdrant URL that may include a scheme prefix (e.g. "http://host:port").
-func parseURL(raw string) (host string, port int) {
-	raw = strings.TrimPrefix(raw, "http://")
-	raw = strings.TrimPrefix(raw, "https://")
-
-	h, p, err := net.SplitHostPort(raw)
-	if err != nil {
-		return raw, 6334
-	}
-	portNum, err := strconv.Atoi(p)
-	if err != nil {
-		return h, 6334
-	}
-	return h, portNum
 }

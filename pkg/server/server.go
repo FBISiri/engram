@@ -14,6 +14,7 @@ import (
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/reflection"
 )
 
 // Server wraps the MCP server with Engram's memory operations.
@@ -58,7 +59,7 @@ func (s *Server) ServeStdio() error {
 	return mcpserver.ServeStdio(s.mcpServer)
 }
 
-// registerTools adds all 4 memory tools to the MCP server.
+// registerTools adds all memory and reflection tools to the MCP server.
 func (s *Server) registerTools() {
 	// Tool 1: memory_search
 	searchTool := mcp.NewTool("memory_search",
@@ -105,6 +106,19 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("limit", mcp.Description("Maximum number of memories to delete. Default: 20.")),
 	)
 	s.mcpServer.AddTool(deleteTool, s.handleDelete)
+
+	// Tool 5: reflection_check
+	reflectionCheckTool := mcp.NewTool("reflection_check",
+		mcp.WithDescription("Check whether the Reflection Engine should run now. Returns trigger status, accumulated importance, unreflected memory count, and skip reason if not triggered."),
+	)
+	s.mcpServer.AddTool(reflectionCheckTool, s.handleReflectionCheck)
+
+	// Tool 6: reflection_run
+	reflectionRunTool := mcp.NewTool("reflection_run",
+		mcp.WithDescription("Run one Reflection Engine cycle. Synthesizes insights from unreflected memories using Haiku LLM. Respects min-interval (2h) and daily limit (3x/day). Returns RunResult with insights_created, sources_marked, and errors."),
+		mcp.WithBoolean("dry_run", mcp.Description("If true, simulate the run without writing any changes. Default: false.")),
+	)
+	s.mcpServer.AddTool(reflectionRunTool, s.handleReflectionRun)
 }
 
 // =============================================================================
@@ -564,6 +578,52 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 		Deleted:      deletedItems,
 	}
 	data, _ := json.Marshal(result)
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// =============================================================================
+// Reflection Handlers
+// =============================================================================
+
+// handleReflectionCheck implements the reflection_check tool.
+// It evaluates whether the Reflection Engine should run now without executing it.
+func (s *Server) handleReflectionCheck(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	eng := reflection.NewEngine(s.store, s.embedder, reflection.DefaultConfig())
+	result, err := eng.Check(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("reflection check error: %v", err)), nil
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// handleReflectionRun implements the reflection_run tool.
+// It executes one reflection cycle, respecting rate limits and dry_run mode.
+func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	dryRun := false
+	if args := request.GetArguments(); args != nil {
+		if v, ok := args["dry_run"]; ok {
+			if b, ok := v.(bool); ok {
+				dryRun = b
+			}
+		}
+	}
+
+	cfg := reflection.DefaultConfig()
+	cfg.DryRun = dryRun
+
+	eng := reflection.NewEngine(s.store, s.embedder, cfg)
+	result, err := eng.Run(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("reflection run error: %v", err)), nil
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
 	return mcp.NewToolResultText(string(data)), nil
 }
 

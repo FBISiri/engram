@@ -46,6 +46,11 @@ type Memory struct {
 	SupersededBy   string         `json:"superseded_by,omitempty"`    // "" = not superseded
 	AccessCount    int64          `json:"access_count"`               // search hit count
 	LastAccessedAt float64        `json:"last_accessed_at,omitempty"` // 0 = never accessed
+
+	// ReflectedAt is the Unix timestamp when this memory was processed by the
+	// Reflection Engine. Zero means it has not been reflected yet.
+	// Replaces the legacy metadata["reflected"] bool field (W16).
+	ReflectedAt float64 `json:"reflected_at,omitempty"`
 }
 
 // New creates a new Memory with defaults.

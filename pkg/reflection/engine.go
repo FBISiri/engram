@@ -41,29 +41,55 @@ type Config struct {
 
 	// DryRun disables all writes (no new insights, no marking as reflected).
 	DryRun bool
+
+	// Mode selects the reflection algorithm: "v1" (flat, default) or "v2" (focal point).
+	// V2 requires 4x Haiku calls but produces higher-quality insights.
+	Mode string
+
+	// FocalInputSize is the number of unreflected memories fed to focal question
+	// generation (Step 1 of V2). Default: 50.
+	FocalInputSize int
+
+	// FocalQuestions is the number of focal questions to generate in V2. Default: 3.
+	FocalQuestions int
+
+	// EvidencePerFocal is the number of memories retrieved per focal question
+	// via semantic search in V2. Default: 10.
+	EvidencePerFocal int
 }
 
 // DefaultConfig returns the default Reflection Engine configuration.
 func DefaultConfig() Config {
 	return Config{
-		Threshold:    50.0,
-		MaxInputSize: 20,
-		MinIntervalH: 2.0,
-		DryRun:       false,
+		Threshold:        50.0,
+		MaxInputSize:     20,
+		MinIntervalH:     2.0,
+		DryRun:           false,
+		Mode:             "v1",   // V1 by default; V2 requires explicit opt-in
+		FocalInputSize:   50,
+		FocalQuestions:   3,
+		EvidencePerFocal: 10,
 	}
 }
 
 // RunResult holds the output of a single reflection run.
 type RunResult struct {
-	Triggered          bool    `json:"triggered"`
-	SkipReason         string  `json:"skip_reason,omitempty"`
-	InputCount         int     `json:"input_count"`
-	InsightsCreated    int     `json:"insights_created"`
-	SourcesMarked      int     `json:"sources_marked"`
-	Duration           string  `json:"duration"`
-	TriggerImportance  float64 `json:"trigger_importance,omitempty"`
-	DryRun             bool    `json:"dry_run"`
-	Errors             []string `json:"errors,omitempty"`
+	Triggered         bool     `json:"triggered"`
+	SkipReason        string   `json:"skip_reason,omitempty"`
+	InputCount        int      `json:"input_count"`
+	InsightsCreated   int      `json:"insights_created"`
+	SourcesMarked     int      `json:"sources_marked"`
+	Duration          string   `json:"duration"`
+	TriggerImportance float64  `json:"trigger_importance,omitempty"`
+	DryRun            bool     `json:"dry_run"`
+	Errors            []string `json:"errors,omitempty"`
+
+	// V2 fields (populated when Mode == "v2").
+	Mode            string   `json:"mode"`                        // "v1-flat" | "v2-focal"
+	FocalQuestions  []string `json:"focal_questions,omitempty"`   // V2 only
+	EvidenceCount   int      `json:"evidence_count,omitempty"`    // V2: evidence set size
+	LLMCalls        int      `json:"llm_calls"`                   // total Haiku calls
+	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`       // estimated USD cost
 }
 
 // Engine orchestrates the reflection cycle.
@@ -102,7 +128,11 @@ func (e *Engine) Check(ctx context.Context) (*CheckResult, error) {
 // Returns RunResult with metrics on what was done.
 func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 	start := time.Now()
-	result := &RunResult{DryRun: e.cfg.DryRun}
+	mode := e.cfg.Mode
+	if mode == "" {
+		mode = "v1"
+	}
+	result := &RunResult{DryRun: e.cfg.DryRun, Mode: mode + "-flat"}
 
 	// Evaluate trigger conditions.
 	checkResult, unreflected, err := e.check(ctx)
@@ -132,6 +162,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 	// Build prompt and call Haiku.
 	prompt := buildPrompt(batch)
 	haikuResponse, err := callHaiku(prompt)
+	result.LLMCalls++ // count the Haiku call
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("haiku call failed: %v", err))
 		result.Duration = formatDuration(time.Since(start))
@@ -199,10 +230,12 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 			result.InsightsCreated++
 		}
 
-		// Mark source memories as reflected.
+		// Mark source memories as reflected using ReflectedAt timestamp (W16).
+		// Legacy metadata["reflected"] is no longer written; isReflected() has fallback.
+		reflectedTimestamp := float64(time.Now().Unix())
 		for _, id := range sourceIDs {
 			if err := e.store.Update(ctx, id, map[string]any{
-				"metadata.reflected": true,
+				"reflected_at": reflectedTimestamp,
 			}); err != nil {
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("mark reflected failed for %s: %v", id[:8], err))

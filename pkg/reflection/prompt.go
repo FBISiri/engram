@@ -10,6 +10,22 @@ import (
 
 const haikuMaxTokens = 1500
 
+// formatAge returns a human-readable relative time string for a memory's creation timestamp.
+// Used to give the Haiku model temporal context about each memory (W16).
+func formatAge(createdAt float64) string {
+	age := time.Since(time.Unix(int64(createdAt), 0))
+	switch {
+	case age < time.Hour:
+		return fmt.Sprintf("%dmin ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	case age < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
+	default:
+		return fmt.Sprintf("%dw ago", int(age.Hours()/(24*7)))
+	}
+}
+
 // buildPrompt constructs the Haiku reflection prompt from a batch of memories.
 func buildPrompt(memories []memory.Memory) string {
 	var sb strings.Builder
@@ -43,9 +59,10 @@ func buildPrompt(memories []memory.Memory) string {
 		if len(idShort) > 8 {
 			idShort = idShort[:8]
 		}
+		age := formatAge(m.CreatedAt)
 		sb.WriteString(fmt.Sprintf(
-			"%d. [id=%s type=%s importance=%.0f] %s\n",
-			i+1, idShort, m.Type, m.Importance, content,
+			"%d. [id=%s type=%s importance=%.0f age=%s] %s\n",
+			i+1, idShort, m.Type, m.Importance, age, content,
 		))
 	}
 

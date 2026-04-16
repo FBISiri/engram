@@ -103,40 +103,45 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 	return result, unreflected, nil
 }
 
-// fetchUnreflected returns memories where metadata.reflected is not true.
-// Uses two strategies: first tries metadata.reflected==false filter, then falls back
-// to fetching all and filtering in-memory (handles missing field case).
+// fetchUnreflected returns memories where reflected_at is empty (not yet reflected).
+// Uses the Qdrant-indexed reflected_at field via IsEmpty filter for O(1) lookup (W16 Phase 3).
+// Falls back to legacy metadata["reflected"] check for memories created before the W16 migration.
 func (e *Engine) fetchUnreflected(ctx context.Context, limit int) ([]memory.Memory, error) {
-	// Strategy: Scroll all recent memories (Qdrant nested payload filter for
-	// metadata.reflected may not be indexed, so we fetch and filter in-memory).
-	// We fetch 3x limit to account for already-reflected ones.
-	fetchLimit := limit * 3
-	if fetchLimit > 600 {
-		fetchLimit = 600
-	}
-
+	// Use indexed reflected_at IsEmpty filter — only returns memories where
+	// reflected_at payload field does not exist or is null.
 	all, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
-		Limit: fetchLimit,
+		Limit: limit,
+		Filters: []memory.Filter{
+			{
+				Field: "reflected_at",
+				Op:    memory.OpIsEmpty,
+			},
+		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("scroll memories: %w", err)
+		return nil, fmt.Errorf("scroll unreflected: %w", err)
 	}
 
-	// Filter: keep only those NOT marked as reflected.
+	// Secondary filter: exclude memories that have legacy metadata["reflected"]=true
+	// but were not yet migrated to the reflected_at field.
 	var unreflected []memory.Memory
 	for _, m := range all {
 		if !isReflected(m) {
 			unreflected = append(unreflected, m)
-			if len(unreflected) >= limit {
-				break
-			}
 		}
 	}
 	return unreflected, nil
 }
 
 // isReflected returns true if the memory has been marked as reflected.
+// Checks ReflectedAt > 0 first (W16 new field), then falls back to
+// metadata["reflected"] bool (legacy V1 field) for backward compatibility.
 func isReflected(m memory.Memory) bool {
+	// V2: check ReflectedAt timestamp field (preferred).
+	if m.ReflectedAt > 0 {
+		return true
+	}
+	// V1 fallback: check metadata["reflected"] bool.
 	if m.Metadata == nil {
 		return false
 	}

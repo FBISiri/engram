@@ -217,25 +217,15 @@ func TestFilterToCondition_UnknownOp(t *testing.T) {
 	}
 }
 
-func TestParseURL(t *testing.T) {
-	tests := []struct {
-		raw      string
-		wantHost string
-		wantPort int
-	}{
-		{"localhost:6334", "localhost", 6334},
-		{"http://qdrant.example.com:6334", "qdrant.example.com", 6334},
-		{"https://cloud.qdrant.io:6334", "cloud.qdrant.io", 6334},
-		{"localhost", "localhost", 6334},
+func TestFilterToCondition_IsEmpty(t *testing.T) {
+	f := memory.Filter{Field: "reflected_at", Op: memory.OpIsEmpty}
+	cond := filterToCondition(f)
+	if cond == nil {
+		t.Fatal("expected non-nil condition for OpIsEmpty")
 	}
-	for _, tt := range tests {
-		t.Run(tt.raw, func(t *testing.T) {
-			h, p := parseURL(tt.raw)
-			if h != tt.wantHost || p != tt.wantPort {
-				t.Errorf("parseURL(%q) = (%q, %d), want (%q, %d)", tt.raw, h, p, tt.wantHost, tt.wantPort)
-			}
-		})
-	}
+	// Verify it creates an IsEmpty condition (the condition should be non-nil).
+	// We can't easily inspect the protobuf internals, but non-nil is sufficient
+	// to confirm the case branch was taken.
 }
 
 func TestValueToInterface(t *testing.T) {
