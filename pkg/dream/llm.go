@@ -2,6 +2,7 @@ package dream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -77,7 +78,7 @@ func readClaudeOAuthToken() string {
 }
 
 // callHaiku sends a prompt to Claude Haiku and returns the text response.
-func callHaiku(prompt string) (string, error) {
+func callHaiku(ctx context.Context, prompt string) (string, error) {
 	cfg := getHaikuConfig()
 	if cfg == nil {
 		return "", fmt.Errorf("no Haiku API credentials available")
@@ -94,7 +95,7 @@ func callHaiku(prompt string) (string, error) {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", cfg.BaseURL+"/v1/messages", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.BaseURL+"/v1/messages", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}

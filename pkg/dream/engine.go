@@ -427,6 +427,7 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 		items = append(items, fmt.Sprintf("usage-frequency scan: error (%v)", err))
 	} else {
 		var highAccess, lowAccess int
+		fourteenDaysAgo := float64(time.Now().Add(-14 * 24 * time.Hour).Unix())
 		for _, m := range allMemories {
 			if m.Type == memory.TypeInsight && m.AccessCount > 10 {
 				highAccess++
@@ -440,7 +441,6 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 					}
 				}
 			}
-			fourteenDaysAgo := float64(time.Now().Add(-14 * 24 * time.Hour).Unix())
 			if m.AccessCount == 0 && m.CreatedAt < fourteenDaysAgo {
 				lowAccess++
 				if !e.cfg.DryRun {
@@ -472,7 +472,6 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 // generateInsight calls Haiku to produce a consolidated insight string from a group of events.
 // Returns the insight text and the list of source memory IDs.
 func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory.Memory) (string, []string, error) {
-	_ = ctx // future: context-aware LLM calls
 
 	// Build compact event summaries for the prompt.
 	var sb strings.Builder
@@ -493,7 +492,7 @@ func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory
 	}
 	sb.WriteString("\nInsight:")
 
-	insight, err := callHaiku(sb.String())
+	insight, err := callHaiku(ctx, sb.String())
 	if err != nil {
 		return "", nil, err
 	}
@@ -751,7 +750,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 		}
 		sb.WriteString("\nDiff proposal:")
 
-		proposal, hErr := callHaiku(sb.String())
+		proposal, hErr := callHaiku(ctx, sb.String())
 		if hErr != nil {
 			items = append(items, fmt.Sprintf("  haiku error for %s: %v", c.name, hErr))
 			draftContent += fmt.Sprintf("## %s\n\nError generating proposal: %v\n\n---\n\n", c.name, hErr)

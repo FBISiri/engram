@@ -161,7 +161,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 
 	// Build prompt and call Haiku.
 	prompt := buildPrompt(batch)
-	haikuResponse, err := callHaiku(prompt)
+	haikuResponse, err := callHaiku(ctx, prompt)
 	result.LLMCalls++ // count the Haiku call
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("haiku call failed: %v", err))
@@ -328,7 +328,7 @@ func readClaudeOAuthToken() string {
 }
 
 // callHaiku sends a prompt to Claude Haiku and returns the text response.
-func callHaiku(prompt string) (string, error) {
+func callHaiku(ctx context.Context, prompt string) (string, error) {
 	cfg := getHaikuConfig()
 	if cfg == nil {
 		return "", fmt.Errorf("no Haiku API credentials available")
@@ -345,7 +345,7 @@ func callHaiku(prompt string) (string, error) {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", cfg.BaseURL+"/v1/messages", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.BaseURL+"/v1/messages", bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
