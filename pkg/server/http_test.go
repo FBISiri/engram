@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/FBISiri/engram/pkg/config"
+	"github.com/FBISiri/engram/pkg/memory"
 )
 
 // buildHTTPTestServer creates an HTTPServer backed by the same mock
@@ -19,6 +23,15 @@ func buildHTTPTestServer(t *testing.T, apiKey string) *httptest.Server {
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+// failingStore wraps mockStore but makes Stats() return an error.
+type failingStore struct {
+	mockStore
+}
+
+func (f *failingStore) Stats(_ context.Context) (*memory.CollectionStats, error) {
+	return nil, errors.New("connection refused")
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -35,12 +48,63 @@ func TestHTTPHealth(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
-	var body map[string]string
+	var body healthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body["status"] != "ok" {
-		t.Fatalf("want status=ok, got %q", body["status"])
+	if body.Status != "ok" {
+		t.Fatalf("want status=ok, got %q", body.Status)
+	}
+	if body.Qdrant != "green" {
+		t.Fatalf("want qdrant=green, got %q", body.Qdrant)
+	}
+}
+
+func TestHTTPHealth_NoAuthRequired(t *testing.T) {
+	// /health must be accessible without auth even when apiKey is set.
+	ts := buildHTTPTestServer(t, "secret-key")
+	resp, err := http.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200 (no auth needed), got %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPHealth_Degraded(t *testing.T) {
+	// When Qdrant is unreachable, /health should return 503.
+	store := &failingStore{}
+	embedder := newMockEmbedder()
+	cfg := &config.Config{
+		Weights:        memory.DefaultScoringWeights(),
+		Decay:          memory.DefaultDecayConfig(),
+		MMRLambda:      0.5,
+		DedupThreshold: 0.92,
+	}
+	srv := NewServer(store, embedder, cfg)
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d", resp.StatusCode)
+	}
+	var body healthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "degraded" {
+		t.Fatalf("want status=degraded, got %q", body.Status)
+	}
+	if body.Error == "" {
+		t.Fatal("want non-empty error field when degraded")
 	}
 }
 
@@ -121,9 +185,10 @@ func TestHTTPReflect_WrongMethod(t *testing.T) {
 
 func TestHTTPAuth_MissingToken(t *testing.T) {
 	ts := buildHTTPTestServer(t, "secret-key")
-	resp, err := http.Get(ts.URL + "/health")
+	// /health is exempt from auth, so test with /reflect/check instead.
+	resp, err := http.Get(ts.URL + "/reflect/check")
 	if err != nil {
-		t.Fatalf("GET /health: %v", err)
+		t.Fatalf("GET /reflect/check: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -133,7 +198,7 @@ func TestHTTPAuth_MissingToken(t *testing.T) {
 
 func TestHTTPAuth_ValidToken(t *testing.T) {
 	ts := buildHTTPTestServer(t, "secret-key")
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/health", nil)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/reflect/check", nil)
 	req.Header.Set("Authorization", "Bearer secret-key")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

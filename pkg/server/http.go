@@ -53,7 +53,9 @@ func NewHTTPServer(s *Server, port int, apiKey string) *HTTPServer {
 
 // registerRoutes wires all HTTP handlers.
 func (h *HTTPServer) registerRoutes() {
-	h.mux.HandleFunc("/health", h.withAuth(h.handleHealth))
+	// /health is intentionally NOT behind auth — standard practice for
+	// liveness/readiness probes (k8s, Docker HEALTHCHECK, monitoring).
+	h.mux.HandleFunc("/health", h.handleHealth)
 	h.mux.HandleFunc("/reflect", h.withAuth(h.handleReflect))
 	h.mux.HandleFunc("/reflect/check", h.withAuth(h.handleReflectCheck))
 }
@@ -118,9 +120,35 @@ func (h *HTTPServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // Handlers
 // ─────────────────────────────────────────────────────────────
 
-// handleHealth is a simple liveness probe.
+// healthResponse is the JSON body returned by GET /health.
+type healthResponse struct {
+	Status     string `json:"status"`               // "ok" or "degraded"
+	Qdrant     string `json:"qdrant"`                // collection status from Qdrant
+	PointCount uint64 `json:"point_count"`           // total points in collection
+	Error      string `json:"error,omitempty"`       // non-empty when degraded
+}
+
+// handleHealth performs a deep health check by pinging the Qdrant collection
+// via store.Stats(). Returns 200 with status="ok" when healthy, or 503 with
+// status="degraded" when the backend is unreachable.
 func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	stats, err := h.srv.store.Stats(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, healthResponse{
+			Status: "degraded",
+			Qdrant: "unreachable",
+			Error:  err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, healthResponse{
+		Status:     "ok",
+		Qdrant:     stats.Status,
+		PointCount: stats.PointCount,
+	})
 }
 
 // reflectRequest is the optional JSON body for POST /reflect.
