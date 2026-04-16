@@ -422,7 +422,10 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 	}
 
 	// Usage-frequency weighting (Cognee-inspired).
-	allMemories, _, err := e.store.Scroll(ctx, memory.ScrollOptions{Limit: 500})
+	// Paginate through the full collection — single Scroll(Limit=500) silently
+	// truncates for collections > 500 points (W16 has 783+). Cap at a defensive
+	// upper bound to avoid runaway memory on pathological collections.
+	allMemories, err := scrollAll(ctx, e.store, memory.ScrollOptions{}, 5000)
 	if err != nil {
 		items = append(items, fmt.Sprintf("usage-frequency scan: error (%v)", err))
 	} else {
@@ -556,6 +559,45 @@ func (e *Engine) prune(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
+// scrollAll paginates through the memory store's Scroll endpoint, collecting up
+// to maxTotal memories. A single Scroll call is bounded by opts.Limit (default
+// 50 in the store), so long-lived collections can exceed any fixed page size
+// silently. scrollAll walks the cursor until either the store returns fewer
+// than the page limit (end of data) or maxTotal is reached.
+//
+// opts.Limit sets page size; if unset, a sensible default (200) is used.
+// Filters and other ScrollOptions fields are preserved across pages.
+func scrollAll(ctx context.Context, store memory.Store, opts memory.ScrollOptions, maxTotal int) ([]memory.Memory, error) {
+	if opts.Limit == 0 {
+		opts.Limit = 200
+	}
+	pageLimit := opts.Limit
+	var all []memory.Memory
+	offset := opts.Offset
+
+	for {
+		pageOpts := opts
+		pageOpts.Offset = offset
+		page, nextOffset, err := store.Scroll(ctx, pageOpts)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+
+		if nextOffset == "" || len(page) < pageLimit {
+			break
+		}
+		if maxTotal > 0 && len(all) >= maxTotal {
+			if len(all) > maxTotal {
+				all = all[:maxTotal]
+			}
+			break
+		}
+		offset = nextOffset
+	}
+	return all, nil
+}
+
 // buildSummary generates a human-readable summary of the dream run.
 func (e *Engine) buildSummary() string {
 	total := 0
@@ -640,18 +682,19 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 		return "", items, nil
 	}
 
-	// Search Engram for insights and directives.
-	allInsights, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
-		Limit:   500,
+	// Search Engram for insights and directives. Use scrollAll pagination so
+	// long-lived collections (> page limit) don't silently drop candidates.
+	allInsights, err := scrollAll(ctx, e.store, memory.ScrollOptions{
+		Limit:   200,
 		Filters: []memory.Filter{{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)}},
-	})
+	}, 2000)
 	if err != nil {
 		return "", nil, fmt.Errorf("scroll insights for skill diff: %w", err)
 	}
-	allDirectives, _, _ := e.store.Scroll(ctx, memory.ScrollOptions{
+	allDirectives, _ := scrollAll(ctx, e.store, memory.ScrollOptions{
 		Limit:   200,
 		Filters: []memory.Filter{{Field: "type", Op: memory.OpEq, Value: string(memory.TypeDirective)}},
-	})
+	}, 1000)
 	allMemories := append(allInsights, allDirectives...)
 
 	// Map each skill to relevant memory entries.
