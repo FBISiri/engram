@@ -316,6 +316,11 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	tags := getStringSlice(request, "tags")
 	validUntil := request.GetFloat("valid_until", 0)
 
+	// Auto-compute TTL if caller didn't explicitly set valid_until.
+	// This uses the TTL matrix: type × importance band → duration.
+	ttlCfg := memory.DefaultTTLConfig()
+	computedValidUntil := memory.ComputeValidUntil(ttlCfg, memType, importance, tags, validUntil)
+
 	// Create the memory
 	opts := []memory.Option{
 		memory.WithType(memType),
@@ -323,8 +328,8 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		memory.WithSource(source),
 		memory.WithTags(tags...),
 	}
-	if validUntil > 0 {
-		opts = append(opts, memory.WithValidUntil(validUntil))
+	if computedValidUntil > 0 {
+		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(content, opts...)
 
@@ -443,13 +448,16 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	if validUntil == 0 && len(deletedMemories) > 0 {
 		validUntil = deletedMemories[0].ValidUntil
 	}
+	// Auto-compute TTL if still unset (neither explicit nor inherited)
+	ttlCfg := memory.DefaultTTLConfig()
+	computedValidUntil := memory.ComputeValidUntil(ttlCfg, memType, importance, tags, validUntil)
 	opts := []memory.Option{
 		memory.WithType(memType),
 		memory.WithImportance(importance),
 		memory.WithTags(tags...),
 	}
-	if validUntil > 0 {
-		opts = append(opts, memory.WithValidUntil(validUntil))
+	if computedValidUntil > 0 {
+		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(newContent, opts...)
 
