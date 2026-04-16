@@ -188,15 +188,6 @@ func (e *Engine) orient(ctx context.Context) ([]string, error) {
 
 	// Count by type.
 	for _, t := range []memory.MemoryType{memory.TypeIdentity, memory.TypeEvent, memory.TypeInsight, memory.TypeDirective} {
-		mems, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
-			Limit:   1, // just need count; we scroll with limit 1 to check existence
-			Filters: []memory.Filter{{Field: "type", Op: memory.OpEq, Value: string(t)}},
-		})
-		if err != nil {
-			items = append(items, fmt.Sprintf("type %s: error counting (%v)", t, err))
-			continue
-		}
-		// Scroll doesn't return total count, so do a broader scan.
 		allOfType, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
 			Limit:   500,
 			Filters: []memory.Filter{{Field: "type", Op: memory.OpEq, Value: string(t)}},
@@ -205,7 +196,6 @@ func (e *Engine) orient(ctx context.Context) ([]string, error) {
 			items = append(items, fmt.Sprintf("type %s: error (%v)", t, err))
 			continue
 		}
-		_ = mems
 		items = append(items, fmt.Sprintf("type %s: %d memories", t, len(allOfType)))
 	}
 
@@ -227,7 +217,6 @@ func (e *Engine) orient(ctx context.Context) ([]string, error) {
 // gather finds consolidation candidates.
 func (e *Engine) gather(ctx context.Context) ([]string, error) {
 	var items []string
-	now := float64(time.Now().Unix())
 
 	// 1. Recent events (last 7 days) — candidates for consolidation.
 	sevenDaysAgo := float64(time.Now().Add(-7 * 24 * time.Hour).Unix())
@@ -265,7 +254,6 @@ func (e *Engine) gather(ctx context.Context) ([]string, error) {
 
 	// 4. Never-accessed memories older than 14 days.
 	fourteenDaysAgo := float64(time.Now().Add(-14 * 24 * time.Hour).Unix())
-	_ = now
 	neverAccessed, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
 		Limit: 200,
 		Filters: []memory.Filter{
@@ -415,6 +403,16 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 		mergedCount += len(group)
 		newInsights++
 		items = append(items, fmt.Sprintf("  merged %d events → new insight (id=%s, importance=%.0f)", len(group), newMem.ID[:8], avgImportance))
+
+		// Mark source events as superseded by the new insight to prevent
+		// re-consolidation on subsequent dream runs.
+		for _, srcID := range sourceIDs {
+			if updateErr := e.store.Update(ctx, srcID, map[string]any{
+				"superseded_by": newMem.ID,
+			}); updateErr != nil {
+				items = append(items, fmt.Sprintf("  warn: failed to mark source %s as superseded: %v", srcID[:8], updateErr))
+			}
+		}
 	}
 
 	if mergedCount == 0 && newInsights == 0 && skipped == 0 {
