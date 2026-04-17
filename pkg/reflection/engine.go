@@ -160,6 +160,15 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		return result, nil
 	}
 
+	// W17 v1.1 batch 2: Evidence grounding enforcement. Reflections require
+	// ≥ minEvidenceCount source memories to be written; otherwise reject the
+	// entire run. See validateEvidenceGrounding.
+	if err := validateEvidenceGrounding(batch); err != nil {
+		result.SkipReason = err.Error()
+		result.Duration = formatDuration(time.Since(start))
+		return result, nil
+	}
+
 	// Build prompt and call Haiku.
 	prompt := buildPrompt(batch)
 	haikuResponse, err := callHaiku(ctx, prompt)
@@ -410,6 +419,29 @@ func callHaiku(ctx context.Context, prompt string) (string, error) {
 
 // ── W17 v1.1 helpers ────────────────────────────────────────────────────────
 
+// minEvidenceCount is the minimum number of source memories required for a
+// reflection run to produce insights. Fewer than this → reject the entire
+// batch-mode run (accumulator track). Event-driven single-event reflections
+// bypass this check via their own TriggerCause-based evidence rule.
+//
+// W17 v1.1 batch 2 (2026-04-17): Frank approved enforcement of
+// reflection_source_ids length >= 2 for batch-mode insights, so a reflection
+// cannot be stored as "generalized pattern" when grounded in a single memory.
+const minEvidenceCount = 2
+
+// validateEvidenceGrounding checks that a selected input batch has enough
+// source memories to justify a cross-memory pattern synthesis. Returns a
+// descriptive error suitable for RunResult.SkipReason when rejected.
+func validateEvidenceGrounding(batch []memory.Memory) error {
+	if len(batch) < minEvidenceCount {
+		return fmt.Errorf(
+			"evidence grounding: insufficient source memories (%d < %d) — refusing to synthesize pattern from single source",
+			len(batch), minEvidenceCount,
+		)
+	}
+	return nil
+}
+
 // sourceReflectionTag marks a memory as originating from the Reflection Engine,
 // enabling Dream Engine to skip recent reflection insights during consolidation.
 const sourceReflectionTag = "source:reflection"
@@ -463,4 +495,194 @@ func writeReflectionDraft(ins ParsedInsight, tags []string, sourceIDs []string) 
 		return fmt.Errorf("write draft %s: %w", path, err)
 	}
 	return nil
+}
+
+// ── W17 v1.1 batch 2: Failure-driven (event-driven) reflection track ────────
+
+// TriggerCause categorises what event prompted an immediate single-event
+// reflection. Used to tag the resulting insight so downstream analytics can
+// group failure-driven insights separately from accumulator-driven ones.
+type TriggerCause string
+
+const (
+	// TriggerTaskFailure is raised when a task hit its retry budget
+	// (e.g. event-loop retry_count >= 3).
+	TriggerTaskFailure TriggerCause = "task_failure"
+	// TriggerUserCorrection is raised when Frank explicitly corrects Siri
+	// ("错了", "不对", "not right", etc.) via email or UI feedback.
+	TriggerUserCorrection TriggerCause = "user_correction"
+	// TriggerExternalEvent is a catch-all for other event-driven triggers.
+	TriggerExternalEvent TriggerCause = "external_event"
+)
+
+// SingleEventInput is a compact payload for RunSingleEvent. The caller passes
+// the event text, optional evidence memories retrieved via their own channel
+// (e.g. the related Gmail thread or calendar event), and a cause tag.
+type SingleEventInput struct {
+	// Cause classifies the triggering event. Required.
+	Cause TriggerCause
+	// Summary is a one-line description of the event (e.g. "task
+	// sanitize-description retried 3x and failed"). Required.
+	Summary string
+	// EvidenceIDs are existing Engram memory IDs that ground this reflection.
+	// May be empty — event-driven reflections are permitted to synthesize
+	// from the Summary alone if no related memory is available.
+	EvidenceIDs []string
+	// Importance lets the caller override the default importance of the
+	// resulting insight. 0 → use default (8, since failures are high-signal).
+	Importance float64
+	// ExtraTags are appended to the insight's tags.
+	ExtraTags []string
+}
+
+// RunSingleEvent performs an immediate, lightweight reflection driven by a
+// specific triggering event (task failure, user correction, etc.). Unlike
+// the batch Run path, it bypasses the accumulator thresholds and the
+// batch-mode evidence-grounding floor — a single, specific event is allowed
+// to produce one insight by design.
+//
+// Safety rails still applied:
+//   - DryRun respected.
+//   - source:reflection tag enforced.
+//   - 30-day TTL applied.
+//   - Low-confidence insights (<0.6) still diverted to Obsidian draft.
+//   - Daily-count + min-interval gates are SKIPPED (event-driven track is
+//     supposed to react quickly; failures shouldn't be silenced by quotas).
+func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunResult, error) {
+	start := time.Now()
+	result := &RunResult{
+		DryRun: e.cfg.DryRun,
+		Mode:   "v1-event-" + string(in.Cause),
+	}
+
+	if in.Cause == "" {
+		return nil, fmt.Errorf("RunSingleEvent: Cause is required")
+	}
+	if strings.TrimSpace(in.Summary) == "" {
+		return nil, fmt.Errorf("RunSingleEvent: Summary is required")
+	}
+
+	result.Triggered = true
+	result.InputCount = len(in.EvidenceIDs) // 0 is valid here
+
+	// Build a compact prompt from the event summary and optional evidence IDs.
+	prompt := buildSingleEventPrompt(in)
+	haikuResponse, err := callHaiku(ctx, prompt)
+	result.LLMCalls++
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("haiku call failed: %v", err))
+		result.Duration = formatDuration(time.Since(start))
+		return result, nil
+	}
+
+	insights := parseHaikuResponse(haikuResponse)
+	if len(insights) == 0 {
+		result.Errors = append(result.Errors, "haiku returned no parseable insights")
+		result.Duration = formatDuration(time.Since(start))
+		return result, nil
+	}
+	// Single-event track: only keep the first insight to avoid cascading
+	// speculation from one failure event.
+	insights = insights[:1]
+
+	if e.cfg.DryRun {
+		result.InsightsCreated = len(insights)
+		result.Duration = formatDuration(time.Since(start))
+		return result, nil
+	}
+
+	reflectionValidUntil := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
+
+	for _, ins := range insights {
+		// Merge tags: insight tags + cause + trigger marker + extras.
+		tags := ensureSourceReflectionTag(ins.Tags)
+		tags = append(tags, "trigger:"+string(in.Cause), "reflection-track:event-driven")
+		tags = append(tags, in.ExtraTags...)
+
+		// Caller-provided importance override.
+		importance := ins.Importance
+		if in.Importance > 0 {
+			importance = in.Importance
+		}
+
+		// Low-confidence diversion preserved.
+		if ins.Confidence > 0 && ins.Confidence < 0.6 {
+			if werr := writeReflectionDraft(ins, tags, in.EvidenceIDs); werr != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("write draft failed: %v", werr))
+			} else {
+				result.DraftsWritten++
+			}
+			continue
+		}
+
+		evidenceAny := make([]any, len(in.EvidenceIDs))
+		for i, id := range in.EvidenceIDs {
+			evidenceAny[i] = id
+		}
+
+		insightMem := memory.New(ins.Content,
+			memory.WithType(memory.TypeInsight),
+			memory.WithSource("system"),
+			memory.WithImportance(importance),
+			memory.WithTags(tags...),
+			memory.WithConfidence(ins.Confidence),
+			memory.WithValidUntil(reflectionValidUntil),
+			memory.WithMetadata(map[string]any{
+				"reflection_source_ids": evidenceAny,
+				"reflection_count":      len(in.EvidenceIDs),
+				"reflection_trigger":    string(in.Cause),
+				"reflection_summary":    in.Summary,
+			}),
+		)
+
+		var vec []float32
+		if e.embedder != nil {
+			vec, err = e.embedder.Embed(ctx, ins.Content)
+			if err != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("embed insight failed: %v (skipping)", err))
+				continue
+			}
+		} else {
+			result.Errors = append(result.Errors,
+				"skipped insight (no embedder)")
+			continue
+		}
+
+		if err := e.store.Insert(ctx, insightMem, vec); err != nil {
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("store insight failed: %v", err))
+			continue
+		}
+		result.InsightsCreated++
+	}
+
+	// Note: do NOT call updateLastRun() here — event-driven runs should not
+	// eat into the daily batch-reflection quota.
+	result.Duration = formatDuration(time.Since(start))
+	return result, nil
+}
+
+// buildSingleEventPrompt constructs a compact prompt tailored to a single
+// triggering event. It's deliberately shorter than the batch prompt and
+// asks for a single focused insight.
+func buildSingleEventPrompt(in SingleEventInput) string {
+	var sb strings.Builder
+	sb.WriteString("You are the reflection engine for an AI agent named Siri. ")
+	sb.WriteString("A specific event just occurred that warrants an immediate one-line insight.\n\n")
+	sb.WriteString(fmt.Sprintf("Trigger cause: %s\n", in.Cause))
+	sb.WriteString(fmt.Sprintf("Event summary: %s\n", in.Summary))
+	if len(in.EvidenceIDs) > 0 {
+		sb.WriteString(fmt.Sprintf("Related memory IDs (grounding): %s\n", strings.Join(in.EvidenceIDs, ", ")))
+	}
+	sb.WriteString("\nProduce EXACTLY ONE insight in this format (including --- delimiters):\n")
+	sb.WriteString("---\n")
+	sb.WriteString("INSIGHT: <2-3 sentences in English, third person, focused on what Siri should learn or change>\n")
+	sb.WriteString("IMPORTANCE: <integer 1-10>\n")
+	sb.WriteString("CONFIDENCE: <float 0.0-1.0; <0.6 means speculative>\n")
+	sb.WriteString("TAGS: <comma-separated, max 5>\n")
+	sb.WriteString("---\n\n")
+	sb.WriteString("Keep it grounded to the event. If the event is too vague to draw a useful lesson, emit CONFIDENCE: 0.4 and state the uncertainty honestly.\n")
+	return sb.String()
 }

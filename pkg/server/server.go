@@ -639,6 +639,74 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 // Helpers
 // =============================================================================
 
+// handleReflectionRunEvent implements the reflection_run_event tool (W17 v1.1
+// batch 2). Event-driven single-event reflection triggered by task failures
+// or user corrections — bypasses accumulator thresholds and daily quotas.
+func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	cause, err := request.RequireString("cause")
+	if err != nil {
+		return mcp.NewToolResultError("cause is required"), nil
+	}
+	summary, err := request.RequireString("summary")
+	if err != nil {
+		return mcp.NewToolResultError("summary is required"), nil
+	}
+
+	// Validate cause.
+	var tc reflection.TriggerCause
+	switch cause {
+	case string(reflection.TriggerTaskFailure):
+		tc = reflection.TriggerTaskFailure
+	case string(reflection.TriggerUserCorrection):
+		tc = reflection.TriggerUserCorrection
+	case string(reflection.TriggerExternalEvent):
+		tc = reflection.TriggerExternalEvent
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("invalid cause %q (allowed: task_failure, user_correction, external_event)", cause)), nil
+	}
+
+	evidenceIDs := getStringSlice(request, "evidence_ids")
+	extraTags := getStringSlice(request, "extra_tags")
+
+	importance := 0.0
+	if args := request.GetArguments(); args != nil {
+		if v, ok := args["importance"]; ok {
+			if f, ok := v.(float64); ok {
+				importance = f
+			}
+		}
+	}
+
+	dryRun := false
+	if args := request.GetArguments(); args != nil {
+		if v, ok := args["dry_run"]; ok {
+			if b, ok := v.(bool); ok {
+				dryRun = b
+			}
+		}
+	}
+
+	cfg := reflection.DefaultConfig()
+	cfg.DryRun = dryRun
+
+	eng := reflection.NewEngine(s.store, s.embedder, cfg)
+	result, err := eng.RunSingleEvent(ctx, reflection.SingleEventInput{
+		Cause:       tc,
+		Summary:     summary,
+		EvidenceIDs: evidenceIDs,
+		Importance:  importance,
+		ExtraTags:   extraTags,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("reflection run_event error: %v", err)), nil
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
 // getStringSlice extracts a []string from the request arguments.
 func getStringSlice(request mcp.CallToolRequest, key string) []string {
 	args := request.GetArguments()
