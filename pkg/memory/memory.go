@@ -51,6 +51,12 @@ type Memory struct {
 	// Reflection Engine. Zero means it has not been reflected yet.
 	// Replaces the legacy metadata["reflected"] bool field (W16).
 	ReflectedAt float64 `json:"reflected_at,omitempty"`
+
+	// Confidence is a 0-1 grounding score self-reported by the Reflection
+	// Engine (W17 v1.1) for reflection-origin insights. Zero means "not set"
+	// and is treated as 1.0 in scoring for backward compatibility with
+	// pre-v1.1 memories. Used as a multiplier on the final relevance score.
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 // New creates a new Memory with defaults.
@@ -82,6 +88,7 @@ func WithImportance(i float64) Option       { return func(m *Memory) { m.Importa
 func WithTags(tags ...string) Option        { return func(m *Memory) { m.Tags = tags } }
 func WithMetadata(md map[string]any) Option { return func(m *Memory) { m.Metadata = md } }
 func WithValidUntil(t float64) Option       { return func(m *Memory) { m.ValidUntil = t } }
+func WithConfidence(c float64) Option       { return func(m *Memory) { m.Confidence = c } }
 
 // Validate checks that a Memory has valid fields.
 func (m *Memory) Validate() error {
@@ -155,6 +162,15 @@ func DefaultScoringWeights() ScoringWeights {
 }
 
 // Score computes the final score for a memory given its raw cosine similarity.
+//
+// Final formula (W17 v1.1):
+//
+//	final = confidence × (w_rel·relevance + w_rec·recency + w_imp·importance)
+//
+// where `confidence` is m.Confidence when > 0, else 1.0 (backward compat
+// for pre-v1.1 memories that never set the field). Reflection-origin
+// insights self-report a grounding score in [0, 1]; low-confidence ones
+// are kept out of Engram entirely and saved to Obsidian drafts instead.
 func Score(m *Memory, cosineSim float64, weights ScoringWeights, decay DecayConfig) float64 {
 	// S_relevance: clamp cosine similarity to [0, 1]
 	relevance := math.Max(0, math.Min(1, cosineSim))
@@ -167,7 +183,17 @@ func Score(m *Memory, cosineSim float64, weights ScoringWeights, decay DecayConf
 	// S_importance: normalized to [0, 1]
 	importance := m.Importance / 10.0
 
-	return weights.Relevance*relevance + weights.Recency*recency + weights.Importance*importance
+	base := weights.Relevance*relevance + weights.Recency*recency + weights.Importance*importance
+
+	// Confidence multiplier (W17 v1.1). Zero means unset → treat as 1.0.
+	conf := m.Confidence
+	if conf <= 0 {
+		conf = 1.0
+	}
+	if conf > 1 {
+		conf = 1.0
+	}
+	return conf * base
 }
 
 // clamp restricts v to [lo, hi].

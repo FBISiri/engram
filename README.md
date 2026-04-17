@@ -131,6 +131,10 @@ Use **tags** for further classification: `["relationship", "person:Alice"]`, `["
 
 Memories can have an optional `valid_until` field (Unix timestamp). A background goroutine runs every 10 minutes to clean up expired memories automatically. Set `valid_until` to `0` or omit it for memories that never expire.
 
+### TTL Auto-Calculator
+
+When `valid_until` is not explicitly set on `memory_add` / `memory_update`, Engram derives a sensible TTL from a **type × importance** matrix (e.g., low-importance `event` memories expire within days, high-importance `insight` memories within months, `identity` / `directive` types never expire by default). Explicit `valid_until` values always win — the auto-calculator only fills in when the caller omits it.
+
 ## API
 
 ### MCP Tools
@@ -151,7 +155,7 @@ Enable with `ENGRAM_TRANSPORT=http` or `ENGRAM_TRANSPORT=both` (MCP + HTTP).
 ```
 POST   /reflect         Run one Reflection Engine cycle (optional: {"dry_run": true})
 GET    /reflect/check   Check reflection trigger conditions
-GET    /health          Liveness probe → {"status": "ok"}
+GET    /health          Deep liveness — pings Qdrant in addition to returning {"status": "ok"}. Auth is bypassed so load balancers / Kubernetes probes work without a token.
 ```
 
 Authentication: set `ENGRAM_API_KEY` to require `Authorization: Bearer <key>` on all HTTP requests.

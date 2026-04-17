@@ -302,6 +302,10 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 	// Group events by primary tag.
 	tagGroups := map[string][]memory.Memory{}
 	for _, m := range events {
+		// W17 v1.1: skip recent reflection-origin memories (boundary isolation).
+		if isRecentReflection(m) {
+			continue
+		}
 		tag := "untagged"
 		if len(m.Tags) > 0 {
 			tag = m.Tags[0]
@@ -432,6 +436,10 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 		var highAccess, lowAccess int
 		fourteenDaysAgo := float64(time.Now().Add(-14 * 24 * time.Hour).Unix())
 		for _, m := range allMemories {
+			// W17 v1.1: skip recent reflection-origin insights for boundary isolation.
+			if isRecentReflection(m) {
+				continue
+			}
 			if m.Type == memory.TypeInsight && m.AccessCount > 10 {
 				highAccess++
 				if !e.cfg.DryRun {
@@ -814,4 +822,25 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 
 	items = append(items, fmt.Sprintf("skill diff draft written to: %s", draftPath))
 	return draftPath, items, nil
+}
+
+// ── W17 v1.1 helpers ────────────────────────────────────────────────────────
+
+// isRecentReflection returns true if the memory carries the "source:reflection"
+// tag AND was created less than 7 days ago. Such memories are excluded from
+// Dream Engine consolidation to prevent premature compression or deletion of
+// young, unvalidated reflection-origin insights (W17 v1.1 decision 2).
+func isRecentReflection(m memory.Memory) bool {
+	hasTag := false
+	for _, t := range m.Tags {
+		if t == "source:reflection" {
+			hasTag = true
+			break
+		}
+	}
+	if !hasTag {
+		return false
+	}
+	sevenDaysAgo := float64(time.Now().Add(-7 * 24 * time.Hour).Unix())
+	return m.CreatedAt > sevenDaysAgo
 }

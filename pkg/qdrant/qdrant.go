@@ -94,6 +94,7 @@ const (
 	fieldAccessCount   = "access_count"
 	fieldLastAccessedAt = "last_accessed_at"
 	fieldReflectedAt   = "reflected_at" // W16: replaces metadata["reflected"]
+	fieldConfidence    = "confidence"   // W17 v1.1: reflection-origin grounding score (0-1)
 )
 
 // EnsureCollection creates the collection if it doesn't exist, and idempotently
@@ -587,6 +588,9 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 	if mem.ReflectedAt > 0 {
 		payload[fieldReflectedAt] = mem.ReflectedAt
 	}
+	if mem.Confidence > 0 {
+		payload[fieldConfidence] = mem.Confidence
+	}
 
 	return &qdrant.PointStruct{
 		Id:      qdrant.NewID(mem.ID),
@@ -629,6 +633,9 @@ func pointToMemory(id *qdrant.PointId, payload map[string]*qdrant.Value) *memory
 	}
 	if v, ok := payload[fieldReflectedAt]; ok {
 		mem.ReflectedAt = v.GetDoubleValue()
+	}
+	if v, ok := payload[fieldConfidence]; ok {
+		mem.Confidence = v.GetDoubleValue()
 	}
 
 	return mem

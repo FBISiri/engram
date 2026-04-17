@@ -42,6 +42,7 @@ func buildPrompt(memories []memory.Memory) string {
 			"---\n"+
 			"INSIGHT: <2-4 sentences in English, third person (e.g. \"Siri has been...\", \"Frank tends to...\")>\n"+
 			"IMPORTANCE: <integer 1-10, where 10 = directly impacts agent behavior>\n"+
+			"CONFIDENCE: <float 0.0-1.0, how confident this insight is grounded in the memories above; 0.8 default, <0.6 means speculative>\n"+
 			"TAGS: <comma-separated topic tags, max 5>\n"+
 			"---\n\n"+
 			"Generate only insights clearly supported by the memories below. "+
@@ -74,6 +75,7 @@ func buildPrompt(memories []memory.Memory) string {
 type ParsedInsight struct {
 	Content    string
 	Importance float64
+	Confidence float64 // W17 v1.1: 0-1 grounding score; default 0.8 when CONFIDENCE line absent
 	Tags       []string
 }
 
@@ -98,6 +100,7 @@ func parseHaikuResponse(response string) []ParsedInsight {
 
 		var insight ParsedInsight
 		insight.Importance = 5.0 // default
+		insight.Confidence = 0.8 // W17 v1.1: default when CONFIDENCE line absent
 
 		lines := strings.Split(block, "\n")
 		for _, line := range lines {
@@ -115,6 +118,18 @@ func parseHaikuResponse(response string) []ParsedInsight {
 					if imp >= 1 && imp <= 10 {
 						insight.Importance = imp
 					}
+				}
+			} else if strings.HasPrefix(line, "CONFIDENCE:") {
+				raw := strings.TrimSpace(strings.TrimPrefix(line, "CONFIDENCE:"))
+				var conf float64
+				if _, err := fmt.Sscanf(raw, "%f", &conf); err == nil {
+					if conf < 0 {
+						conf = 0
+					}
+					if conf > 1 {
+						conf = 1
+					}
+					insight.Confidence = conf
 				}
 			} else if strings.HasPrefix(line, "TAGS:") {
 				rawTags := strings.TrimSpace(strings.TrimPrefix(line, "TAGS:"))

@@ -78,6 +78,7 @@ type RunResult struct {
 	SkipReason        string   `json:"skip_reason,omitempty"`
 	InputCount        int      `json:"input_count"`
 	InsightsCreated   int      `json:"insights_created"`
+	DraftsWritten     int      `json:"drafts_written"`      // W17 v1.1: confidence<0.6 → Obsidian draft
 	SourcesMarked     int      `json:"sources_marked"`
 	Duration          string   `json:"duration"`
 	TriggerImportance float64  `json:"trigger_importance,omitempty"`
@@ -184,8 +185,26 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 	}
 
 	if !e.cfg.DryRun {
+		// W17 v1.1: TTL + source:reflection tag for boundary isolation.
+		reflectionValidUntil := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
+
 		// Store each parsed insight.
 		for _, ins := range insights {
+			// W17 v1.1: enforce source:reflection tag on every reflection-origin insight.
+			tags := ensureSourceReflectionTag(ins.Tags)
+
+			// W17 v1.1: low-confidence insights are diverted to Obsidian drafts
+			// instead of polluting Engram.
+			if ins.Confidence > 0 && ins.Confidence < 0.6 {
+				if werr := writeReflectionDraft(ins, tags, sourceIDs); werr != nil {
+					result.Errors = append(result.Errors,
+						fmt.Sprintf("write draft failed: %v", werr))
+				} else {
+					result.DraftsWritten++
+				}
+				continue
+			}
+
 			// Collect source IDs for metadata (convert to []any for Qdrant compatibility).
 			sourceIDsAny := make([]any, len(sourceIDs))
 			for i, id := range sourceIDs {
@@ -196,7 +215,9 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 				memory.WithType(memory.TypeInsight),
 				memory.WithSource("system"),
 				memory.WithImportance(ins.Importance),
-				memory.WithTags(ins.Tags...),
+				memory.WithTags(tags...),
+				memory.WithConfidence(ins.Confidence),
+				memory.WithValidUntil(reflectionValidUntil),
 				memory.WithMetadata(map[string]any{
 					"reflection_source_ids": sourceIDsAny,
 					"reflection_count":      len(sourceIDs),
@@ -385,4 +406,61 @@ func callHaiku(ctx context.Context, prompt string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no text content in haiku response")
+}
+
+// ── W17 v1.1 helpers ────────────────────────────────────────────────────────
+
+// sourceReflectionTag marks a memory as originating from the Reflection Engine,
+// enabling Dream Engine to skip recent reflection insights during consolidation.
+const sourceReflectionTag = "source:reflection"
+
+// ensureSourceReflectionTag returns tags with "source:reflection" appended if
+// not already present. Reflection-origin insights MUST carry this tag per
+// W17 v1.1 boundary isolation (decision 2).
+func ensureSourceReflectionTag(tags []string) []string {
+	for _, t := range tags {
+		if t == sourceReflectionTag {
+			return tags
+		}
+	}
+	return append(append([]string{}, tags...), sourceReflectionTag)
+}
+
+// writeReflectionDraft writes a low-confidence (conf < 0.6) reflection to an
+// Obsidian markdown draft instead of storing it in Engram. This keeps
+// Engram clean of speculative / weakly-grounded inferences while preserving
+// them for later human review in $HOME/siri-vault/Reflection/drafts/.
+func writeReflectionDraft(ins ParsedInsight, tags []string, sourceIDs []string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	dir := home + "/siri-vault/Reflection/drafts"
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	now := time.Now().UTC()
+	ts := now.Format("20060102-150405")
+	shortID := fmt.Sprintf("%x", now.UnixNano())
+	if len(shortID) > 8 {
+		shortID = shortID[len(shortID)-8:]
+	}
+	path := fmt.Sprintf("%s/%s-%s.md", dir, ts, shortID)
+
+	var sb strings.Builder
+	sb.WriteString("# Low-confidence reflection draft\n\n")
+	sb.WriteString(fmt.Sprintf("- created: %s\n", now.Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("- confidence: %.2f\n", ins.Confidence))
+	sb.WriteString(fmt.Sprintf("- importance: %.0f\n", ins.Importance))
+	sb.WriteString(fmt.Sprintf("- tags: %s\n", strings.Join(tags, ", ")))
+	sb.WriteString(fmt.Sprintf("- source_ids: %s\n", strings.Join(sourceIDs, ", ")))
+	sb.WriteString("\n## Insight\n\n")
+	sb.WriteString(ins.Content)
+	sb.WriteString("\n")
+
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		return fmt.Errorf("write draft %s: %w", path, err)
+	}
+	return nil
 }
