@@ -5,12 +5,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"encoding/json"
 
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/dream"
 	"github.com/FBISiri/engram/pkg/embedding"
+	"github.com/FBISiri/engram/pkg/memory"
 	"github.com/FBISiri/engram/pkg/qdrant"
 	"github.com/FBISiri/engram/pkg/reflection"
 	"github.com/FBISiri/engram/pkg/server"
@@ -53,6 +55,11 @@ func main() {
 	case "migrate":
 		fmt.Println("Migration tool not yet implemented.")
 		os.Exit(1)
+	case "migrate-reflected":
+		if err := migrateReflected(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	case "version":
 		fmt.Println("engram v0.1.0")
 	default:
@@ -244,6 +251,7 @@ Commands:
   reflection-check  Check if Reflection Engine should run (outputs JSON)
   reflection-run    Run Reflection Engine (--dry-run)
   migrate           Migrate from chat2mem to Engram
+  migrate-reflected Backfill top-level reflected_at from legacy metadata["reflected"]=true (W17 T1)
   version           Print version`)
 }
 
@@ -326,6 +334,133 @@ func reflectionRun(cfg *config.Config) error {
 		return fmt.Errorf("reflection run: %w", err)
 	}
 
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
+}
+
+// migrateReflected backfills the top-level ReflectedAt field from the legacy
+// metadata["reflected"]=true boolean.
+//
+// W17 T1 Part 2: for every memory where metadata["reflected"]==true AND
+// ReflectedAt == 0, set ReflectedAt to UpdatedAt (or CreatedAt if UpdatedAt
+// is zero). Legacy metadata key is preserved for backward compatibility —
+// this migration is additive only.
+//
+// Flags:
+//
+//	--dry-run   scan + report, don't write
+//	--batch N   scroll batch size (default 100)
+func migrateReflected(cfg *config.Config) error {
+	dryRun := false
+	batchSize := 100
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--dry-run":
+			dryRun = true
+		case "--batch":
+			if i+1 < len(os.Args) {
+				var n int
+				if _, err := fmt.Sscanf(os.Args[i+1], "%d", &n); err == nil && n > 0 {
+					batchSize = n
+				}
+				i++
+			}
+		}
+	}
+
+	store, err := qdrant.New(qdrant.Config{
+		URL:            cfg.QdrantURL,
+		APIKey:         cfg.QdrantAPIKey,
+		CollectionName: cfg.CollectionName,
+		Dimension:      uint64(cfg.EmbeddingDimension),
+	})
+	if err != nil {
+		return fmt.Errorf("connect qdrant: %w", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.EnsureCollection(ctx); err != nil {
+		return fmt.Errorf("ensure collection: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "migrate-reflected: dry_run=%v batch_size=%d\n", dryRun, batchSize)
+
+	var (
+		scanned int
+		matched int
+		updated int
+		offset  string
+	)
+	for {
+		batch, next, err := store.Scroll(ctx, memory.ScrollOptions{
+			Limit:  batchSize,
+			Offset: offset,
+		})
+		if err != nil {
+			return fmt.Errorf("scroll: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		scanned += len(batch)
+
+		for _, m := range batch {
+			// Already has top-level ReflectedAt — nothing to do.
+			if m.ReflectedAt > 0 {
+				continue
+			}
+			// Only migrate when legacy metadata["reflected"] == true.
+			if m.Metadata == nil {
+				continue
+			}
+			v, ok := m.Metadata["reflected"]
+			if !ok {
+				continue
+			}
+			b, ok := v.(bool)
+			if !ok || !b {
+				continue
+			}
+			matched++
+
+			// Pick a sensible timestamp: UpdatedAt, else CreatedAt.
+			ts := m.UpdatedAt
+			if ts <= 0 {
+				ts = m.CreatedAt
+			}
+			if ts <= 0 {
+				// Last-resort: now. Shouldn't happen in practice.
+				ts = float64(time.Now().Unix())
+			}
+
+			if dryRun {
+				fmt.Fprintf(os.Stderr, "  would migrate id=%s reflected_at=%.0f\n", m.ID, ts)
+				continue
+			}
+
+			if err := store.Update(ctx, m.ID, map[string]any{
+				"reflected_at": ts,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "  update %s failed: %v\n", m.ID, err)
+				continue
+			}
+			updated++
+		}
+
+		if next == "" || next == offset {
+			break
+		}
+		offset = next
+	}
+
+	result := map[string]any{
+		"dry_run": dryRun,
+		"scanned": scanned,
+		"matched": matched,
+		"updated": updated,
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)

@@ -204,6 +204,22 @@ func TestIsReflected(t *testing.T) {
 			mem:      memory.Memory{Metadata: map[string]any{"reflected": "true"}},
 			expected: false,
 		},
+		// W17 T1 Part 2: top-level ReflectedAt path.
+		{
+			name:     "ReflectedAt > 0 (V2 field)",
+			mem:      memory.Memory{ReflectedAt: 1700000000},
+			expected: true,
+		},
+		{
+			name:     "ReflectedAt > 0 wins over metadata=false",
+			mem:      memory.Memory{ReflectedAt: 1700000000, Metadata: map[string]any{"reflected": false}},
+			expected: true,
+		},
+		{
+			name:     "ReflectedAt == 0, metadata=true — legacy fallback still works",
+			mem:      memory.Memory{ReflectedAt: 0, Metadata: map[string]any{"reflected": true}},
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
