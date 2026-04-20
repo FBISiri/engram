@@ -88,8 +88,14 @@ func (f *fakeStore) Update(_ context.Context, id string, fields map[string]any) 
 	if !ok {
 		return fmt.Errorf("not found: %s", id)
 	}
-	if tags, ok := fields["tags"].([]string); ok {
+	switch tags := fields["tags"].(type) {
+	case []string:
 		m.Tags = append([]string(nil), tags...)
+	case []any:
+		m.Tags = make([]string, len(tags))
+		for i, t := range tags {
+			m.Tags[i] = t.(string)
+		}
 	}
 	f.mems[id] = m
 	return nil

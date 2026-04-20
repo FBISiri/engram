@@ -307,8 +307,12 @@ func patch(ctx context.Context, store backfillStore, cs []candidate, batchSize i
 	)
 	for i, c := range cs {
 		newTags := appendTag(c.OldTags, sourceReflectionTag)
+		tagValues := make([]any, len(newTags))
+		for j, t := range newTags {
+			tagValues[j] = t
+		}
 		if err := store.Update(ctx, c.ID, map[string]any{
-			"tags": newTags,
+			"tags": tagValues,
 		}); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", c.ID, err))
 			fmt.Fprintf(os.Stderr, "  update %s FAILED: %v\n", c.ID, err)
