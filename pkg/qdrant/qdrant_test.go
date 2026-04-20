@@ -479,3 +479,51 @@ func TestBuildExpiryFilter_ZeroValidUntilNotExcluded(t *testing.T) {
 		t.Error("permanent memory (valid_until=0) should NOT be excluded, but it would be")
 	}
 }
+
+// TestMemoryReflectedAtQdrantRoundtrip verifies that the ReflectedAt field
+// survives a memoryToPoint → pointToMemory cycle (W17 T1 Part 1).
+func TestMemoryReflectedAtQdrantRoundtrip(t *testing.T) {
+	t.Run("SetValue_Roundtrip", func(t *testing.T) {
+		reflectedTs := float64(time.Now().Unix()) - 3600 // 1h ago
+		mem := memory.New("reflected memory",
+			memory.WithType(memory.TypeInsight),
+			memory.WithImportance(7),
+		)
+		mem.ReflectedAt = reflectedTs
+
+		vector := make([]float32, 4)
+		pt := memoryToPoint(mem, vector)
+
+		// Payload must carry the reflected_at field.
+		if v, ok := pt.Payload["reflected_at"]; !ok {
+			t.Fatal("expected reflected_at in payload, missing")
+		} else if v.GetDoubleValue() != reflectedTs {
+			t.Errorf("payload reflected_at = %f, want %f", v.GetDoubleValue(), reflectedTs)
+		}
+
+		restored := pointToMemory(pt.Id, pt.Payload)
+		if restored.ReflectedAt != reflectedTs {
+			t.Errorf("restored ReflectedAt = %f, want %f", restored.ReflectedAt, reflectedTs)
+		}
+	})
+
+	t.Run("Zero_OmittedFromPayload", func(t *testing.T) {
+		mem := memory.New("unreflected memory",
+			memory.WithType(memory.TypeEvent),
+			memory.WithImportance(5),
+		)
+		// ReflectedAt defaults to 0.
+
+		vector := make([]float32, 4)
+		pt := memoryToPoint(mem, vector)
+
+		if _, ok := pt.Payload["reflected_at"]; ok {
+			t.Error("payload should NOT contain reflected_at when zero")
+		}
+
+		restored := pointToMemory(pt.Id, pt.Payload)
+		if restored.ReflectedAt != 0 {
+			t.Errorf("restored ReflectedAt = %f, want 0 for unset field", restored.ReflectedAt)
+		}
+	})
+}

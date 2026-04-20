@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -318,4 +320,85 @@ func TestValidTypes(t *testing.T) {
 	if ValidTypes[MemoryType("bogus")] {
 		t.Error("ValidTypes['bogus'] = true, want false")
 	}
+}
+
+// ── ReflectedAt Roundtrip Tests (W17 T1) ──
+
+// TestMemoryReflectedAtRoundtrip verifies that the ReflectedAt field survives
+// JSON marshal/unmarshal cycles and respects the `omitempty` tag when unset.
+// This is the W17 T1 Part 1 test: Memory struct gains top-level reflected_at.
+func TestMemoryReflectedAtRoundtrip(t *testing.T) {
+	t.Run("SetValue_SurvivesRoundtrip", func(t *testing.T) {
+		now := float64(time.Now().Unix())
+		m := New("test content", WithType(TypeEvent), WithImportance(5))
+		m.ReflectedAt = now
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+
+		// JSON should contain the reflected_at field.
+		if !strings.Contains(string(data), `"reflected_at"`) {
+			t.Errorf("marshaled JSON should contain reflected_at, got: %s", data)
+		}
+
+		var got Memory
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if got.ReflectedAt != now {
+			t.Errorf("ReflectedAt roundtrip: got %f, want %f", got.ReflectedAt, now)
+		}
+	})
+
+	t.Run("Zero_OmittedFromJSON", func(t *testing.T) {
+		m := New("test content", WithType(TypeEvent), WithImportance(5))
+		// ReflectedAt defaults to 0.
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+
+		// omitempty means zero value must not appear in JSON.
+		if strings.Contains(string(data), `"reflected_at"`) {
+			t.Errorf("marshaled JSON should NOT contain reflected_at when zero, got: %s", data)
+		}
+
+		var got Memory
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if got.ReflectedAt != 0 {
+			t.Errorf("ReflectedAt should be 0 after roundtrip of unset field, got %f", got.ReflectedAt)
+		}
+	})
+
+	t.Run("UnmarshalExplicitValue", func(t *testing.T) {
+		// Simulate reading a Memory from an external source (e.g., Qdrant payload
+		// decoded into JSON) where reflected_at is explicitly set.
+		raw := `{
+			"id": "abc-123",
+			"type": "insight",
+			"content": "reflected memory",
+			"source": "agent",
+			"importance": 7,
+			"tags": ["a", "b"],
+			"created_at": 1700000000,
+			"updated_at": 1700000100,
+			"access_count": 3,
+			"reflected_at": 1700000200
+		}`
+		var m Memory
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if m.ReflectedAt != 1700000200 {
+			t.Errorf("ReflectedAt = %f, want 1700000200", m.ReflectedAt)
+		}
+		if m.Type != TypeInsight {
+			t.Errorf("Type = %s, want insight", m.Type)
+		}
+	})
 }
