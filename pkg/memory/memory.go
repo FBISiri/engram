@@ -57,6 +57,9 @@ type Memory struct {
 	// and is treated as 1.0 in scoring for backward compatibility with
 	// pre-v1.1 memories. Used as a multiplier on the final relevance score.
 	Confidence float64 `json:"confidence,omitempty"`
+
+	ArchivedAt    float64 `json:"archived_at,omitempty"`
+	ArchiveReason string  `json:"archive_reason,omitempty"`
 }
 
 // New creates a new Memory with defaults.

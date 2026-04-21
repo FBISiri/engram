@@ -24,7 +24,12 @@ import (
 
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/memory"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+var tracer = otel.Tracer("engram.reflection")
 
 // Config holds Reflection Engine runtime configuration.
 type Config struct {
@@ -91,6 +96,15 @@ type RunResult struct {
 	EvidenceCount   int      `json:"evidence_count,omitempty"`    // V2: evidence set size
 	LLMCalls        int      `json:"llm_calls"`                   // total Haiku calls
 	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`       // estimated USD cost
+
+	// R-S3: TTL observability fields.
+	// ValidUntilSet is true when ALL insights produced in this run have a
+	// non-zero ValidUntil — i.e. the entire run output is TTL-reclaimable.
+	// Any single missing TTL → false (fail-closed for observability).
+	ValidUntilSet bool    `json:"valid_until_set"`
+	// ValidUntil is the earliest (minimum) expiry across all produced insights,
+	// in RFC 3339 UTC. Null when ValidUntilSet is false.
+	ValidUntil    *string `json:"valid_until"`
 }
 
 // Engine orchestrates the reflection cycle.
@@ -128,12 +142,16 @@ func (e *Engine) Check(ctx context.Context) (*CheckResult, error) {
 // Run executes one reflection cycle. Respects DryRun mode.
 // Returns RunResult with metrics on what was done.
 func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
+	ctx, span := tracer.Start(ctx, "engram.reflection.run")
+	defer span.End()
+
 	start := time.Now()
 	mode := e.cfg.Mode
 	if mode == "" {
 		mode = "v1"
 	}
 	result := &RunResult{DryRun: e.cfg.DryRun, Mode: mode + "-flat"}
+	defer func() { setRunSpanAttributes(span, result) }()
 
 	// Evaluate trigger conditions.
 	checkResult, unreflected, err := e.check(ctx)
@@ -197,6 +215,8 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		// W17 v1.1: TTL + source:reflection tag for boundary isolation.
 		reflectionValidUntil := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
 
+		var storedTTLs []float64 // R-S3: track TTLs for observability
+
 		// Store each parsed insight.
 		for _, ins := range insights {
 			// W17 v1.1: enforce source:reflection tag on every reflection-origin insight.
@@ -258,7 +278,10 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 				continue
 			}
 			result.InsightsCreated++
+			storedTTLs = append(storedTTLs, reflectionValidUntil)
 		}
+
+		setValidUntilFields(result, storedTTLs)
 
 		// Mark source memories as reflected using ReflectedAt timestamp (W16).
 		// Legacy metadata["reflected"] is no longer written; isReflected() has fallback.
@@ -283,10 +306,56 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		// Dry run: report what would happen.
 		result.InsightsCreated = len(insights) // what would be created
 		result.SourcesMarked = len(sourceIDs)  // what would be marked
+		dryTTL := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
+		dryTTLs := make([]float64, len(insights))
+		for i := range dryTTLs {
+			dryTTLs[i] = dryTTL
+		}
+		setValidUntilFields(result, dryTTLs)
 	}
 
 	result.Duration = formatDuration(time.Since(start))
 	return result, nil
+}
+
+// setValidUntilFields populates the R-S3 observability fields on RunResult.
+// ttls collects the ValidUntil value for each insight that was actually stored
+// (not drafts, not skipped). If all are non-zero → set=true, valid_until=min.
+func setValidUntilFields(result *RunResult, ttls []float64) {
+	if len(ttls) == 0 {
+		result.ValidUntilSet = false
+		result.ValidUntil = nil
+		return
+	}
+	minTTL := ttls[0]
+	for _, v := range ttls {
+		if v == 0 {
+			result.ValidUntilSet = false
+			result.ValidUntil = nil
+			return
+		}
+		if v < minTTL {
+			minTTL = v
+		}
+	}
+	result.ValidUntilSet = true
+	ts := time.Unix(int64(minTTL), 0).UTC().Format(time.RFC3339)
+	result.ValidUntil = &ts
+}
+
+// setRunSpanAttributes writes R-S3 observability attributes onto the OTel span.
+func setRunSpanAttributes(span trace.Span, r *RunResult) {
+	if r == nil {
+		return
+	}
+	span.SetAttributes(
+		attribute.Bool("engram.memory.valid_until_set", r.ValidUntilSet),
+	)
+	if r.ValidUntil != nil {
+		span.SetAttributes(attribute.String("engram.memory.valid_until", *r.ValidUntil))
+	} else {
+		span.SetAttributes(attribute.String("engram.memory.valid_until", ""))
+	}
 }
 
 // ── Haiku LLM call ─────────────────────────────────────────────────────────
@@ -549,18 +618,22 @@ type SingleEventInput struct {
 //   - Daily-count + min-interval gates are SKIPPED (event-driven track is
 //     supposed to react quickly; failures shouldn't be silenced by quotas).
 func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunResult, error) {
-	start := time.Now()
-	result := &RunResult{
-		DryRun: e.cfg.DryRun,
-		Mode:   "v1-event-" + string(in.Cause),
-	}
-
 	if in.Cause == "" {
 		return nil, fmt.Errorf("RunSingleEvent: Cause is required")
 	}
 	if strings.TrimSpace(in.Summary) == "" {
 		return nil, fmt.Errorf("RunSingleEvent: Summary is required")
 	}
+
+	ctx, span := tracer.Start(ctx, "engram.reflection.run")
+	defer span.End()
+
+	start := time.Now()
+	result := &RunResult{
+		DryRun: e.cfg.DryRun,
+		Mode:   "v1-event-" + string(in.Cause),
+	}
+	defer func() { setRunSpanAttributes(span, result) }()
 
 	result.Triggered = true
 	result.InputCount = len(in.EvidenceIDs) // 0 is valid here
@@ -587,11 +660,14 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 
 	if e.cfg.DryRun {
 		result.InsightsCreated = len(insights)
+		dryTTL := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
+		setValidUntilFields(result, []float64{dryTTL})
 		result.Duration = formatDuration(time.Since(start))
 		return result, nil
 	}
 
 	reflectionValidUntil := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
+	var storedTTLs []float64 // R-S3: track TTLs for observability
 
 	for _, ins := range insights {
 		// Merge tags: insight tags + cause + trigger marker + extras.
@@ -656,7 +732,10 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 			continue
 		}
 		result.InsightsCreated++
+		storedTTLs = append(storedTTLs, reflectionValidUntil)
 	}
+
+	setValidUntilFields(result, storedTTLs)
 
 	// Note: do NOT call updateLastRun() here — event-driven runs should not
 	// eat into the daily batch-reflection quota.

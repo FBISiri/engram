@@ -94,7 +94,9 @@ const (
 	fieldAccessCount   = "access_count"
 	fieldLastAccessedAt = "last_accessed_at"
 	fieldReflectedAt   = "reflected_at" // W16: replaces metadata["reflected"]
-	fieldConfidence    = "confidence"   // W17 v1.1: reflection-origin grounding score (0-1)
+	fieldConfidence    = "confidence"      // W17 v1.1: reflection-origin grounding score (0-1)
+	fieldArchivedAt    = "archived_at"     // W17: memory-expiry schema
+	fieldArchiveReason = "archive_reason"  // W17: memory-expiry schema
 )
 
 // EnsureCollection creates the collection if it doesn't exist, and idempotently
@@ -130,7 +132,9 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldValidUntil, qdrant.FieldType_FieldTypeFloat},
 		{fieldAccessCount, qdrant.FieldType_FieldTypeInteger},
 		{fieldLastAccessedAt, qdrant.FieldType_FieldTypeFloat},
-		{fieldReflectedAt, qdrant.FieldType_FieldTypeFloat}, // W16: enables O(K) unreflected query
+		{fieldReflectedAt, qdrant.FieldType_FieldTypeFloat},     // W16: enables O(K) unreflected query
+		{fieldArchivedAt, qdrant.FieldType_FieldTypeFloat},      // W17: memory-expiry
+		{fieldArchiveReason, qdrant.FieldType_FieldTypeKeyword}, // W17: memory-expiry
 	}
 
 	for _, idx := range indexes {
@@ -591,6 +595,12 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 	if mem.Confidence > 0 {
 		payload[fieldConfidence] = mem.Confidence
 	}
+	if mem.ArchivedAt > 0 {
+		payload[fieldArchivedAt] = mem.ArchivedAt
+	}
+	if mem.ArchiveReason != "" {
+		payload[fieldArchiveReason] = mem.ArchiveReason
+	}
 
 	return &qdrant.PointStruct{
 		Id:      qdrant.NewID(mem.ID),
@@ -636,6 +646,12 @@ func pointToMemory(id *qdrant.PointId, payload map[string]*qdrant.Value) *memory
 	}
 	if v, ok := payload[fieldConfidence]; ok {
 		mem.Confidence = v.GetDoubleValue()
+	}
+	if v, ok := payload[fieldArchivedAt]; ok {
+		mem.ArchivedAt = v.GetDoubleValue()
+	}
+	if v, ok := payload[fieldArchiveReason]; ok {
+		mem.ArchiveReason = v.GetStringValue()
 	}
 
 	return mem

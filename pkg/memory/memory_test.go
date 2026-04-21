@@ -402,3 +402,135 @@ func TestMemoryReflectedAtRoundtrip(t *testing.T) {
 		}
 	})
 }
+
+// ── ArchivedAt / ArchiveReason Roundtrip Tests (W17 memory-expiry schema) ──
+
+func TestMemoryArchivedFieldsRoundtrip(t *testing.T) {
+	t.Run("SetValues_SurviveRoundtrip", func(t *testing.T) {
+		m := New("archived content", WithType(TypeEvent), WithImportance(5))
+		m.ArchivedAt = 1700000300
+		m.ArchiveReason = "ttl_expired"
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if !strings.Contains(string(data), `"archived_at"`) {
+			t.Errorf("marshaled JSON should contain archived_at, got: %s", data)
+		}
+		if !strings.Contains(string(data), `"archive_reason"`) {
+			t.Errorf("marshaled JSON should contain archive_reason, got: %s", data)
+		}
+
+		var got Memory
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if got.ArchivedAt != 1700000300 {
+			t.Errorf("ArchivedAt roundtrip: got %f, want 1700000300", got.ArchivedAt)
+		}
+		if got.ArchiveReason != "ttl_expired" {
+			t.Errorf("ArchiveReason roundtrip: got %q, want 'ttl_expired'", got.ArchiveReason)
+		}
+	})
+
+	t.Run("Zero_OmittedFromJSON", func(t *testing.T) {
+		m := New("not archived", WithType(TypeEvent), WithImportance(5))
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if strings.Contains(string(data), `"archived_at"`) {
+			t.Errorf("marshaled JSON should NOT contain archived_at when zero, got: %s", data)
+		}
+		if strings.Contains(string(data), `"archive_reason"`) {
+			t.Errorf("marshaled JSON should NOT contain archive_reason when empty, got: %s", data)
+		}
+	})
+
+	t.Run("UnmarshalExplicitValues", func(t *testing.T) {
+		raw := `{
+			"id": "xyz-789",
+			"type": "event",
+			"content": "old memory",
+			"source": "agent",
+			"importance": 5,
+			"tags": [],
+			"created_at": 1700000000,
+			"updated_at": 1700000100,
+			"access_count": 0,
+			"archived_at": 1700000400,
+			"archive_reason": "low_importance"
+		}`
+		var m Memory
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if m.ArchivedAt != 1700000400 {
+			t.Errorf("ArchivedAt = %f, want 1700000400", m.ArchivedAt)
+		}
+		if m.ArchiveReason != "low_importance" {
+			t.Errorf("ArchiveReason = %q, want 'low_importance'", m.ArchiveReason)
+		}
+	})
+
+	t.Run("BackwardCompat_OldJSON_NoArchiveFields", func(t *testing.T) {
+		raw := `{
+			"id": "old-1",
+			"type": "identity",
+			"content": "legacy memory",
+			"source": "user",
+			"importance": 7,
+			"tags": ["test"],
+			"created_at": 1600000000,
+			"updated_at": 1600000000,
+			"access_count": 5
+		}`
+		var m Memory
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if m.ArchivedAt != 0 {
+			t.Errorf("ArchivedAt should be 0 for old JSON, got %f", m.ArchivedAt)
+		}
+		if m.ArchiveReason != "" {
+			t.Errorf("ArchiveReason should be empty for old JSON, got %q", m.ArchiveReason)
+		}
+	})
+}
+
+func TestMemoryLastAccessedAtRoundtrip(t *testing.T) {
+	t.Run("SetValue_SurvivesRoundtrip", func(t *testing.T) {
+		m := New("accessed content", WithType(TypeEvent), WithImportance(5))
+		m.LastAccessedAt = 1700000500
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if !strings.Contains(string(data), `"last_accessed_at"`) {
+			t.Errorf("marshaled JSON should contain last_accessed_at, got: %s", data)
+		}
+
+		var got Memory
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if got.LastAccessedAt != 1700000500 {
+			t.Errorf("LastAccessedAt roundtrip: got %f, want 1700000500", got.LastAccessedAt)
+		}
+	})
+
+	t.Run("Zero_OmittedFromJSON", func(t *testing.T) {
+		m := New("never accessed", WithType(TypeEvent), WithImportance(5))
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if strings.Contains(string(data), `"last_accessed_at"`) {
+			t.Errorf("marshaled JSON should NOT contain last_accessed_at when zero, got: %s", data)
+		}
+	})
+}
