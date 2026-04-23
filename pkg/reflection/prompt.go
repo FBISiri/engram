@@ -10,10 +10,25 @@ import (
 
 const haikuMaxTokens = 1500
 
-// formatAge returns a human-readable relative time string for a memory's creation timestamp.
-// Used to give the Haiku model temporal context about each memory (W16).
-func formatAge(createdAt float64) string {
-	age := time.Since(time.Unix(int64(createdAt), 0))
+// humanAge returns a human-readable relative time string for a memory's
+// creation timestamp, given an explicit "now" reference. Passing "now"
+// in (rather than calling time.Now() internally) makes the helper
+// deterministic and unit-testable. Used to give the Haiku model temporal
+// context about each memory (W16/W17 v1.2 T2).
+//
+// Bucketing:
+//   - <  1 hour : "Nmin ago"
+//   - <  24 h   : "Nh ago"
+//   - <  7 days : "Nd ago"
+//   - >= 7 days : "Nw ago"
+//
+// Future timestamps (createdAt > now) clamp to "0min ago" rather than
+// emitting a negative value — keeps the prompt clean.
+func humanAge(createdAt float64, now time.Time) string {
+	age := now.Sub(time.Unix(int64(createdAt), 0))
+	if age < 0 {
+		age = 0
+	}
 	switch {
 	case age < time.Hour:
 		return fmt.Sprintf("%dmin ago", int(age.Minutes()))
@@ -27,7 +42,14 @@ func formatAge(createdAt float64) string {
 }
 
 // buildPrompt constructs the Haiku reflection prompt from a batch of memories.
+// Uses time.Now() as the reference for age formatting; tests should call
+// buildPromptAt with an injected clock instead.
 func buildPrompt(memories []memory.Memory) string {
+	return buildPromptAt(memories, time.Now())
+}
+
+// buildPromptAt is buildPrompt with an explicit reference time, for tests.
+func buildPromptAt(memories []memory.Memory, now time.Time) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf(
@@ -60,7 +82,7 @@ func buildPrompt(memories []memory.Memory) string {
 		if len(idShort) > 8 {
 			idShort = idShort[:8]
 		}
-		age := formatAge(m.CreatedAt)
+		age := humanAge(m.CreatedAt, now)
 		sb.WriteString(fmt.Sprintf(
 			"%d. [id=%s type=%s importance=%.0f age=%s] %s\n",
 			i+1, idShort, m.Type, m.Importance, age, content,
