@@ -1137,13 +1137,21 @@ func TestReflectionRun_DryRun(t *testing.T) {
 		t.Errorf("dry_run should not write to store: before=%d after=%d", countBefore, countAfter)
 	}
 
+	// Reported counters must be zero — no side effects in dry run.
+	if parsed.InsightsCreated != 0 {
+		t.Errorf("dry_run insights_created should be 0, got %d", parsed.InsightsCreated)
+	}
+	if parsed.SourcesMarked != 0 {
+		t.Errorf("dry_run sources_marked should be 0, got %d", parsed.SourcesMarked)
+	}
+
 	// Duration must be present.
 	if parsed.Duration == "" {
 		t.Error("expected non-empty duration in RunResult")
 	}
 
-	t.Logf("dry_run result: triggered=%v insights_would_create=%d skip_reason=%q errors=%v",
-		parsed.Triggered, parsed.InsightsCreated, parsed.SkipReason, parsed.Errors)
+	t.Logf("dry_run result: triggered=%v skip_reason=%q errors=%v",
+		parsed.Triggered, parsed.SkipReason, parsed.Errors)
 }
 
 // TestReflectionRun_InvalidDryRunArg verifies that a non-boolean dry_run arg

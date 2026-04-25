@@ -9,6 +9,7 @@ import (
 
 	"encoding/json"
 
+	otelpkg "github.com/FBISiri/engram/internal/otel"
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/dream"
 	"github.com/FBISiri/engram/pkg/embedding"
@@ -70,6 +71,14 @@ func main() {
 }
 
 func serve(cfg *config.Config) error {
+	tp, err := otelpkg.NewTracerProvider(otelpkg.LoadConfigFromEnv())
+	if err != nil {
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	if tp != nil {
+		defer tp.Shutdown(context.Background())
+	}
+
 	fmt.Fprintf(os.Stderr, "Starting Engram server (transport: %s)\n", cfg.Transport)
 	fmt.Fprintf(os.Stderr, "  Qdrant:     %s (collection: %s)\n", cfg.QdrantURL, cfg.CollectionName)
 	fmt.Fprintf(os.Stderr, "  Embedding:  %s (%dd)\n", cfg.EmbeddingModel, cfg.EmbeddingDimension)
@@ -285,9 +294,14 @@ func reflectionCheck(cfg *config.Config) error {
 // Outputs JSON RunResult.
 func reflectionRun(cfg *config.Config) error {
 	dryRun := false
+	mode := ""
 	for i := 2; i < len(os.Args); i++ {
 		if os.Args[i] == "--dry-run" {
 			dryRun = true
+		}
+		if os.Args[i] == "--mode" && i+1 < len(os.Args) {
+			mode = os.Args[i+1]
+			i++
 		}
 	}
 
@@ -327,6 +341,9 @@ func reflectionRun(cfg *config.Config) error {
 
 	reflCfg := reflection.DefaultConfig()
 	reflCfg.DryRun = dryRun
+	if mode != "" {
+		reflCfg.Mode = mode
+	}
 
 	eng := reflection.NewEngine(store, embedder, reflCfg)
 	result, err := eng.Run(ctx)

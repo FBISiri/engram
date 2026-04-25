@@ -61,6 +61,30 @@ type Config struct {
 	// EvidencePerFocal is the number of memories retrieved per focal question
 	// via semantic search in V2. Default: 10.
 	EvidencePerFocal int
+
+	// AllowedProvenances is a whitelist of provenance values for evidence filtering.
+	// Only used when RequireProvenance is true.
+	AllowedProvenances []string
+
+	// RequireProvenance enables provenance-based filtering in evidence retrieval.
+	// Default: false (provenance P0 not yet landed).
+	RequireProvenance bool
+
+	// EvidenceSearchTimeout is the per-question store.Search timeout. Default: 3s, hard max: 10s.
+	EvidenceSearchTimeout time.Duration
+
+	// FocalModelStep3 is the model ID for Part3 dialectic LLM calls. Default: Haiku.
+	FocalModelStep3 string
+
+	// DialecticTimeout is the per-question LLM call timeout for Part3. Default: 15s, hard max: 30s.
+	DialecticTimeout time.Duration
+
+	// MinInsightConfidence is the minimum confidence for a dialectic insight to
+	// be written back to the store. Below this → counted as Skipped. Default: 0.5.
+	MinInsightConfidence float64
+
+	// WriteBackTimeout is the total timeout for Stage 4 write-back. Default: 30s, hard max: 120s.
+	WriteBackTimeout time.Duration
 }
 
 // DefaultConfig returns the default Reflection Engine configuration.
@@ -96,6 +120,26 @@ type RunResult struct {
 	EvidenceCount   int      `json:"evidence_count,omitempty"`    // V2: evidence set size
 	LLMCalls        int      `json:"llm_calls"`                   // total Haiku calls
 	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`       // estimated USD cost
+
+	// V2 Part2 fields: per-question evidence retrieval observability.
+	EvidenceOverlap   int   `json:"evidence_overlap,omitempty"`
+	PerQuestionCounts []int `json:"per_question_counts,omitempty"`
+	DroppedNoEvidence int   `json:"dropped_no_evidence,omitempty"`
+	EvidenceSearchMs  int64 `json:"evidence_search_ms,omitempty"`
+
+	// V2 Part3 fields: dialectic insight observability.
+	DialecticOkCount            int   `json:"dialectic_ok_count,omitempty"`
+	DialecticFailedCount        int   `json:"dialectic_failed_count,omitempty"`
+	DialecticDroppedNoEvidence  int   `json:"dialectic_dropped_no_evidence,omitempty"`
+	DialecticDroppedLowConf     int   `json:"dialectic_dropped_low_conf,omitempty"`
+	DialecticLLMCalls           int   `json:"dialectic_llm_calls,omitempty"`
+	DialecticLLMMs              int64 `json:"dialectic_llm_ms,omitempty"`
+
+	// V2 Day5 fields: write-back observability.
+	InsightsWritten    int   `json:"insights_written,omitempty"`
+	InsightsSkipped    int   `json:"insights_skipped,omitempty"`
+	InsightsWriteFailed int  `json:"insights_write_failed,omitempty"`
+	WriteBackMs        int64 `json:"write_back_ms,omitempty"`
 
 	// R-S3: TTL observability fields.
 	// ValidUntilSet is true when ALL insights produced in this run have a
@@ -145,11 +189,16 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 	ctx, span := tracer.Start(ctx, "engram.reflection.run")
 	defer span.End()
 
-	start := time.Now()
 	mode := e.cfg.Mode
 	if mode == "" {
 		mode = "v1"
 	}
+
+	if mode == "v2" {
+		return e.RunV2(ctx)
+	}
+
+	start := time.Now()
 	result := &RunResult{DryRun: e.cfg.DryRun, Mode: mode + "-flat"}
 	defer func() { setRunSpanAttributes(span, result) }()
 
@@ -303,9 +352,9 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 				fmt.Sprintf("update last run failed: %v", err))
 		}
 	} else {
-		// Dry run: report what would happen.
-		result.InsightsCreated = len(insights) // what would be created
-		result.SourcesMarked = len(sourceIDs)  // what would be marked
+		// Dry run: no writes occurred; keep counters at zero.
+		result.InsightsCreated = 0
+		result.SourcesMarked = 0
 		dryTTL := float64(time.Now().Add(30 * 24 * time.Hour).Unix())
 		dryTTLs := make([]float64, len(insights))
 		for i := range dryTTLs {
@@ -368,10 +417,15 @@ type haikuConfig struct {
 	IsOAuth bool
 }
 
-// getHaikuConfig returns the best available Haiku configuration.
-// Mirrors the logic in pkg/dream/llm.go.
+// haikuModelOverride is set by RunV2 before Stage 3 (dialectic) to apply Config.FocalModelStep3.
+// Sequential stage execution guarantees no race.
+var haikuModelOverride string
+
 func getHaikuConfig() *haikuConfig {
-	model := os.Getenv("ANTHROPIC_LIGHT_MODEL")
+	model := haikuModelOverride
+	if model == "" {
+		model = os.Getenv("ANTHROPIC_LIGHT_MODEL")
+	}
 	if model == "" {
 		model = "claude-haiku-4-5-20251001"
 	}
@@ -426,8 +480,16 @@ func readClaudeOAuthToken() string {
 	return creds.ClaudeAiOauth.AccessToken
 }
 
+// callHaikuFunc is the package-level LLM call function. Tests override this
+// to inject mock responses without hitting the real API.
+var callHaikuFunc = callHaikuReal
+
 // callHaiku sends a prompt to Claude Haiku and returns the text response.
 func callHaiku(ctx context.Context, prompt string) (string, error) {
+	return callHaikuFunc(ctx, prompt)
+}
+
+func callHaikuReal(ctx context.Context, prompt string) (string, error) {
 	cfg := getHaikuConfig()
 	if cfg == nil {
 		return "", fmt.Errorf("no Haiku API credentials available")
