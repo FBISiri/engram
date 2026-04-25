@@ -10,12 +10,17 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/memory"
 	"github.com/FBISiri/engram/pkg/reflection"
 )
+
+var tracer = otel.Tracer("engram.memory")
 
 // Server wraps the MCP server with Engram's memory operations.
 type Server struct {
@@ -127,6 +132,10 @@ func (s *Server) registerTools() {
 
 // handleSearch implements the memory.search tool.
 func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, span := tracer.Start(ctx, "engram.memory.search")
+	defer span.End()
+	start := time.Now()
+
 	// Parse parameters
 	query, err := request.RequireString("query")
 	if err != nil {
@@ -143,6 +152,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Build filters
 	var filters []memory.Filter
+	var tagsCount int
 
 	// Type filter
 	if types := getStringSlice(request, "types"); len(types) > 0 {
@@ -155,6 +165,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Tag filter
 	if tags := getStringSlice(request, "tags"); len(tags) > 0 {
+		tagsCount = len(tags)
 		filters = append(filters, memory.Filter{
 			Field: "tags",
 			Op:    memory.OpIn,
@@ -178,9 +189,18 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		})
 	}
 
+	span.SetAttributes(
+		attribute.Int("query.length", len(query)),
+		attribute.Int("tags.count", tagsCount),
+		attribute.Int("limit", limit),
+		attribute.String("embedder.provider", fmt.Sprintf("%T", s.embedder)),
+	)
+
 	// Embed query
 	vec, err := s.embedder.Embed(ctx, query)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "embedding error")
 		return mcp.NewToolResultError(fmt.Sprintf("embedding error: %v", err)), nil
 	}
 
@@ -195,10 +215,16 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		Filters: filters,
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "search error")
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
 	}
 
 	if len(results) == 0 {
+		span.SetAttributes(
+			attribute.Int("result.count", 0),
+			attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
+		)
 		return mcp.NewToolResultText("[]"), nil
 	}
 
@@ -230,6 +256,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		// Fallback: simple truncation if vectors are missing
 		results = results[:limit]
 	}
+
+	span.SetAttributes(
+		attribute.Int("result.count", len(results)),
+		attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
+	)
 
 	// Async update access_count and last_accessed_at for returned memories.
 	if len(results) > 0 {
@@ -294,6 +325,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 // handleAdd implements the memory.add tool.
 func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, span := tracer.Start(ctx, "engram.memory.add")
+	defer span.End()
+
 	content, err := request.RequireString("content")
 	if err != nil {
 		return mcp.NewToolResultError("content is required"), nil
@@ -316,6 +350,13 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	tags := getStringSlice(request, "tags")
 	validUntil := request.GetFloat("valid_until", 0)
 
+	span.SetAttributes(
+		attribute.Int("content.length", len(content)),
+		attribute.Int("tags.count", len(tags)),
+		attribute.String("type", string(memType)),
+		attribute.Float64("importance", importance),
+	)
+
 	// Auto-compute TTL if caller didn't explicitly set valid_until.
 	// This uses the TTL matrix: type × importance band → duration.
 	ttlCfg := memory.DefaultTTLConfig()
@@ -336,38 +377,24 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	// Embed content
 	vec, err := s.embedder.Embed(ctx, content)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "embedding error")
 		return mcp.NewToolResultError(fmt.Sprintf("embedding error: %v", err)), nil
 	}
 
-	// Check for duplicates
-	dupeResults, err := s.store.Search(ctx, vec, memory.SearchOptions{
-		Limit: 3,
-	})
-	if err == nil {
-		if dup := memory.IsDuplicate(dupeResults, s.dedupThreshold); dup != nil {
-			type dupResult struct {
-				Status   string `json:"status"`
-				Message  string `json:"message"`
-				Existing struct {
-					ID      string  `json:"id"`
-					Content string  `json:"content"`
-					Score   float64 `json:"score"`
-				} `json:"existing"`
-			}
-			result := dupResult{
-				Status:  "duplicate",
-				Message: "A very similar memory already exists. Skipped.",
-			}
-			result.Existing.ID = dup.ID
-			result.Existing.Content = dup.Content
-			result.Existing.Score = dup.Score
-			data, _ := json.Marshal(result)
-			return mcp.NewToolResultText(string(data)), nil
-		}
+	// Check for duplicates (child span)
+	dupData, dupFound := s.checkDedup(ctx, vec, content)
+	if dupFound {
+		span.SetAttributes(attribute.Bool("dedup.hit", true))
+		return mcp.NewToolResultText(string(dupData)), nil
 	}
+
+	span.SetAttributes(attribute.Bool("dedup.hit", false))
 
 	// Insert
 	if err := s.store.Insert(ctx, mem, vec); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "insert error")
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
 	}
 
@@ -386,6 +413,73 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+// checkDedup runs deduplication check as a child span. Returns (json bytes, true) if duplicate found.
+func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) ([]byte, bool) {
+	ctx, span := tracer.Start(ctx, "engram.memory.dedup_check")
+	defer span.End()
+	start := time.Now()
+
+	span.SetAttributes(
+		attribute.Int("query.length", len(content)),
+		attribute.Float64("threshold", s.dedupThreshold),
+	)
+
+	dupeResults, err := s.store.Search(ctx, vec, memory.SearchOptions{
+		Limit: 3,
+	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "dedup search error")
+		span.SetAttributes(
+			attribute.String("decision", "add"),
+			attribute.Float64("top_score", 0),
+			attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
+		)
+		return nil, false
+	}
+
+	topScore := 0.0
+	if len(dupeResults) > 0 {
+		topScore = dupeResults[0].Score
+	}
+
+	dup := memory.IsDuplicate(dupeResults, s.dedupThreshold)
+
+	decision := "add"
+	if dup != nil {
+		decision = "skip"
+	}
+
+	span.SetAttributes(
+		attribute.Float64("top_score", topScore),
+		attribute.String("decision", decision),
+		attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
+	)
+
+	if dup != nil {
+		type dupResult struct {
+			Status   string `json:"status"`
+			Message  string `json:"message"`
+			Existing struct {
+				ID      string  `json:"id"`
+				Content string  `json:"content"`
+				Score   float64 `json:"score"`
+			} `json:"existing"`
+		}
+		result := dupResult{
+			Status:  "duplicate",
+			Message: "A very similar memory already exists. Skipped.",
+		}
+		result.Existing.ID = dup.ID
+		result.Existing.Content = dup.Content
+		result.Existing.Score = dup.Score
+		data, _ := json.Marshal(result)
+		return data, true
+	}
+
+	return nil, false
 }
 
 // handleUpdate implements the memory.update tool.
