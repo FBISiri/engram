@@ -107,6 +107,7 @@ func main() {
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})

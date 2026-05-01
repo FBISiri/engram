@@ -19,6 +19,12 @@ import (
 	"github.com/FBISiri/engram/pkg/server"
 )
 
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -62,7 +68,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "version":
-		fmt.Println("engram v0.1.0")
+		fmt.Printf("engram %s (commit=%s built=%s)\n", version, gitCommit, buildTime)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -89,6 +95,7 @@ func serve(cfg *config.Config) error {
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
@@ -162,6 +169,7 @@ func dreamCheck(cfg *config.Config) error {
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
@@ -184,6 +192,14 @@ func dreamCheck(cfg *config.Config) error {
 }
 
 func dreamRun(cfg *config.Config) error {
+	tp, err := otelpkg.NewTracerProvider(otelpkg.LoadConfigFromEnv())
+	if err != nil {
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	if tp != nil {
+		defer tp.Shutdown(context.Background())
+	}
+
 	// Parse flags from os.Args[2:].
 	dryRun := false
 	phase := ""
@@ -207,6 +223,7 @@ func dreamRun(cfg *config.Config) error {
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
@@ -258,7 +275,7 @@ Commands:
   dream-check       Check Triple Gate (outputs JSON: should_run, reason, etc.)
   dream-run         Run Dream Engine (--dry-run, --phase <name>)
   reflection-check  Check if Reflection Engine should run (outputs JSON)
-  reflection-run    Run Reflection Engine (--dry-run)
+  reflection-run    Run Reflection Engine (--dry-run, --force, --mode <v1|v2>)
   migrate           Migrate from chat2mem to Engram
   migrate-reflected Backfill top-level reflected_at from legacy metadata["reflected"]=true (W17 T1)
   version           Print version`)
@@ -270,6 +287,7 @@ func reflectionCheck(cfg *config.Config) error {
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
@@ -293,21 +311,38 @@ func reflectionCheck(cfg *config.Config) error {
 // reflectionRun executes one reflection cycle.
 // Outputs JSON RunResult.
 func reflectionRun(cfg *config.Config) error {
+	tp, err := otelpkg.NewTracerProvider(otelpkg.LoadConfigFromEnv())
+	if err != nil {
+		return fmt.Errorf("init tracing: %w", err)
+	}
+	if tp != nil {
+		defer tp.Shutdown(context.Background())
+	}
+
 	dryRun := false
+	force := false
 	mode := ""
+	debugEvidence := false
 	for i := 2; i < len(os.Args); i++ {
 		if os.Args[i] == "--dry-run" {
 			dryRun = true
 		}
+		if os.Args[i] == "--force" {
+			force = true
+		}
 		if os.Args[i] == "--mode" && i+1 < len(os.Args) {
 			mode = os.Args[i+1]
 			i++
+		}
+		if os.Args[i] == "--debug-evidence" {
+			debugEvidence = true
 		}
 	}
 
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
@@ -341,6 +376,8 @@ func reflectionRun(cfg *config.Config) error {
 
 	reflCfg := reflection.DefaultConfig()
 	reflCfg.DryRun = dryRun
+	reflCfg.Force = force
+	reflCfg.DebugEvidence = debugEvidence
 	if mode != "" {
 		reflCfg.Mode = mode
 	}
@@ -389,6 +426,7 @@ func migrateReflected(cfg *config.Config) error {
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
 		CollectionName: cfg.CollectionName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})

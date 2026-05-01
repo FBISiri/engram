@@ -47,6 +47,9 @@ type Config struct {
 	// DryRun disables all writes (no new insights, no marking as reflected).
 	DryRun bool
 
+	// Force bypasses min-interval and daily-limit gates (Gate 1 & 2).
+	Force bool
+
 	// Mode selects the reflection algorithm: "v1" (flat, default) or "v2" (focal point).
 	// V2 requires 4x Haiku calls but produces higher-quality insights.
 	Mode string
@@ -85,6 +88,9 @@ type Config struct {
 
 	// WriteBackTimeout is the total timeout for Stage 4 write-back. Default: 30s, hard max: 120s.
 	WriteBackTimeout time.Duration
+
+	// DebugEvidence enables per-question evidence retrieval diagnostics in RunResult.
+	DebugEvidence bool
 }
 
 // DefaultConfig returns the default Reflection Engine configuration.
@@ -140,6 +146,9 @@ type RunResult struct {
 	InsightsSkipped    int   `json:"insights_skipped,omitempty"`
 	InsightsWriteFailed int  `json:"insights_write_failed,omitempty"`
 	WriteBackMs        int64 `json:"write_back_ms,omitempty"`
+
+	// Evidence debug (--debug-evidence).
+	EvidenceDebug []EvidenceQuestionDebug `json:"evidence_debug,omitempty"`
 
 	// R-S3: TTL observability fields.
 	// ValidUntilSet is true when ALL insights produced in this run have a
@@ -463,9 +472,9 @@ func getHaikuConfig() *haikuConfig {
 	return nil
 }
 
-// readClaudeOAuthToken reads the OAuth access token from /root/.claude/.credentials.json.
+// readClaudeOAuthToken reads the OAuth access token from /mnt/bmo/.credentials.json.
 func readClaudeOAuthToken() string {
-	data, err := os.ReadFile("/root/.claude/.credentials.json")
+	data, err := os.ReadFile("/mnt/bmo/.credentials.json")
 	if err != nil {
 		return ""
 	}
@@ -592,13 +601,9 @@ func ensureSourceReflectionTag(tags []string) []string {
 // writeReflectionDraft writes a low-confidence (conf < 0.6) reflection to an
 // Obsidian markdown draft instead of storing it in Engram. This keeps
 // Engram clean of speculative / weakly-grounded inferences while preserving
-// them for later human review in $HOME/siri-vault/Reflection/drafts/.
+// them for later human review in /mnt/data/siri-vault/Reflection/drafts/.
 func writeReflectionDraft(ins ParsedInsight, tags []string, sourceIDs []string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
-	}
-	dir := home + "/siri-vault/Reflection/drafts"
+	dir := "/mnt/data/siri-vault/Reflection/drafts"
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}

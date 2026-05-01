@@ -13,6 +13,7 @@ type Config struct {
 	// Storage
 	QdrantURL      string
 	QdrantAPIKey   string
+	QdrantUseTLS   bool
 	CollectionName string
 
 	// Embedding
@@ -47,6 +48,7 @@ func Load() *Config {
 		// Storage
 		QdrantURL:      envStr("ENGRAM_QDRANT_URL", "localhost:6334"),
 		QdrantAPIKey:   envStr("ENGRAM_QDRANT_API_KEY", ""),
+		QdrantUseTLS:   envBool("ENGRAM_QDRANT_USE_TLS", false),
 		CollectionName: envStr("ENGRAM_COLLECTION_NAME", "engram"),
 
 		// Embedding

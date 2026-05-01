@@ -27,6 +27,8 @@ type Config struct {
 	URL string
 	// APIKey for Qdrant Cloud or authenticated deployments. Empty means no auth.
 	APIKey string
+	// UseTLS enables TLS for the gRPC connection. Required for Qdrant Cloud.
+	UseTLS bool
 	// CollectionName is the Qdrant collection to use (default "engram").
 	CollectionName string
 	// Dimension is the embedding vector size (default 1536).
@@ -61,6 +63,7 @@ func New(cfg Config) (*Store, error) {
 		Host:   host,
 		Port:   port,
 		APIKey: cfg.APIKey,
+		UseTLS: cfg.UseTLS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("qdrant: connect: %w", err)
@@ -135,6 +138,7 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldReflectedAt, qdrant.FieldType_FieldTypeFloat},     // W16: enables O(K) unreflected query
 		{fieldArchivedAt, qdrant.FieldType_FieldTypeFloat},      // W17: memory-expiry
 		{fieldArchiveReason, qdrant.FieldType_FieldTypeKeyword}, // W17: memory-expiry
+		{fieldSupersededBy, qdrant.FieldType_FieldTypeKeyword},  // required by Qdrant Cloud (>=1.x) for IsEmpty filter in Search
 	}
 
 	for _, idx := range indexes {
