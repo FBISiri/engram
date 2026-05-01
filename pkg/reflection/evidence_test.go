@@ -96,7 +96,7 @@ func TestRetrieveEvidence_NormalPath(t *testing.T) {
 	}
 
 	cfg := Config{EvidencePerFocal: 10}
-	result, err := retrieveEvidence(context.Background(), "test question", store, &mockEmbedder{dim: 8}, cfg)
+	result, _, err := retrieveEvidence(context.Background(), "test question", store, &mockEmbedder{dim: 8}, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestRetrieveEvidence_EmptyResult(t *testing.T) {
 	}
 
 	cfg := Config{EvidencePerFocal: 10}
-	result, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
+	result, _, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -233,31 +233,16 @@ func TestRetrieveEvidence_ConfidenceFilter(t *testing.T) {
 
 	store := &evidenceMockStore{
 		searchFn: func(_ context.Context, _ []float32, opts memory.SearchOptions) ([]memory.ScoredMemory, error) {
-			// Simulate payload filter: only return confidence >= 0.6.
-			var filtered []memory.ScoredMemory
-			for _, sm := range mems {
-				passesFilter := true
-				for _, f := range opts.Filters {
-					if f.Field == "confidence" && f.Op == memory.OpGte {
-						threshold := f.Value.(float64)
-						if sm.Confidence < threshold {
-							passesFilter = false
-						}
-					}
-				}
-				if passesFilter {
-					filtered = append(filtered, sm)
-				}
+			// Return all memories; confidence filtering is now post-search.
+			if opts.Limit > 0 && len(mems) > opts.Limit {
+				return mems[:opts.Limit], nil
 			}
-			if opts.Limit > 0 && len(filtered) > opts.Limit {
-				filtered = filtered[:opts.Limit]
-			}
-			return filtered, nil
+			return mems, nil
 		},
 	}
 
 	cfg := Config{EvidencePerFocal: 20}
-	result, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
+	result, _, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -268,6 +253,35 @@ func TestRetrieveEvidence_ConfidenceFilter(t *testing.T) {
 		if m.Confidence < 0.6 {
 			t.Errorf("memory %s has confidence %.2f < 0.6", m.ID, m.Confidence)
 		}
+	}
+}
+
+// ── Test 4b: Confidence=0 (absent) treated as 1.0 ─────────────────────────
+
+func TestRetrieveEvidence_ZeroConfidenceTreatedAsOne(t *testing.T) {
+	now := float64(time.Now().Unix())
+	mems := []memory.ScoredMemory{
+		makeScoredMemory("no-conf", 0.9, 0, now-3600, nil),
+		makeScoredMemory("high-conf", 0.8, 0.8, now-3600, nil),
+		makeScoredMemory("low-conf", 0.7, 0.3, now-3600, nil),
+	}
+
+	store := &evidenceMockStore{
+		searchFn: func(_ context.Context, _ []float32, _ memory.SearchOptions) ([]memory.ScoredMemory, error) {
+			return mems, nil
+		},
+	}
+
+	cfg := Config{EvidencePerFocal: 10}
+	result, _, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 (conf=0 treated as 1.0, conf=0.3 excluded), got %d", len(result))
+	}
+	if result[0].ID != "no-conf" {
+		t.Errorf("expected no-conf first, got %s", result[0].ID)
 	}
 }
 
@@ -292,7 +306,7 @@ func TestRetrieveEvidence_ReflectionOriginAgeFilter(t *testing.T) {
 	}
 
 	cfg := Config{EvidencePerFocal: 10}
-	result, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
+	result, _, err := retrieveEvidence(context.Background(), "test", store, &mockEmbedder{dim: 8}, cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

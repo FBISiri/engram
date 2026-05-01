@@ -254,6 +254,41 @@ engram/
 └── integration_test.sh  End-to-end MCP test
 ```
 
+## Observability
+
+Engram uses OpenTelemetry for distributed tracing. Spans are exported to daily-rotating JSONL files by default.
+
+### Configuration
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `ENGRAM_OTEL_ENABLED` | `true` | Enable/disable tracing |
+| `ENGRAM_OTEL_EXPORTER` | `file` | Exporter: `file`, `stdout`, `none` |
+| `ENGRAM_OTEL_FILE_DIR` | `/tmp/siri-state/engram-traces` | Directory for JSONL trace files |
+| `ENGRAM_OTEL_SAMPLE_RATIO` | `1.0` | Sampling ratio (0–1) |
+
+### §1 Reflection instrumentation (R-S3)
+
+| Span name | Entry point | Attributes |
+|-----------|-------------|------------|
+| `engram.reflection.run` | `pkg/reflection/engine.go::Run` | `engram.memory.valid_until_set` (bool), `engram.memory.valid_until` (string, RFC 3339) |
+
+### §2 Reflection V2 instrumentation (R-S3)
+
+Same span name `engram.reflection.run` emitted by `RunV2` and `RunSingleEvent`.
+
+### §3 Memory instrumentation (R-S5)
+
+| Span name | Entry point | Attributes |
+|-----------|-------------|------------|
+| `engram.memory.search` | `pkg/server/server.go::handleSearch` | `query.length`, `tags.count`, `limit`, `result.count`, `latency_ms`, `embedder.provider` |
+| `engram.memory.add` | `pkg/server/server.go::handleAdd` | `content.length`, `tags.count`, `type`, `importance`, `dedup.hit` (bool) |
+| `engram.memory.dedup_check` | `pkg/server/server.go::checkDedup` | `query.length`, `threshold`, `top_score`, `decision` (add/skip), `latency_ms` |
+
+Error paths set `span.RecordError(err)` + `span.SetStatus(codes.Error, ...)`.
+
+`engram.memory.dedup_check` is a child span of `engram.memory.add`.
+
 ## Background
 
 Engram (noun): *The hypothetical physical or biochemical change in neural tissue that represents a memory.* — from neuroscience.

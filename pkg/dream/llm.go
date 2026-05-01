@@ -20,7 +20,7 @@ type haikuConfig struct {
 }
 
 // getHaikuConfig returns the best available Haiku configuration.
-// Priority: CLAUDE_CODE_OAUTH_TOKEN env → /root/.claude/.credentials.json → ANTHROPIC_API_KEY.
+// Priority: CLAUDE_CODE_OAUTH_TOKEN env → /mnt/bmo/.credentials.json → ANTHROPIC_API_KEY.
 func getHaikuConfig() *haikuConfig {
 	model := os.Getenv("ANTHROPIC_LIGHT_MODEL")
 	if model == "" {
@@ -60,9 +60,9 @@ func getHaikuConfig() *haikuConfig {
 	return nil
 }
 
-// readClaudeOAuthToken reads the OAuth access token from /root/.claude/.credentials.json.
+// readClaudeOAuthToken reads the OAuth access token from /mnt/bmo/.credentials.json.
 func readClaudeOAuthToken() string {
-	data, err := os.ReadFile("/root/.claude/.credentials.json")
+	data, err := os.ReadFile("/mnt/bmo/.credentials.json")
 	if err != nil {
 		return ""
 	}

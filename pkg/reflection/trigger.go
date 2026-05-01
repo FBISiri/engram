@@ -61,7 +61,7 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 	if !lastRunTime.IsZero() {
 		result.HoursSinceLastRun = time.Since(lastRunTime).Hours()
 		minInterval := time.Duration(e.cfg.MinIntervalH * float64(time.Hour))
-		if time.Since(lastRunTime) < minInterval {
+		if time.Since(lastRunTime) < minInterval && !e.cfg.Force {
 			result.SkipReason = fmt.Sprintf("too soon: last run %.1fh ago (min interval %.1fh)",
 				result.HoursSinceLastRun, e.cfg.MinIntervalH)
 			return result, nil, nil
@@ -75,7 +75,7 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 		dailyCount = 0
 	}
 	result.RunsToday = dailyCount
-	if dailyCount >= reflectionMaxPerDay {
+	if dailyCount >= reflectionMaxPerDay && !e.cfg.Force {
 		result.SkipReason = fmt.Sprintf("daily limit reached: %d/%d runs today", dailyCount, reflectionMaxPerDay)
 		return result, nil, nil
 	}

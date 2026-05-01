@@ -6,14 +6,23 @@
 //
 // Endpoints:
 //
-//	POST /reflect         — Run one Reflection Engine cycle.
-//	                        Optional JSON body: {"dry_run": true}
-//	                        Returns RunResult JSON.
+//	POST /reflect                       — Run one Reflection Engine cycle.
+//	                                      Optional JSON body: {"dry_run": true}
+//	                                      Returns RunResult JSON.
 //
-//	GET  /reflect/check   — Check trigger conditions without running.
-//	                        Returns CheckResult JSON.
+//	GET  /reflect/check                 — Check trigger conditions without running.
+//	                                      Returns CheckResult JSON.
 //
-//	GET  /health          — Liveness probe. Returns {"status":"ok"}.
+//	GET  /health                        — Liveness probe. Returns {"status":"ok"}.
+//
+//	GET  /memories/expiry-candidates    — List memories eligible for policy-based deletion.
+//	                                      Returns [{id, type, importance, age_days,
+//	                                      content_preview, tags}], capped at 50.
+//
+//	DELETE /memories/expired            — Execute policy-based cleanup.
+//	                                      ?dry_run=true  (default) — report without deleting.
+//	                                      ?dry_run=false&confirm=true — delete + snapshot.
+//	                                      Returns {deleted_count, skipped_count, snapshot_path}.
 package server
 
 import (
@@ -58,6 +67,8 @@ func (h *HTTPServer) registerRoutes() {
 	h.mux.HandleFunc("/health", h.handleHealth)
 	h.mux.HandleFunc("/reflect", h.withAuth(h.handleReflect))
 	h.mux.HandleFunc("/reflect/check", h.withAuth(h.handleReflectCheck))
+	h.mux.HandleFunc("/memories/expiry-candidates", h.withAuth(h.handleExpiryCandidates))
+	h.mux.HandleFunc("/memories/expired", h.withAuth(h.handleDeleteExpired))
 }
 
 // Handler returns the underlying http.Handler for use with httptest.Server or

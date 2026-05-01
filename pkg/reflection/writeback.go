@@ -19,6 +19,7 @@ type writeBackStats struct {
 	Written int
 	Skipped int
 	Failed  int
+	Drafts  int
 	Ms      int64
 	Errors  []string
 }
@@ -48,6 +49,26 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 	for _, di := range dialectics {
 		if di.Confidence < minConf {
 			stats.Skipped++
+			continue
+		}
+
+		// W17 v1.1: low-confidence insights (0 < conf < 0.6) diverted to Obsidian
+		// draft — same gate as the V1 batch path. minConf (0.5) is the absolute
+		// floor; the 0.6 draft threshold is applied on top.
+		if di.Confidence > 0 && di.Confidence < 0.6 {
+			draft := ParsedInsight{
+				Content:    di.Content,
+				Confidence: di.Confidence,
+				Importance: float64(di.Importance),
+				Tags:       di.Tags,
+			}
+			sourceIDs := make([]string, len(di.SourceIDs))
+			copy(sourceIDs, di.SourceIDs)
+			if werr := writeReflectionDraft(draft, ensureSourceReflectionTag(di.Tags), sourceIDs); werr != nil {
+				stats.Errors = append(stats.Errors, fmt.Sprintf("write draft failed: %v", werr))
+			} else {
+				stats.Drafts++
+			}
 			continue
 		}
 

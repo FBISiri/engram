@@ -98,6 +98,7 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 		result.InsightsWritten = wbStats.Written
 		result.InsightsSkipped = wbStats.Skipped
 		result.InsightsWriteFailed = wbStats.Failed
+		result.DraftsWritten = wbStats.Drafts
 		result.WriteBackMs = wbStats.Ms
 		result.InsightsCreated = wbStats.Written
 		result.Errors = append(result.Errors, wbStats.Errors...)
