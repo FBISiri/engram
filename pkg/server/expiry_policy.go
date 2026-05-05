@@ -126,9 +126,9 @@ func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate,
 }
 
 // writeExpirySnapshot saves a markdown snapshot of the deletion candidates
-// to /mnt/data/siri-vault/Engram/expiry-snapshots/YYYY-MM-DD.md.
+// to /data/armyoftheagent/siri-vault/Engram/expiry-snapshots/YYYY-MM-DD.md.
 func writeExpirySnapshot(candidates []ExpiryCandidate) (string, error) {
-	dir := "/mnt/data/siri-vault/Engram/expiry-snapshots"
+	dir := "/data/armyoftheagent/siri-vault/Engram/expiry-snapshots"
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
 	}

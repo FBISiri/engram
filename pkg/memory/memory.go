@@ -60,21 +60,38 @@ type Memory struct {
 
 	ArchivedAt    float64 `json:"archived_at,omitempty"`
 	ArchiveReason string  `json:"archive_reason,omitempty"`
+
+	// LifecycleStatus is the FSM state of the memory (v0.2).
+	// Valid values: "active" (default), "deprecated", "archived".
+	// Transitions via PATCH: active→deprecated, active→archived, deprecated→archived.
+	// Restore via POST /{id}/reset: archived→active, deprecated→active.
+	LifecycleStatus string `json:"lifecycle_status,omitempty"`
+
+	// LastAccessedSource records the X-Caller-Type of the last search that hit this memory.
+	LastAccessedSource string `json:"last_accessed_source,omitempty"`
 }
+
+// Lifecycle FSM state constants (v0.2).
+const (
+	LifecycleActive     = "active"
+	LifecycleDeprecated = "deprecated"
+	LifecycleArchived   = "archived"
+)
 
 // New creates a new Memory with defaults.
 func New(content string, opts ...Option) *Memory {
 	now := float64(time.Now().Unix())
 	m := &Memory{
-		ID:         uuid.New().String(),
-		Type:       TypeEvent,
-		Content:    content,
-		Source:     "agent",
-		Importance: 5.0,
-		Tags:       []string{},
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		Metadata:   map[string]any{},
+		ID:              uuid.New().String(),
+		Type:            TypeEvent,
+		Content:         content,
+		Source:          "agent",
+		Importance:      5.0,
+		Tags:            []string{},
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Metadata:        map[string]any{},
+		LifecycleStatus: LifecycleActive,
 	}
 	for _, opt := range opts {
 		opt(m)

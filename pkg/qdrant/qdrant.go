@@ -98,8 +98,10 @@ const (
 	fieldLastAccessedAt = "last_accessed_at"
 	fieldReflectedAt   = "reflected_at" // W16: replaces metadata["reflected"]
 	fieldConfidence    = "confidence"      // W17 v1.1: reflection-origin grounding score (0-1)
-	fieldArchivedAt    = "archived_at"     // W17: memory-expiry schema
-	fieldArchiveReason = "archive_reason"  // W17: memory-expiry schema
+	fieldArchivedAt         = "archived_at"          // W17: memory-expiry schema
+	fieldArchiveReason      = "archive_reason"       // W17: memory-expiry schema
+	fieldLifecycleStatus    = "lifecycle_status"     // v0.2: FSM state
+	fieldLastAccessedSource = "last_accessed_source" // v0.2: caller type on last search hit
 )
 
 // EnsureCollection creates the collection if it doesn't exist, and idempotently
@@ -136,9 +138,11 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldAccessCount, qdrant.FieldType_FieldTypeInteger},
 		{fieldLastAccessedAt, qdrant.FieldType_FieldTypeFloat},
 		{fieldReflectedAt, qdrant.FieldType_FieldTypeFloat},     // W16: enables O(K) unreflected query
-		{fieldArchivedAt, qdrant.FieldType_FieldTypeFloat},      // W17: memory-expiry
-		{fieldArchiveReason, qdrant.FieldType_FieldTypeKeyword}, // W17: memory-expiry
-		{fieldSupersededBy, qdrant.FieldType_FieldTypeKeyword},  // required by Qdrant Cloud (>=1.x) for IsEmpty filter in Search
+		{fieldArchivedAt, qdrant.FieldType_FieldTypeFloat},         // W17: memory-expiry
+		{fieldArchiveReason, qdrant.FieldType_FieldTypeKeyword},  // W17: memory-expiry
+		{fieldSupersededBy, qdrant.FieldType_FieldTypeKeyword},   // required by Qdrant Cloud (>=1.x) for IsEmpty filter in Search
+		{fieldLifecycleStatus, qdrant.FieldType_FieldTypeKeyword},    // v0.2: FSM state filter
+		{fieldLastAccessedSource, qdrant.FieldType_FieldTypeKeyword}, // v0.2: caller-type tracking
 	}
 
 	for _, idx := range indexes {
@@ -192,6 +196,9 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts memory.Search
 				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
 			},
 		}),
+	}
+	if opts.ExcludeArchived {
+		mustNotConds = append(mustNotConds, qdrant.NewMatchKeyword(fieldLifecycleStatus, "archived"))
 	}
 	filter := &qdrant.Filter{
 		Must:    mustConds,
@@ -605,6 +612,12 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 	if mem.ArchiveReason != "" {
 		payload[fieldArchiveReason] = mem.ArchiveReason
 	}
+	if mem.LifecycleStatus != "" {
+		payload[fieldLifecycleStatus] = mem.LifecycleStatus
+	}
+	if mem.LastAccessedSource != "" {
+		payload[fieldLastAccessedSource] = mem.LastAccessedSource
+	}
 
 	return &qdrant.PointStruct{
 		Id:      qdrant.NewID(mem.ID),
@@ -656,6 +669,12 @@ func pointToMemory(id *qdrant.PointId, payload map[string]*qdrant.Value) *memory
 	}
 	if v, ok := payload[fieldArchiveReason]; ok {
 		mem.ArchiveReason = v.GetStringValue()
+	}
+	if v, ok := payload[fieldLifecycleStatus]; ok {
+		mem.LifecycleStatus = v.GetStringValue()
+	}
+	if v, ok := payload[fieldLastAccessedSource]; ok {
+		mem.LastAccessedSource = v.GetStringValue()
 	}
 
 	return mem

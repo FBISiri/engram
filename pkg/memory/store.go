@@ -45,8 +45,9 @@ type ScrollOptions struct {
 
 // SearchOptions configures a vector search query.
 type SearchOptions struct {
-	Limit   int
-	Filters []Filter
+	Limit           int
+	Filters         []Filter
+	ExcludeArchived bool // when true, memories with lifecycle_status="archived" are excluded
 }
 
 // FilterOp is a filter operation.

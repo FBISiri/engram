@@ -472,21 +472,40 @@ func getHaikuConfig() *haikuConfig {
 	return nil
 }
 
-// readClaudeOAuthToken reads the OAuth access token from /mnt/bmo/.credentials.json.
+// credentialsPaths lists OAuth credentials files in priority order.
+var credentialsPaths = []string{
+	"/root/.claude/.credentials.json",
+}
+
+// readClaudeOAuthToken reads a non-expired OAuth access token from the first
+// valid credentials file in credentialsPaths.
 func readClaudeOAuthToken() string {
-	data, err := os.ReadFile("/mnt/bmo/.credentials.json")
-	if err != nil {
-		return ""
-	}
 	var creds struct {
 		ClaudeAiOauth struct {
 			AccessToken string `json:"accessToken"`
+			ExpiresAt   int64  `json:"expiresAt"`
 		} `json:"claudeAiOauth"`
 	}
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return ""
+	nowMs := time.Now().UnixMilli()
+	for _, path := range credentialsPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if err := json.Unmarshal(data, &creds); err != nil {
+			continue
+		}
+		token := creds.ClaudeAiOauth.AccessToken
+		expires := creds.ClaudeAiOauth.ExpiresAt
+		if token == "" {
+			continue
+		}
+		if expires > 0 && expires < nowMs {
+			continue // token expired
+		}
+		return token
 	}
-	return creds.ClaudeAiOauth.AccessToken
+	return ""
 }
 
 // callHaikuFunc is the package-level LLM call function. Tests override this
@@ -601,9 +620,9 @@ func ensureSourceReflectionTag(tags []string) []string {
 // writeReflectionDraft writes a low-confidence (conf < 0.6) reflection to an
 // Obsidian markdown draft instead of storing it in Engram. This keeps
 // Engram clean of speculative / weakly-grounded inferences while preserving
-// them for later human review in /mnt/data/siri-vault/Reflection/drafts/.
+// them for later human review in /data/armyoftheagent/siri-vault/Reflection/drafts/.
 func writeReflectionDraft(ins ParsedInsight, tags []string, sourceIDs []string) error {
-	dir := "/mnt/data/siri-vault/Reflection/drafts"
+	dir := "/data/armyoftheagent/siri-vault/Reflection/drafts"
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}

@@ -23,6 +23,16 @@
 //	                                      ?dry_run=true  (default) — report without deleting.
 //	                                      ?dry_run=false&confirm=true — delete + snapshot.
 //	                                      Returns {deleted_count, skipped_count, snapshot_path}.
+//
+// v0.2 CRUD routes:
+//
+//	POST   /memories                    — Create a new memory. Returns 201 + Memory JSON.
+//	GET    /memories/{id}               — Get a memory by ID. Returns Memory JSON.
+//	PATCH  /memories/{id}               — Partial update. Forbids content field. Enforces FSM.
+//	PUT    /memories/{id}               — Full replace (content re-embedded). Preserves lifecycle.
+//	DELETE /memories/{id}               — Soft delete: sets lifecycle_status=archived.
+//	POST   /memories/{id}/reset         — Restore archived/deprecated → active.
+//	POST   /memories/search             — Vector search. Body: {query, limit, include_archived}.
 package server
 
 import (
@@ -67,8 +77,17 @@ func (h *HTTPServer) registerRoutes() {
 	h.mux.HandleFunc("/health", h.handleHealth)
 	h.mux.HandleFunc("/reflect", h.withAuth(h.handleReflect))
 	h.mux.HandleFunc("/reflect/check", h.withAuth(h.handleReflectCheck))
-	h.mux.HandleFunc("/memories/expiry-candidates", h.withAuth(h.handleExpiryCandidates))
-	h.mux.HandleFunc("/memories/expired", h.withAuth(h.handleDeleteExpired))
+	h.mux.HandleFunc("GET /memories/expiry-candidates", h.withAuth(h.handleExpiryCandidates))
+	h.mux.HandleFunc("DELETE /memories/expired", h.withAuth(h.handleDeleteExpired))
+
+	// v0.2 CRUD routes
+	h.mux.HandleFunc("POST /memories", h.withAuth(h.handleCreateMemory))
+	h.mux.HandleFunc("POST /memories/search", h.withAuth(h.handleSearchMemories))
+	h.mux.HandleFunc("GET /memories/{id}", h.withAuth(h.handleGetMemory))
+	h.mux.HandleFunc("PATCH /memories/{id}", h.withAuth(h.handlePatchMemory))
+	h.mux.HandleFunc("PUT /memories/{id}", h.withAuth(h.handlePutMemory))
+	h.mux.HandleFunc("DELETE /memories/{id}", h.withAuth(h.handleDeleteMemory))
+	h.mux.HandleFunc("POST /memories/{id}/reset", h.withAuth(h.handleResetMemory))
 }
 
 // Handler returns the underlying http.Handler for use with httptest.Server or

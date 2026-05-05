@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// credentialsPaths lists OAuth credentials files in priority order.
+var credentialsPaths = []string{
+	"/root/.claude/.credentials.json",
+}
+
 // haikuConfig holds credentials for Haiku API calls.
 type haikuConfig struct {
 	APIKey  string
@@ -20,7 +25,7 @@ type haikuConfig struct {
 }
 
 // getHaikuConfig returns the best available Haiku configuration.
-// Priority: CLAUDE_CODE_OAUTH_TOKEN env → /mnt/bmo/.credentials.json → ANTHROPIC_API_KEY.
+// Priority: CLAUDE_CODE_OAUTH_TOKEN env → /root/.claude/.credentials.json → ANTHROPIC_API_KEY.
 func getHaikuConfig() *haikuConfig {
 	model := os.Getenv("ANTHROPIC_LIGHT_MODEL")
 	if model == "" {
@@ -60,21 +65,35 @@ func getHaikuConfig() *haikuConfig {
 	return nil
 }
 
-// readClaudeOAuthToken reads the OAuth access token from /mnt/bmo/.credentials.json.
+// readClaudeOAuthToken reads a non-expired OAuth access token from the first
+// valid credentials file in credentialsPaths.
 func readClaudeOAuthToken() string {
-	data, err := os.ReadFile("/mnt/bmo/.credentials.json")
-	if err != nil {
-		return ""
-	}
 	var creds struct {
 		ClaudeAiOauth struct {
 			AccessToken string `json:"accessToken"`
+			ExpiresAt   int64  `json:"expiresAt"`
 		} `json:"claudeAiOauth"`
 	}
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return ""
+	nowMs := time.Now().UnixMilli()
+	for _, path := range credentialsPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if err := json.Unmarshal(data, &creds); err != nil {
+			continue
+		}
+		token := creds.ClaudeAiOauth.AccessToken
+		expires := creds.ClaudeAiOauth.ExpiresAt
+		if token == "" {
+			continue
+		}
+		if expires > 0 && expires < nowMs {
+			continue // token expired
+		}
+		return token
 	}
-	return creds.ClaudeAiOauth.AccessToken
+	return ""
 }
 
 // callHaiku sends a prompt to Claude Haiku and returns the text response.
