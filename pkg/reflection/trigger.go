@@ -52,6 +52,15 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 		Threshold: e.cfg.Threshold,
 	}
 
+	// Read daily count early so CheckResult.RunsToday is always populated,
+	// even when Gate 1 returns early (otherwise callers see a misleading 0).
+	dailyCount, err := readDailyCount(filepath.Join(dir, reflectionDailyFile))
+	if err != nil {
+		// Non-fatal: treat as 0.
+		dailyCount = 0
+	}
+	result.RunsToday = dailyCount
+
 	// Gate 1: Time interval check.
 	lastRunPath := filepath.Join(dir, reflectionLastRunFile)
 	lastRunTime, err := readTimestampFile(lastRunPath)
@@ -68,13 +77,7 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 		}
 	}
 
-	// Gate 2: Daily run count check.
-	dailyCount, err := readDailyCount(filepath.Join(dir, reflectionDailyFile))
-	if err != nil {
-		// Non-fatal: treat as 0.
-		dailyCount = 0
-	}
-	result.RunsToday = dailyCount
+	// Gate 2: Daily run count check (count already loaded above).
 	if dailyCount >= reflectionMaxPerDay && !e.cfg.Force {
 		result.SkipReason = fmt.Sprintf("daily limit reached: %d/%d runs today", dailyCount, reflectionMaxPerDay)
 		return result, nil, nil

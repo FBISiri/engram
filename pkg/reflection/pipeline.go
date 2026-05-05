@@ -110,26 +110,33 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 		}
 		setValidUntilFields(result, storedTTLs)
 
-		// Stage 5: Source-marking (reuse V1 logic).
-		reflectedTimestamp := float64(time.Now().Unix())
-		sourceIDs := make([]string, len(batch))
-		for i, m := range batch {
-			sourceIDs[i] = m.ID
-		}
-		for _, id := range sourceIDs {
-			if err := e.store.Update(ctx, id, map[string]any{
-				"reflected_at": reflectedTimestamp,
-			}); err != nil {
-				result.Errors = append(result.Errors,
-					fmt.Sprintf("mark reflected failed for %s: %v", id[:min(8, len(id))], err))
-				continue
+		// Stage 5: Source-marking — only if at least one insight was produced.
+		// Guards against marking sources as "reflected" when all write-back calls
+		// failed (e.g. transient embedding error), which would lose those memories.
+		if wbStats.Written > 0 || wbStats.Drafts > 0 {
+			reflectedTimestamp := float64(time.Now().Unix())
+			sourceIDs := make([]string, len(batch))
+			for i, m := range batch {
+				sourceIDs[i] = m.ID
 			}
-			result.SourcesMarked++
-		}
+			for _, id := range sourceIDs {
+				if err := e.store.Update(ctx, id, map[string]any{
+					"reflected_at": reflectedTimestamp,
+				}); err != nil {
+					result.Errors = append(result.Errors,
+						fmt.Sprintf("mark reflected failed for %s: %v", id[:min(8, len(id))], err))
+					continue
+				}
+				result.SourcesMarked++
+			}
 
-		if err := updateLastRun(); err != nil {
+			if err := updateLastRun(); err != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("update last run failed: %v", err))
+			}
+		} else {
 			result.Errors = append(result.Errors,
-				fmt.Sprintf("update last run failed: %v", err))
+				"no insights produced — sources not marked to allow retry")
 		}
 	} else {
 		result.InsightsWritten = 0

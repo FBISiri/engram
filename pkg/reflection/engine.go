@@ -341,24 +341,31 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 
 		setValidUntilFields(result, storedTTLs)
 
-		// Mark source memories as reflected using ReflectedAt timestamp (W16).
-		// Legacy metadata["reflected"] is no longer written; isReflected() has fallback.
-		reflectedTimestamp := float64(time.Now().Unix())
-		for _, id := range sourceIDs {
-			if err := e.store.Update(ctx, id, map[string]any{
-				"reflected_at": reflectedTimestamp,
-			}); err != nil {
-				result.Errors = append(result.Errors,
-					fmt.Sprintf("mark reflected failed for %s: %v", id[:8], err))
-				continue
+		// Mark source memories as reflected only if at least one insight was
+		// produced. If all embedding/storage calls failed, skip marking so the
+		// same source memories can be retried on the next run (transaction boundary
+		// guard — prevents "reflected with no insights" data loss on transient errors).
+		if result.InsightsCreated > 0 || result.DraftsWritten > 0 {
+			reflectedTimestamp := float64(time.Now().Unix())
+			for _, id := range sourceIDs {
+				if err := e.store.Update(ctx, id, map[string]any{
+					"reflected_at": reflectedTimestamp,
+				}); err != nil {
+					result.Errors = append(result.Errors,
+						fmt.Sprintf("mark reflected failed for %s: %v", id[:8], err))
+					continue
+				}
+				result.SourcesMarked++
 			}
-			result.SourcesMarked++
-		}
 
-		// Update run timestamp and daily count.
-		if err := updateLastRun(); err != nil {
+			// Update run timestamp and daily count.
+			if err := updateLastRun(); err != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("update last run failed: %v", err))
+			}
+		} else {
 			result.Errors = append(result.Errors,
-				fmt.Sprintf("update last run failed: %v", err))
+				"no insights produced — sources not marked to allow retry")
 		}
 	} else {
 		// Dry run: no writes occurred; keep counters at zero.
