@@ -43,6 +43,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/reflection"
 )
 
@@ -60,6 +61,11 @@ type HTTPServer struct {
 //
 //	Authorization: Bearer <apiKey>
 func NewHTTPServer(s *Server, port int, apiKey string) *HTTPServer {
+	// W20 Day2 Phase 1: ensure the three baseline collections (engram_user,
+	// engram_agent_self, engram_reflection) are registered before we start
+	// serving traffic. Idempotent — safe to call repeatedly.
+	collection.DefaultRegistry.Init()
+
 	h := &HTTPServer{
 		srv:    s,
 		port:   port,
@@ -88,13 +94,17 @@ func (h *HTTPServer) registerRoutes() {
 	h.mux.HandleFunc("PUT /memories/{id}", h.withAuth(h.handlePutMemory))
 	h.mux.HandleFunc("DELETE /memories/{id}", h.withAuth(h.handleDeleteMemory))
 	h.mux.HandleFunc("POST /memories/{id}/reset", h.withAuth(h.handleResetMemory))
+
+	// W20 Day2 Phase 1: collection admin API skeleton.
+	h.mux.HandleFunc("POST /collections", h.withAuth(h.handleCreateCollection))
+	h.mux.HandleFunc("GET /collections", h.withAuth(h.handleListCollections))
 }
 
 // Handler returns the underlying http.Handler for use with httptest.Server or
 // any other HTTP server. This allows tests to create a test server without
 // binding to a real TCP port via ListenAndServe.
 func (h *HTTPServer) Handler() http.Handler {
-	return h.mux
+	return CallerTypeMiddleware(h.mux)
 }
 
 // ListenAndServe starts the HTTP server. It blocks until ctx is cancelled.
@@ -102,7 +112,7 @@ func (h *HTTPServer) ListenAndServe(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", h.port)
 	h.httpSrv = &http.Server{
 		Addr:         addr,
-		Handler:      h.mux,
+		Handler:      CallerTypeMiddleware(h.mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
