@@ -98,6 +98,21 @@ func (h *HTTPServer) registerRoutes() {
 	// W20 Day2 Phase 1: collection admin API skeleton.
 	h.mux.HandleFunc("POST /collections", h.withAuth(h.handleCreateCollection))
 	h.mux.HandleFunc("GET /collections", h.withAuth(h.handleListCollections))
+
+	// W20 Day2 Phase 2: per-collection CRUD routing.
+	// Each route validates that the URL collection matches the caller's
+	// resolved collection (X-Caller-Type) before delegating.
+	h.mux.HandleFunc("POST /collections/{name}/memories", h.withAuth(h.handleCollectionCreateMemory))
+	h.mux.HandleFunc("POST /collections/{name}/memories/search", h.withAuth(h.handleCollectionListMemories))
+	h.mux.HandleFunc("GET /collections/{name}/memories/{id}", h.withAuth(h.handleCollectionGetMemory))
+	h.mux.HandleFunc("PATCH /collections/{name}/memories/{id}", h.withAuth(h.handleCollectionPatchMemory))
+	h.mux.HandleFunc("PUT /collections/{name}/memories/{id}", h.withAuth(h.handleCollectionPutMemory))
+	h.mux.HandleFunc("DELETE /collections/{name}/memories/{id}", h.withAuth(h.handleCollectionDeleteMemory))
+	h.mux.HandleFunc("POST /collections/{name}/memories/{id}/reset", h.withAuth(h.handleCollectionResetMemory))
+
+	// W20 Day2 Phase 2: cross-collection search (strict mode — collections
+	// list is required, no implicit all-collection fallback).
+	h.mux.HandleFunc("POST /memories/cross-search", h.withAuth(h.handleCrossSearch))
 }
 
 // Handler returns the underlying http.Handler for use with httptest.Server or
