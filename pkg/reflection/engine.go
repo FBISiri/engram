@@ -309,6 +309,9 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 					"reflection_source_ids": sourceIDsAny,
 					"reflection_count":      len(sourceIDs),
 					"trigger_importance":    checkResult.AccumulatedImportance,
+					// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
+					"caller_type":           "reflection",
+					"target_collection":     "engram_reflection",
 				}),
 			)
 
@@ -802,6 +805,9 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 				"reflection_count":      len(in.EvidenceIDs),
 				"reflection_trigger":    string(in.Cause),
 				"reflection_summary":    in.Summary,
+				// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
+				"caller_type":           "reflection",
+				"target_collection":     "engram_reflection",
 			}),
 		)
 

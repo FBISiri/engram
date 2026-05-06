@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
@@ -446,6 +447,7 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 
 	var req struct {
 		Query           string   `json:"query"`
+		Collection      string   `json:"collection"` // W20 Day2 Phase 3: BMO Q3 — explicit field; falls back to ctx-resolution if empty.
 		Limit           int      `json:"limit"`
 		IncludeArchived bool     `json:"include_archived"`
 		Types           []string `json:"types"`
@@ -458,6 +460,29 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	if req.Query == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query is required"})
 		return
+	}
+
+	// W20 Day2 Phase 3 — legacy /memories/search compatibility layer.
+	// BMO Q3 (2026-05-06, thread:19dfad7019babb78): explicit `collection`
+	// field in body wins; missing → resolve from X-Caller-Type via ctx.
+	// Unknown name → 400 (don't silently route to wrong namespace).
+	// We do NOT 30x — old callers see the same response shape, just with
+	// a `resolved_collection` annotation for observability. Phase 4 will
+	// plumb this into the Store layer for physical isolation; for now the
+	// underlying Qdrant collection is still single, so all routes return
+	// the same point set. The annotation is here so callers (esp. the
+	// reflection engine) can verify routing without log scraping.
+	resolvedCollection := req.Collection
+	if resolvedCollection == "" {
+		resolvedCollection = CollectionFromContext(r.Context())
+	} else {
+		if _, ok := collection.DefaultRegistry.Get(resolvedCollection); !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error":      "unknown collection: " + resolvedCollection,
+				"collection": resolvedCollection,
+			})
+			return
+		}
 	}
 
 	limit := req.Limit
@@ -548,11 +573,12 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 
 	type result struct {
 		memory.Memory
-		Score float64 `json:"score"`
+		Score              float64 `json:"score"`
+		ResolvedCollection string  `json:"resolved_collection,omitempty"`
 	}
 	output := make([]result, len(results))
 	for i, r := range results {
-		output[i] = result{Memory: r.Memory, Score: r.Score}
+		output[i] = result{Memory: r.Memory, Score: r.Score, ResolvedCollection: resolvedCollection}
 	}
 
 	writeJSON(w, http.StatusOK, output)

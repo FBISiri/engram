@@ -101,6 +101,9 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 				"source_ids":     sourceIDsAny,
 				"focal_question": di.Question,
 				"provenance":     provenanceV2,
+				// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
+				"caller_type":       "reflection",
+				"target_collection": "engram_reflection",
 			}),
 		)
 
