@@ -69,6 +69,10 @@ type Memory struct {
 
 	// LastAccessedSource records the X-Caller-Type of the last search that hit this memory.
 	LastAccessedSource string `json:"last_accessed_source,omitempty"`
+
+	// Collection is the logical collection this memory belongs to (e.g. engram_user, engram_reflection).
+	// Set at write time by the server using its configured collection name.
+	Collection string `json:"collection,omitempty"`
 }
 
 // Lifecycle FSM state constants (v0.2).

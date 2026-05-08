@@ -102,6 +102,7 @@ const (
 	fieldArchiveReason      = "archive_reason"       // W17: memory-expiry schema
 	fieldLifecycleStatus    = "lifecycle_status"     // v0.2: FSM state
 	fieldLastAccessedSource = "last_accessed_source" // v0.2: caller type on last search hit
+	fieldCollection         = "collection"            // logical collection label set at write time
 )
 
 // EnsureCollection creates the collection if it doesn't exist, and idempotently
@@ -143,6 +144,7 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldSupersededBy, qdrant.FieldType_FieldTypeKeyword},   // required by Qdrant Cloud (>=1.x) for IsEmpty filter in Search
 		{fieldLifecycleStatus, qdrant.FieldType_FieldTypeKeyword},    // v0.2: FSM state filter
 		{fieldLastAccessedSource, qdrant.FieldType_FieldTypeKeyword}, // v0.2: caller-type tracking
+		{fieldCollection, qdrant.FieldType_FieldTypeKeyword},
 	}
 
 	for _, idx := range indexes {
@@ -618,6 +620,9 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 	if mem.LastAccessedSource != "" {
 		payload[fieldLastAccessedSource] = mem.LastAccessedSource
 	}
+	if mem.Collection != "" {
+		payload[fieldCollection] = mem.Collection
+	}
 
 	return &qdrant.PointStruct{
 		Id:      qdrant.NewID(mem.ID),
@@ -675,6 +680,9 @@ func pointToMemory(id *qdrant.PointId, payload map[string]*qdrant.Value) *memory
 	}
 	if v, ok := payload[fieldLastAccessedSource]; ok {
 		mem.LastAccessedSource = v.GetStringValue()
+	}
+	if v, ok := payload[fieldCollection]; ok {
+		mem.Collection = v.GetStringValue()
 	}
 
 	return mem

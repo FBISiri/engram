@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/memory"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -301,6 +302,20 @@ func matchFilters(mem memory.Memory, filters []memory.Filter) bool {
 				}
 			case memory.OpLte:
 				if mem.CreatedAt > f.Value.(float64) {
+					return false
+				}
+			}
+		case "collection":
+			if f.Op == memory.OpIn {
+				cols := f.Value.([]string)
+				found := false
+				for _, c := range cols {
+					if mem.Collection == c {
+						found = true
+						break
+					}
+				}
+				if !found {
 					return false
 				}
 			}
@@ -1169,5 +1184,169 @@ func TestReflectionRun_InvalidDryRunArg(t *testing.T) {
 	text := extractText(result)
 	if text == "" {
 		t.Fatal("expected non-empty response")
+	}
+}
+
+// =============================================================================
+// Contract tests: source_collection field (Siri W20 engram-cross-collection-verify)
+// =============================================================================
+
+// newTestServerWithCollection creates a server configured with a specific collection name.
+func newTestServerWithCollection(colName string) (*Server, *mockStore) {
+	store := newMockStore()
+	embedder := newMockEmbedder()
+	cfg := &config.Config{
+		Weights:        memory.DefaultScoringWeights(),
+		Decay:          memory.DefaultDecayConfig(),
+		MMRLambda:      0.5,
+		DedupThreshold: 0.92,
+		CollectionName: colName,
+	}
+	return NewServer(store, embedder, cfg), store
+}
+
+// TestSearchResult_SourceCollectionPresent verifies every search result contains
+// the source_collection field (non-empty).
+func TestSearchResult_SourceCollectionPresent(t *testing.T) {
+	srv, _ := newTestServerWithCollection("engram_user")
+
+	callTool(srv, "memory_add", map[string]any{"content": "user identity fixture", "type": "identity"})
+	callTool(srv, "memory_add", map[string]any{"content": "user insight fixture", "type": "insight"})
+
+	result, err := callTool(srv, "memory_search", map[string]any{"query": "user fixture", "limit": float64(5)})
+	if err != nil {
+		t.Fatalf("search error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("search returned error: %s", extractText(result))
+	}
+
+	var hits []map[string]any
+	if err := json.Unmarshal([]byte(extractText(result)), &hits); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected at least 1 result")
+	}
+	for i, h := range hits {
+		col, ok := h["source_collection"]
+		if !ok {
+			t.Errorf("result[%d] missing source_collection field", i)
+			continue
+		}
+		if col == "" {
+			t.Errorf("result[%d] source_collection is empty", i)
+		}
+	}
+}
+
+// TestSearchResult_SourceCollectionMatchesConfig verifies the returned
+// source_collection value equals the server's configured collection name.
+func TestSearchResult_SourceCollectionMatchesConfig(t *testing.T) {
+	cases := []string{
+		collection.CollectionUser,
+		collection.CollectionAgentSelf,
+		collection.CollectionReflection,
+	}
+	for _, colName := range cases {
+		t.Run(colName, func(t *testing.T) {
+			srv, _ := newTestServerWithCollection(colName)
+			callTool(srv, "memory_add", map[string]any{"content": "fixture for " + colName, "type": "insight"})
+
+			result, err := callTool(srv, "memory_search", map[string]any{"query": "fixture", "limit": float64(1)})
+			if err != nil {
+				t.Fatalf("search error: %v", err)
+			}
+			var hits []map[string]any
+			if err := json.Unmarshal([]byte(extractText(result)), &hits); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(hits) == 0 {
+				t.Fatalf("expected 1 result for collection %s", colName)
+			}
+			got := hits[0]["source_collection"]
+			if got != colName {
+				t.Errorf("source_collection = %q, want %q", got, colName)
+			}
+		})
+	}
+}
+
+// TestSearchCollectionsParam_UnknownReturnsError verifies that passing an
+// unknown collection name in the collections param returns a tool error.
+func TestSearchCollectionsParam_UnknownReturnsError(t *testing.T) {
+	collection.DefaultRegistry.Init() // ensure baseline collections are registered
+
+	srv, _ := newTestServerWithCollection(collection.CollectionUser)
+	callTool(srv, "memory_add", map[string]any{"content": "some memory", "type": "event"})
+
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query":       "some",
+		"collections": []interface{}{"nonexistent_collection"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected tool error for unknown collection name")
+	}
+}
+
+// TestSearchCollectionsParam_KnownIsAccepted verifies that a registered
+// collection name in the collections param does not cause an error.
+func TestSearchCollectionsParam_KnownIsAccepted(t *testing.T) {
+	collection.DefaultRegistry.Init()
+
+	srv, _ := newTestServerWithCollection(collection.CollectionUser)
+	callTool(srv, "memory_add", map[string]any{"content": "engram_user fixture", "type": "identity"})
+
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query":       "engram_user fixture",
+		"collections": []interface{}{collection.CollectionUser},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Errorf("unexpected tool error for valid collection: %s", extractText(result))
+	}
+}
+
+// TestSearchCollectionsParam_FilterIsolation verifies that memories written to
+// one collection are excluded when searching with a different collections filter.
+// This is the core contract: source_collection must be distinguishable.
+func TestSearchCollectionsParam_FilterIsolation(t *testing.T) {
+	collection.DefaultRegistry.Init()
+
+	// Write a memory to engram_user server
+	srv, _ := newTestServerWithCollection(collection.CollectionUser)
+	callTool(srv, "memory_add", map[string]any{"content": "user memory fixture", "type": "identity"})
+
+	// Searching with collections=[engram_user] should find the memory
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query":       "user memory fixture",
+		"collections": []interface{}{collection.CollectionUser},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var hitsUser []map[string]any
+	json.Unmarshal([]byte(extractText(result)), &hitsUser)
+	if len(hitsUser) == 0 {
+		t.Error("expected memory to be found when filtering by its own collection")
+	}
+
+	// Searching with collections=[engram_reflection] should NOT find the memory
+	result, err = callTool(srv, "memory_search", map[string]any{
+		"query":       "user memory fixture",
+		"collections": []interface{}{collection.CollectionReflection},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var hitsReflection []map[string]any
+	json.Unmarshal([]byte(extractText(result)), &hitsReflection)
+	if len(hitsReflection) != 0 {
+		t.Errorf("expected no results when filtering by a different collection, got %d", len(hitsReflection))
 	}
 }

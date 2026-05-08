@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/memory"
@@ -30,6 +31,7 @@ type Server struct {
 	decay          memory.DecayConfig
 	mmrLambda      float64
 	dedupThreshold float64
+	collectionName string
 	mcpServer      *mcpserver.MCPServer
 }
 
@@ -42,6 +44,7 @@ func NewServer(store memory.Store, embedder embedding.Embedder, cfg *config.Conf
 		decay:          cfg.Decay,
 		mmrLambda:      cfg.MMRLambda,
 		dedupThreshold: cfg.DedupThreshold,
+		collectionName: cfg.CollectionName,
 	}
 
 	s.mcpServer = mcpserver.NewMCPServer(
@@ -68,13 +71,14 @@ func (s *Server) ServeStdio() error {
 func (s *Server) registerTools() {
 	// Tool 1: memory_search
 	searchTool := mcp.NewTool("memory_search",
-		mcp.WithDescription("Semantic search over stored memories. Returns scored results combining relevance, recency, and importance."),
+		mcp.WithDescription("Semantic search over stored memories. Returns scored results combining relevance, recency, and importance. Each result includes source_collection identifying which collection it came from."),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query text for semantic similarity matching.")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of results to return. Default: 5.")),
 		mcp.WithArray("types", mcp.Description("Filter by memory types (identity, event, insight, directive)."), mcp.WithStringItems()),
 		mcp.WithArray("tags", mcp.Description("Filter by tags. Memories must have at least one matching tag."), mcp.WithStringItems()),
 		mcp.WithNumber("time_start", mcp.Description("Filter memories created after this Unix timestamp.")),
 		mcp.WithNumber("time_end", mcp.Description("Filter memories created before this Unix timestamp.")),
+		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: searches the server's configured collection. Multi-collection routing is Phase 4."), mcp.WithStringItems()),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
@@ -189,6 +193,20 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		})
 	}
 
+	// Collections filter: validate names and filter by stored collection field.
+	if cols := getStringSlice(request, "collections"); len(cols) > 0 {
+		for _, col := range cols {
+			if _, ok := collection.DefaultRegistry.Get(col); !ok {
+				return mcp.NewToolResultError(fmt.Sprintf("unknown collection: %s", col)), nil
+			}
+		}
+		filters = append(filters, memory.Filter{
+			Field: "collection",
+			Op:    memory.OpIn,
+			Value: cols,
+		})
+	}
+
 	span.SetAttributes(
 		attribute.Int("query.length", len(query)),
 		attribute.Int("tags.count", tagsCount),
@@ -281,37 +299,39 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Format output
 	type searchResult struct {
-		ID             string         `json:"id"`
-		Type           string         `json:"type"`
-		Content        string         `json:"content"`
-		Source         string         `json:"source"`
-		Importance     float64        `json:"importance"`
-		Tags           []string       `json:"tags"`
-		CreatedAt      float64        `json:"created_at"`
-		UpdatedAt      float64        `json:"updated_at"`
-		Score          float64        `json:"score"`
-		ValidUntil     float64        `json:"valid_until,omitempty"`
-		AccessCount    int64          `json:"access_count"`
-		LastAccessedAt float64        `json:"last_accessed_at,omitempty"`
-		Metadata       map[string]any `json:"metadata,omitempty"`
+		ID               string         `json:"id"`
+		Type             string         `json:"type"`
+		Content          string         `json:"content"`
+		Source           string         `json:"source"`
+		Importance       float64        `json:"importance"`
+		Tags             []string       `json:"tags"`
+		CreatedAt        float64        `json:"created_at"`
+		UpdatedAt        float64        `json:"updated_at"`
+		Score            float64        `json:"score"`
+		ValidUntil       float64        `json:"valid_until,omitempty"`
+		AccessCount      int64          `json:"access_count"`
+		LastAccessedAt   float64        `json:"last_accessed_at,omitempty"`
+		Metadata         map[string]any `json:"metadata,omitempty"`
+		SourceCollection string         `json:"source_collection"`
 	}
 
 	output := make([]searchResult, len(results))
 	for i, r := range results {
 		output[i] = searchResult{
-			ID:             r.ID,
-			Type:           string(r.Type),
-			Content:        r.Content,
-			Source:         r.Source,
-			Importance:     r.Importance,
-			Tags:           r.Tags,
-			CreatedAt:      r.CreatedAt,
-			UpdatedAt:      r.UpdatedAt,
-			Score:          r.Score,
-			ValidUntil:     r.ValidUntil,
-			AccessCount:    r.AccessCount,
-			LastAccessedAt: r.LastAccessedAt,
-			Metadata:       r.Metadata,
+			ID:               r.ID,
+			Type:             string(r.Type),
+			Content:          r.Content,
+			Source:           r.Source,
+			Importance:       r.Importance,
+			Tags:             r.Tags,
+			CreatedAt:        r.CreatedAt,
+			UpdatedAt:        r.UpdatedAt,
+			Score:            r.Score,
+			ValidUntil:       r.ValidUntil,
+			AccessCount:      r.AccessCount,
+			LastAccessedAt:   r.LastAccessedAt,
+			Metadata:         r.Metadata,
+			SourceCollection: collectionOrFallback(r.Collection, s.collectionName),
 		}
 	}
 
@@ -373,6 +393,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(content, opts...)
+	mem.Collection = s.collectionName
 
 	// Embed content
 	vec, err := s.embedder.Embed(ctx, content)
@@ -799,6 +820,16 @@ func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+// collectionOrFallback returns col if non-empty, otherwise fallback.
+// Used to surface per-memory collection labels while remaining backward-compatible
+// with memories written before the collection field was introduced.
+func collectionOrFallback(col, fallback string) string {
+	if col != "" {
+		return col
+	}
+	return fallback
 }
 
 // getStringSlice extracts a []string from the request arguments.
