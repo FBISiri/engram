@@ -207,6 +207,18 @@ type dailyCountEntry struct {
 	Count int    `json:"count"`
 }
 
+// cstLocation is the Asia/Shanghai timezone used for daily count boundaries.
+// Siri operates in CST (+8), so "today" must align with CST midnight, not UTC.
+// Without this, runs at 7am CST (= 23:xx UTC previous day) are attributed to
+// the previous UTC date and appear as runs_today=0 on the next UTC morning.
+var cstLocation = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*60*60)
+	}
+	return loc
+}()
+
 // readDailyCount reads today's reflection run count from file.
 // Returns 0 if file doesn't exist or is from a previous day.
 func readDailyCount(path string) (int, error) {
@@ -218,7 +230,7 @@ func readDailyCount(path string) (int, error) {
 		return 0, err
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
+	today := time.Now().In(cstLocation).Format("2006-01-02")
 	// Format: "DATE COUNT\n"
 	var date string
 	var count int
@@ -233,6 +245,6 @@ func readDailyCount(path string) (int, error) {
 
 // writeDailyCount writes today's count to file.
 func writeDailyCount(path string, count int) error {
-	today := time.Now().UTC().Format("2006-01-02")
+	today := time.Now().In(cstLocation).Format("2006-01-02")
 	return os.WriteFile(path, []byte(fmt.Sprintf("%s %d\n", today, count)), 0644)
 }
