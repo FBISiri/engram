@@ -5,7 +5,7 @@
 // lighter and more frequently than the Dream Engine (1-3x/day vs 1x/day),
 // and focuses on cross-domain pattern discovery rather than same-tag dedup.
 //
-// Trigger: accumulated importance of unreflected memories >= threshold (default: 50).
+// Trigger: accumulated importance of unreflected memories >= threshold (default: 40).
 // Min interval: 2h. Max per day: 3 runs.
 //
 // Output: TypeInsight memories with source="system", tagged with
@@ -34,7 +34,7 @@ var tracer = otel.Tracer("engram.reflection")
 // Config holds Reflection Engine runtime configuration.
 type Config struct {
 	// Threshold is the cumulative importance of unreflected memories required
-	// to trigger a reflection run. Default: 50.
+	// to trigger a reflection run. Default: 40.
 	Threshold float64
 
 	// MaxInputSize is the maximum number of memories to feed into one reflection
@@ -96,7 +96,7 @@ type Config struct {
 // DefaultConfig returns the default Reflection Engine configuration.
 func DefaultConfig() Config {
 	return Config{
-		Threshold:        50.0,
+		Threshold:        40.0,
 		MaxInputSize:     20,
 		MinIntervalH:     2.0,
 		DryRun:           false,
@@ -146,6 +146,16 @@ type RunResult struct {
 	InsightsSkipped    int   `json:"insights_skipped,omitempty"`
 	InsightsWriteFailed int  `json:"insights_write_failed,omitempty"`
 	WriteBackMs        int64 `json:"write_back_ms,omitempty"`
+
+	// §1.1 v0.3: Haiku confidence parsing counters (both V1 and V2 paths).
+	// Invariants: Default+ParseFail+Explicit == blocks; Explicit == High+Mid+Low+OutOfBounds.
+	HaikuConfDefaultCount     int `json:"haiku_conf_default_count,omitempty"`
+	HaikuConfParseFailCount   int `json:"haiku_conf_parse_fail_count,omitempty"`
+	HaikuConfExplicitCount    int `json:"haiku_conf_explicit_count,omitempty"`
+	HaikuConfHighCount        int `json:"haiku_conf_high_count,omitempty"`
+	HaikuConfMidCount         int `json:"haiku_conf_mid_count,omitempty"`
+	HaikuConfLowCount         int `json:"haiku_conf_low_count,omitempty"`
+	HaikuConfOutOfBoundsCount int `json:"haiku_conf_out_of_bounds_count,omitempty"`
 
 	// Evidence debug (--debug-evidence).
 	EvidenceDebug []EvidenceQuestionDebug `json:"evidence_debug,omitempty"`
@@ -255,8 +265,15 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		return result, nil
 	}
 
-	// Parse insights.
-	insights := parseHaikuResponse(haikuResponse)
+	// Parse insights and collect confidence counters (§1.1 single-point hook).
+	insights, confCounts := parseHaikuResponse(haikuResponse)
+	result.HaikuConfDefaultCount = confCounts.HaikuConfDefaultCount
+	result.HaikuConfParseFailCount = confCounts.HaikuConfParseFailCount
+	result.HaikuConfExplicitCount = confCounts.HaikuConfExplicitCount
+	result.HaikuConfHighCount = confCounts.HaikuConfHighCount
+	result.HaikuConfMidCount = confCounts.HaikuConfMidCount
+	result.HaikuConfLowCount = confCounts.HaikuConfLowCount
+	result.HaikuConfOutOfBoundsCount = confCounts.HaikuConfOutOfBoundsCount
 	if len(insights) == 0 {
 		result.Errors = append(result.Errors, "haiku returned no parseable insights")
 		result.Duration = formatDuration(time.Since(start))
@@ -306,12 +323,20 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 				memory.WithConfidence(ins.Confidence),
 				memory.WithValidUntil(reflectionValidUntil),
 				memory.WithMetadata(map[string]any{
-					"reflection_source_ids": sourceIDsAny,
-					"reflection_count":      len(sourceIDs),
-					"trigger_importance":    checkResult.AccumulatedImportance,
+					"reflection_source_ids":        sourceIDsAny,
+					"reflection_count":             len(sourceIDs),
+					"trigger_importance":           checkResult.AccumulatedImportance,
 					// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
-					"caller_type":           "reflection",
-					"target_collection":     "engram_reflection",
+					"caller_type":                  "reflection",
+					"target_collection":            "engram_reflection",
+					// §1.1 v0.3: run-level confidence counters written to engram_reflection.
+					"haiku_conf_default_count":     result.HaikuConfDefaultCount,
+					"haiku_conf_parse_fail_count":  result.HaikuConfParseFailCount,
+					"haiku_conf_explicit_count":    result.HaikuConfExplicitCount,
+					"haiku_conf_high_count":        result.HaikuConfHighCount,
+					"haiku_conf_mid_count":         result.HaikuConfMidCount,
+					"haiku_conf_low_count":         result.HaikuConfLowCount,
+					"haiku_conf_oob_count":         result.HaikuConfOutOfBoundsCount,
 				}),
 			)
 
@@ -411,7 +436,7 @@ func setValidUntilFields(result *RunResult, ttls []float64) {
 	result.ValidUntil = &ts
 }
 
-// setRunSpanAttributes writes R-S3 observability attributes onto the OTel span.
+// setRunSpanAttributes writes observability attributes onto the OTel span.
 func setRunSpanAttributes(span trace.Span, r *RunResult) {
 	if r == nil {
 		return
@@ -424,6 +449,16 @@ func setRunSpanAttributes(span trace.Span, r *RunResult) {
 	} else {
 		span.SetAttributes(attribute.String("engram.memory.valid_until", ""))
 	}
+	// §1.1 v0.3: Haiku confidence parsing counters.
+	span.SetAttributes(
+		attribute.Int("reflection.haiku.conf.default_count", r.HaikuConfDefaultCount),
+		attribute.Int("reflection.haiku.conf.parse_fail_count", r.HaikuConfParseFailCount),
+		attribute.Int("reflection.haiku.conf.explicit_count", r.HaikuConfExplicitCount),
+		attribute.Int("reflection.haiku.conf.high_count", r.HaikuConfHighCount),
+		attribute.Int("reflection.haiku.conf.mid_count", r.HaikuConfMidCount),
+		attribute.Int("reflection.haiku.conf.low_count", r.HaikuConfLowCount),
+		attribute.Int("reflection.haiku.conf.out_of_bounds_count", r.HaikuConfOutOfBoundsCount),
+	)
 }
 
 // ── Haiku LLM call ─────────────────────────────────────────────────────────
@@ -744,7 +779,7 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 		return result, nil
 	}
 
-	insights := parseHaikuResponse(haikuResponse)
+	insights, _ := parseHaikuResponse(haikuResponse)
 	if len(insights) == 0 {
 		result.Errors = append(result.Errors, "haiku returned no parseable insights")
 		result.Duration = formatDuration(time.Since(start))

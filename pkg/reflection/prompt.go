@@ -101,7 +101,20 @@ type ParsedInsight struct {
 	Tags       []string
 }
 
-// parseHaikuResponse parses the structured Haiku response into insights.
+// HaikuConfCounts holds per-run confidence parsing counters (§1.1 v0.3).
+// Invariants: Default+ParseFail+Explicit == blocks processed; Explicit == High+Mid+Low+OutOfBounds.
+type HaikuConfCounts struct {
+	HaikuConfDefaultCount     int // no CONFIDENCE: line in block
+	HaikuConfParseFailCount   int // CONFIDENCE: line present but ParseFloat failed
+	HaikuConfExplicitCount    int // CONFIDENCE: line successfully parsed
+	HaikuConfHighCount        int // explicit and conf >= 0.6
+	HaikuConfMidCount         int // explicit and 0 < conf < 0.6
+	HaikuConfLowCount         int // explicit and conf == 0
+	HaikuConfOutOfBoundsCount int // explicit but raw value <0 or >1 (before clamping)
+}
+
+// parseHaikuResponse parses the structured Haiku response into insights and
+// confidence parsing counters (§1.1 single-point hook).
 // Format per block:
 //
 //	---
@@ -109,8 +122,9 @@ type ParsedInsight struct {
 //	IMPORTANCE: <int>
 //	TAGS: <comma-separated>
 //	---
-func parseHaikuResponse(response string) []ParsedInsight {
+func parseHaikuResponse(response string) ([]ParsedInsight, HaikuConfCounts) {
 	var insights []ParsedInsight
+	var counts HaikuConfCounts
 
 	// Split on --- delimiter.
 	blocks := strings.Split(response, "---")
@@ -123,6 +137,8 @@ func parseHaikuResponse(response string) []ParsedInsight {
 		var insight ParsedInsight
 		insight.Importance = 5.0 // default
 		insight.Confidence = 0.8 // W17 v1.1: default when CONFIDENCE line absent
+
+		var hasConfidenceLine, confParseOk, confOOB bool
 
 		lines := strings.Split(block, "\n")
 		for _, line := range lines {
@@ -142,9 +158,14 @@ func parseHaikuResponse(response string) []ParsedInsight {
 					}
 				}
 			} else if strings.HasPrefix(line, "CONFIDENCE:") {
+				hasConfidenceLine = true
 				raw := strings.TrimSpace(strings.TrimPrefix(line, "CONFIDENCE:"))
 				var conf float64
 				if _, err := fmt.Sscanf(raw, "%f", &conf); err == nil {
+					confParseOk = true
+					if conf < 0 || conf > 1 {
+						confOOB = true
+					}
 					if conf < 0 {
 						conf = 0
 					}
@@ -171,7 +192,25 @@ func parseHaikuResponse(response string) []ParsedInsight {
 			}
 		}
 
-		// Only include blocks with both INSIGHT and at least some content.
+		// Count confidence parsing outcome for this block (all non-empty blocks).
+		if !hasConfidenceLine {
+			counts.HaikuConfDefaultCount++
+		} else if !confParseOk {
+			counts.HaikuConfParseFailCount++
+		} else {
+			counts.HaikuConfExplicitCount++
+			if confOOB {
+				counts.HaikuConfOutOfBoundsCount++
+			} else if insight.Confidence >= 0.6 {
+				counts.HaikuConfHighCount++
+			} else if insight.Confidence > 0 {
+				counts.HaikuConfMidCount++
+			} else {
+				counts.HaikuConfLowCount++
+			}
+		}
+
+		// Only include blocks with INSIGHT content.
 		if insight.Content != "" {
 			insights = append(insights, insight)
 		}
@@ -182,7 +221,7 @@ func parseHaikuResponse(response string) []ParsedInsight {
 		insights = insights[:3]
 	}
 
-	return insights
+	return insights, counts
 }
 
 // selectInputBatch picks up to maxSize memories from unreflected, sorted by importance DESC.

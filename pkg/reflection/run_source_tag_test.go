@@ -97,7 +97,7 @@ IMPORTANCE: 8
 CONFIDENCE: 0.8
 TAGS: siri-behavior, task-scheduling
 ---`
-	parsed := parseHaikuResponse(haikuResp)
+	parsed, _ := parseHaikuResponse(haikuResp)
 	if len(parsed) != 1 {
 		t.Fatalf("expected 1 parsed insight, got %d", len(parsed))
 	}

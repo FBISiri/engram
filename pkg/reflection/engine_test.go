@@ -17,7 +17,7 @@ IMPORTANCE: 8
 TAGS: siri-behavior, task-scheduling, improvement
 ---`
 
-	insights := parseHaikuResponse(input)
+	insights, _ := parseHaikuResponse(input)
 	if len(insights) != 1 {
 		t.Fatalf("expected 1 insight, got %d", len(insights))
 	}
@@ -44,7 +44,7 @@ IMPORTANCE: 9
 TAGS: siri-behavior, calendar, recurring-failure, frank-feedback
 ---`
 
-	insights := parseHaikuResponse(input)
+	insights, _ := parseHaikuResponse(input)
 	if len(insights) != 2 {
 		t.Fatalf("expected 2 insights, got %d", len(insights))
 	}
@@ -78,14 +78,14 @@ IMPORTANCE: 8
 TAGS: tag4
 ---`
 
-	insights := parseHaikuResponse(input)
+	insights, _ := parseHaikuResponse(input)
 	if len(insights) != 3 {
 		t.Fatalf("expected 3 insights (capped), got %d", len(insights))
 	}
 }
 
 func TestParseHaikuResponse_Empty(t *testing.T) {
-	insights := parseHaikuResponse("")
+	insights, _ := parseHaikuResponse("")
 	if len(insights) != 0 {
 		t.Errorf("expected 0 insights for empty input, got %d", len(insights))
 	}
@@ -102,7 +102,7 @@ INSIGHT: Valid insight.
 IMPORTANCE: 7
 TAGS: bar
 ---`
-	insights := parseHaikuResponse(input)
+	insights, _ := parseHaikuResponse(input)
 	if len(insights) != 1 {
 		t.Fatalf("expected 1 valid insight, got %d", len(insights))
 	}
@@ -117,7 +117,7 @@ INSIGHT: Some insight about Siri.
 IMPORTANCE: 5
 TAGS: Siri Behavior, Frank Feedback, Task Scheduling, Extra Tag One, Extra Tag Two, This Should Be Cut
 ---`
-	insights := parseHaikuResponse(input)
+	insights, _ := parseHaikuResponse(input)
 	if len(insights) != 1 {
 		t.Fatalf("expected 1 insight, got %d", len(insights))
 	}
@@ -133,6 +133,135 @@ TAGS: Siri Behavior, Frank Feedback, Task Scheduling, Extra Tag One, Extra Tag T
 		if tag != strings.ToLower(tag) {
 			t.Errorf("tag should be lowercase: %q", tag)
 		}
+	}
+}
+
+// ── parseHaikuResponse confidence counting tests (§1.1 v0.3) ──────────────
+
+func TestParseHaikuResponse_ConfDefault(t *testing.T) {
+	// No CONFIDENCE line → default_count incremented.
+	input := `---
+INSIGHT: Siri tends to improve over time.
+IMPORTANCE: 7
+TAGS: growth
+---`
+	_, counts := parseHaikuResponse(input)
+	if counts.HaikuConfDefaultCount != 1 {
+		t.Errorf("expected DefaultCount=1, got %d", counts.HaikuConfDefaultCount)
+	}
+	if counts.HaikuConfExplicitCount != 0 {
+		t.Errorf("expected ExplicitCount=0, got %d", counts.HaikuConfExplicitCount)
+	}
+}
+
+func TestParseHaikuResponse_ConfParseFail(t *testing.T) {
+	// CONFIDENCE line present but not a float → parse_fail_count.
+	input := `---
+INSIGHT: Some insight.
+IMPORTANCE: 5
+CONFIDENCE: high
+TAGS: foo
+---`
+	_, counts := parseHaikuResponse(input)
+	if counts.HaikuConfParseFailCount != 1 {
+		t.Errorf("expected ParseFailCount=1, got %d", counts.HaikuConfParseFailCount)
+	}
+	if counts.HaikuConfExplicitCount != 0 {
+		t.Errorf("expected ExplicitCount=0, got %d", counts.HaikuConfExplicitCount)
+	}
+}
+
+func TestParseHaikuResponse_ConfHigh(t *testing.T) {
+	input := `---
+INSIGHT: Some insight.
+IMPORTANCE: 8
+CONFIDENCE: 0.9
+TAGS: foo
+---`
+	_, counts := parseHaikuResponse(input)
+	if counts.HaikuConfExplicitCount != 1 {
+		t.Errorf("expected ExplicitCount=1, got %d", counts.HaikuConfExplicitCount)
+	}
+	if counts.HaikuConfHighCount != 1 {
+		t.Errorf("expected HighCount=1, got %d", counts.HaikuConfHighCount)
+	}
+}
+
+func TestParseHaikuResponse_ConfMid(t *testing.T) {
+	input := `---
+INSIGHT: Some insight.
+IMPORTANCE: 5
+CONFIDENCE: 0.4
+TAGS: foo
+---`
+	_, counts := parseHaikuResponse(input)
+	if counts.HaikuConfMidCount != 1 {
+		t.Errorf("expected MidCount=1, got %d", counts.HaikuConfMidCount)
+	}
+}
+
+func TestParseHaikuResponse_ConfLow(t *testing.T) {
+	input := `---
+INSIGHT: Some insight.
+IMPORTANCE: 5
+CONFIDENCE: 0.0
+TAGS: foo
+---`
+	_, counts := parseHaikuResponse(input)
+	if counts.HaikuConfLowCount != 1 {
+		t.Errorf("expected LowCount=1, got %d", counts.HaikuConfLowCount)
+	}
+}
+
+func TestParseHaikuResponse_ConfOOB(t *testing.T) {
+	// Raw value > 1 → oob_count (then clamped to 1).
+	input := `---
+INSIGHT: Some insight.
+IMPORTANCE: 5
+CONFIDENCE: 1.5
+TAGS: foo
+---`
+	insights, counts := parseHaikuResponse(input)
+	if counts.HaikuConfOutOfBoundsCount != 1 {
+		t.Errorf("expected OOBCount=1, got %d", counts.HaikuConfOutOfBoundsCount)
+	}
+	if counts.HaikuConfExplicitCount != 1 {
+		t.Errorf("expected ExplicitCount=1, got %d", counts.HaikuConfExplicitCount)
+	}
+	// Value should be clamped to 1.0.
+	if insights[0].Confidence != 1.0 {
+		t.Errorf("expected confidence clamped to 1.0, got %f", insights[0].Confidence)
+	}
+}
+
+func TestParseHaikuResponse_ConfInvariant(t *testing.T) {
+	// 3 blocks: one default, one explicit-high, one parse-fail.
+	// Invariant: Default+ParseFail+Explicit == 3; Explicit == High+Mid+Low+OOB.
+	input := `---
+INSIGHT: No confidence line here.
+IMPORTANCE: 5
+TAGS: a
+---
+---
+INSIGHT: With high confidence.
+IMPORTANCE: 8
+CONFIDENCE: 0.85
+TAGS: b
+---
+---
+INSIGHT: Bad confidence value.
+IMPORTANCE: 4
+CONFIDENCE: notanumber
+TAGS: c
+---`
+	_, counts := parseHaikuResponse(input)
+	total := counts.HaikuConfDefaultCount + counts.HaikuConfParseFailCount + counts.HaikuConfExplicitCount
+	if total != 3 {
+		t.Errorf("invariant Default+ParseFail+Explicit=%d, want 3", total)
+	}
+	explicitSub := counts.HaikuConfHighCount + counts.HaikuConfMidCount + counts.HaikuConfLowCount + counts.HaikuConfOutOfBoundsCount
+	if explicitSub != counts.HaikuConfExplicitCount {
+		t.Errorf("invariant Explicit=%d != High+Mid+Low+OOB=%d", counts.HaikuConfExplicitCount, explicitSub)
 	}
 }
 
