@@ -157,6 +157,9 @@ type RunResult struct {
 	HaikuConfLowCount         int `json:"haiku_conf_low_count,omitempty"`
 	HaikuConfOutOfBoundsCount int `json:"haiku_conf_out_of_bounds_count,omitempty"`
 
+	// §1.1 v0.3: runs_today tracks how many reflection runs have occurred today (CST day).
+	RunsToday int `json:"runs_today,omitempty"`
+
 	// Evidence debug (--debug-evidence).
 	EvidenceDebug []EvidenceQuestionDebug `json:"evidence_debug,omitempty"`
 
@@ -227,6 +230,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		return nil, fmt.Errorf("trigger check: %w", err)
 	}
 
+	result.RunsToday = checkResult.RunsToday
 	if !checkResult.ShouldTrigger {
 		result.SkipReason = checkResult.SkipReason
 		result.Duration = formatDuration(time.Since(start))
@@ -337,6 +341,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 					"haiku_conf_mid_count":         result.HaikuConfMidCount,
 					"haiku_conf_low_count":         result.HaikuConfLowCount,
 					"haiku_conf_oob_count":         result.HaikuConfOutOfBoundsCount,
+					"runs_today":                   result.RunsToday,
 				}),
 			)
 
@@ -449,7 +454,7 @@ func setRunSpanAttributes(span trace.Span, r *RunResult) {
 	} else {
 		span.SetAttributes(attribute.String("engram.memory.valid_until", ""))
 	}
-	// §1.1 v0.3: Haiku confidence parsing counters.
+	// §1.1 v0.3: Haiku confidence parsing counters and runs_today.
 	span.SetAttributes(
 		attribute.Int("reflection.haiku.conf.default_count", r.HaikuConfDefaultCount),
 		attribute.Int("reflection.haiku.conf.parse_fail_count", r.HaikuConfParseFailCount),
@@ -458,6 +463,7 @@ func setRunSpanAttributes(span trace.Span, r *RunResult) {
 		attribute.Int("reflection.haiku.conf.mid_count", r.HaikuConfMidCount),
 		attribute.Int("reflection.haiku.conf.low_count", r.HaikuConfLowCount),
 		attribute.Int("reflection.haiku.conf.out_of_bounds_count", r.HaikuConfOutOfBoundsCount),
+		attribute.Int("reflection.runs_today", r.RunsToday),
 	)
 }
 

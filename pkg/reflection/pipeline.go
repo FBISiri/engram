@@ -26,6 +26,7 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 		return nil, fmt.Errorf("trigger check: %w", err)
 	}
 
+	result.RunsToday = checkResult.RunsToday
 	if !checkResult.ShouldTrigger {
 		result.SkipReason = checkResult.SkipReason
 		result.Duration = formatDuration(time.Since(start))

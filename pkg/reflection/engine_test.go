@@ -452,3 +452,19 @@ func TestBuildPrompt_TruncatesLongContent(t *testing.T) {
 		t.Error("prompt should contain ... for truncated content")
 	}
 }
+
+// ── RunResult.RunsToday tests (§1.1 v0.3) ─────────────────────────────────
+
+func TestRunResult_RunsToday_Default(t *testing.T) {
+	r := &RunResult{}
+	if r.RunsToday != 0 {
+		t.Errorf("expected RunsToday=0 by default, got %d", r.RunsToday)
+	}
+}
+
+func TestRunResult_RunsToday_SetAndRead(t *testing.T) {
+	r := &RunResult{RunsToday: 2}
+	if r.RunsToday != 2 {
+		t.Errorf("expected RunsToday=2, got %d", r.RunsToday)
+	}
+}
