@@ -1191,8 +1191,10 @@ func TestReflectionRun_InvalidDryRunArg(t *testing.T) {
 // Contract tests: source_collection field (Siri W20 engram-cross-collection-verify)
 // =============================================================================
 
-// newTestServerWithCollection creates a server configured with a specific collection name.
-func newTestServerWithCollection(colName string) (*Server, *mockStore) {
+// newTestServerWithCollection creates a server for testing collection routing.
+// colName is no longer used to configure the server (routing is context-driven
+// since Phase 4 #1); the parameter is kept for call-site readability only.
+func newTestServerWithCollection(_ string) (*Server, *mockStore) {
 	store := newMockStore()
 	embedder := newMockEmbedder()
 	cfg := &config.Config{
@@ -1200,9 +1202,32 @@ func newTestServerWithCollection(colName string) (*Server, *mockStore) {
 		Decay:          memory.DefaultDecayConfig(),
 		MMRLambda:      0.5,
 		DedupThreshold: 0.92,
-		CollectionName: colName,
 	}
 	return NewServer(store, embedder, cfg), store
+}
+
+// callToolWithCallerType calls a tool with a context that has the given caller
+// type injected, so CollectionFromContext returns the expected collection.
+func callToolWithCallerType(srv *Server, toolName string, args map[string]any, callerType string) (*mcp.CallToolResult, error) {
+	ctx := context.WithValue(context.Background(), callerTypeKey{}, callerType)
+	request := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: args,
+		},
+	}
+	switch toolName {
+	case "memory_search":
+		return srv.handleSearch(ctx, request)
+	case "memory_add":
+		return srv.handleAdd(ctx, request)
+	case "memory_update":
+		return srv.handleUpdate(ctx, request)
+	case "memory_delete":
+		return srv.handleDelete(ctx, request)
+	default:
+		return nil, fmt.Errorf("unknown tool: %s", toolName)
+	}
 }
 
 // TestSearchResult_SourceCollectionPresent verifies every search result contains
@@ -1240,20 +1265,23 @@ func TestSearchResult_SourceCollectionPresent(t *testing.T) {
 	}
 }
 
-// TestSearchResult_SourceCollectionMatchesConfig verifies the returned
-// source_collection value equals the server's configured collection name.
-func TestSearchResult_SourceCollectionMatchesConfig(t *testing.T) {
-	cases := []string{
-		collection.CollectionUser,
-		collection.CollectionAgentSelf,
-		collection.CollectionReflection,
+// TestSearchResult_SourceCollectionMatchesCallerType verifies that source_collection
+// in search results reflects the caller type injected into the request context.
+func TestSearchResult_SourceCollectionMatchesCallerType(t *testing.T) {
+	cases := []struct {
+		callerType string
+		wantCol    string
+	}{
+		{"user", collection.CollectionUser},
+		{"agent-self", collection.CollectionAgentSelf},
+		{"reflection", collection.CollectionReflection},
 	}
-	for _, colName := range cases {
-		t.Run(colName, func(t *testing.T) {
-			srv, _ := newTestServerWithCollection(colName)
-			callTool(srv, "memory_add", map[string]any{"content": "fixture for " + colName, "type": "insight"})
+	for _, tc := range cases {
+		t.Run(tc.callerType, func(t *testing.T) {
+			srv, _ := newTestServerWithCollection(tc.wantCol)
+			callToolWithCallerType(srv, "memory_add", map[string]any{"content": "fixture for " + tc.callerType, "type": "insight"}, tc.callerType)
 
-			result, err := callTool(srv, "memory_search", map[string]any{"query": "fixture", "limit": float64(1)})
+			result, err := callToolWithCallerType(srv, "memory_search", map[string]any{"query": "fixture", "limit": float64(1)}, tc.callerType)
 			if err != nil {
 				t.Fatalf("search error: %v", err)
 			}
@@ -1262,11 +1290,11 @@ func TestSearchResult_SourceCollectionMatchesConfig(t *testing.T) {
 				t.Fatalf("unmarshal: %v", err)
 			}
 			if len(hits) == 0 {
-				t.Fatalf("expected 1 result for collection %s", colName)
+				t.Fatalf("expected 1 result for caller type %s", tc.callerType)
 			}
 			got := hits[0]["source_collection"]
-			if got != colName {
-				t.Errorf("source_collection = %q, want %q", got, colName)
+			if got != tc.wantCol {
+				t.Errorf("source_collection = %q, want %q", got, tc.wantCol)
 			}
 		})
 	}
