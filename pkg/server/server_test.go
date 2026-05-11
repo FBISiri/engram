@@ -1048,11 +1048,11 @@ func TestReflectionCheck_ReturnsValidJSON(t *testing.T) {
 // importance >= threshold, should_trigger is true.
 // NOTE: This test uses the mock store's Scroll method, which returns all
 // inserted memories. We insert enough high-importance memories to exceed
-// the default threshold of 50.
+// the default threshold of 40.
 func TestReflectionCheck_WithEnoughImportance(t *testing.T) {
 	srv, store := newTestServer()
 
-	// Insert 6 memories with importance=10 each → total=60 >= threshold(50).
+	// Insert 6 memories with importance=10 each → total=60 >= threshold(40).
 	for i := 0; i < 6; i++ {
 		mem := memory.New(
 			fmt.Sprintf("high importance memory number %d about siri architecture decisions", i),
@@ -1083,8 +1083,8 @@ func TestReflectionCheck_WithEnoughImportance(t *testing.T) {
 		t.Fatalf("failed to parse response: %v\nraw: %s", err, text)
 	}
 
-	if parsed.AccumulatedImportance < 50 {
-		t.Errorf("expected accumulated_importance >= 50, got %.1f", parsed.AccumulatedImportance)
+	if parsed.AccumulatedImportance < 40 {
+		t.Errorf("expected accumulated_importance >= 40, got %.1f", parsed.AccumulatedImportance)
 	}
 	// should_trigger may still be false if min-interval gate blocks it
 	// (e.g. last run was < 2h ago from a real ~/.siri file).
