@@ -1031,9 +1031,9 @@ func TestReflectionCheck_ReturnsValidJSON(t *testing.T) {
 		t.Fatalf("reflection_check response is not valid JSON: %v\nraw: %s", err, text)
 	}
 
-	// Default threshold should be 50.
-	if parsed.Threshold != 50.0 {
-		t.Errorf("expected threshold=50, got %.1f", parsed.Threshold)
+	// Default threshold should be 40 (Gate3 updated in e485ccf).
+	if parsed.Threshold != 40.0 {
+		t.Errorf("expected threshold=40, got %.1f", parsed.Threshold)
 	}
 	// With empty store, should not trigger.
 	if parsed.ShouldTrigger {
