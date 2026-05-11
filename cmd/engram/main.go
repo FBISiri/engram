@@ -544,15 +544,19 @@ func migrateReflected(cfg *config.Config) error {
 // engram_user (Phase4 D1 spec).
 //
 // Uses ScrollWithVectors to copy points without re-calling the embedding API.
+// Use --reembed to re-generate vectors for legacy records that have empty vectors.
 //
-// Flags: --dry-run, --batch N (default 100)
+// Flags: --dry-run, --reembed, --batch N (default 100)
 func migrateCollections(cfg *config.Config) error {
 	dryRun := false
+	reembed := false
 	batchSize := 100
 	for i := 2; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--dry-run":
 			dryRun = true
+		case "--reembed":
+			reembed = true
 		case "--batch":
 			if i+1 < len(os.Args) {
 				var n int
@@ -600,7 +604,26 @@ func migrateCollections(cfg *config.Config) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "migrate-collections: dry_run=%v batch_size=%d\n", dryRun, batchSize)
+	fmt.Fprintf(os.Stderr, "migrate-collections: dry_run=%v reembed=%v batch_size=%d\n", dryRun, reembed, batchSize)
+
+	var embedder embedding.Embedder
+	if reembed {
+		switch cfg.EmbedderProvider {
+		case "voyage":
+			embedder = embedding.NewVoyage(embedding.VoyageConfig{
+				APIKey:    cfg.VoyageAPIKey,
+				Model:     cfg.EmbeddingModel,
+				Dimension: cfg.EmbeddingDimension,
+			})
+		default:
+			embedder = embedding.NewOpenAI(embedding.OpenAIConfig{
+				APIKey:    cfg.OpenAIAPIKey,
+				Model:     cfg.EmbeddingModel,
+				BaseURL:   cfg.OpenAIBaseURL,
+				Dimension: cfg.EmbeddingDimension,
+			})
+		}
+	}
 
 	// validTargets is the set of recognised physical collection names.
 	validTargets := map[string]bool{
@@ -640,6 +663,16 @@ func migrateCollections(cfg *config.Config) error {
 
 			if dryRun {
 				continue
+			}
+
+			if reembed && len(sm.Vector) == 0 {
+				vec, err := embedder.Embed(ctx, sm.Content)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  reembed id=%s err=%v\n", sm.ID, err)
+					errCount++
+					continue
+				}
+				sm.Vector = vec
 			}
 
 			targetStore := targetStoreMap[target]
