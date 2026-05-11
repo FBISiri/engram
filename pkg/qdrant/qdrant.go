@@ -237,7 +237,7 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts memory.Search
 		// Extract the dense vector from the result for MMR reranking.
 		if pt.Vectors != nil {
 			if dense := pt.Vectors.GetVector(); dense != nil {
-				sm.Vector = dense.GetData()
+				sm.Vector = dense.GetDense().GetData()
 			}
 		}
 		scored = append(scored, sm)
@@ -439,7 +439,7 @@ func (s *Store) ScrollWithVectors(ctx context.Context, opts memory.ScrollOptions
 		sm := memory.ScoredMemory{Memory: *pointToMemory(pt.Id, pt.Payload)}
 		if pt.Vectors != nil {
 			if dense := pt.Vectors.GetVector(); dense != nil {
-				sm.Vector = dense.GetData()
+				sm.Vector = dense.GetDense().GetData()
 			}
 		}
 		out = append(out, sm)
