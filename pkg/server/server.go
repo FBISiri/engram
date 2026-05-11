@@ -541,11 +541,12 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	tags := getStringSlice(request, "tags")
 	validUntil := request.GetFloat("valid_until", 0)
 
-	// Step 1: Embed old_content and find matching memories
-	oldVec, err := s.embedder.Embed(ctx, oldContent)
+	// Step 1: Embed both contents upfront in a single batch call
+	vecs, err := s.embedder.EmbedBatch(ctx, []string{oldContent, newContent})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("embedding error: %v", err)), nil
 	}
+	oldVec, newVec := vecs[0], vecs[1]
 
 	searchResults, err := s.store.Search(ctx, oldVec, memory.SearchOptions{
 		Limit: 20,
@@ -590,11 +591,6 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(newContent, opts...)
-
-	newVec, err := s.embedder.Embed(ctx, newContent)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("embedding new content error: %v", err)), nil
-	}
 
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
