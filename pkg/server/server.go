@@ -462,8 +462,10 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) 
 		attribute.Float64("threshold", s.dedupThreshold),
 	)
 
+	resolvedCol := CollectionFromContext(ctx)
 	dupeResults, err := s.store.Search(ctx, vec, memory.SearchOptions{
-		Limit: 3,
+		Limit:   3,
+		Filters: []memory.Filter{{Field: "collection", Op: memory.OpIn, Value: []string{resolvedCol}}},
 	})
 	if err != nil {
 		span.RecordError(err)
