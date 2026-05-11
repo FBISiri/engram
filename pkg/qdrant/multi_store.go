@@ -1,0 +1,251 @@
+// Package qdrant — MultiStore routes operations across multiple physical Qdrant
+// collections (Phase 4: physical collection isolation).
+//
+// Each logical collection (engram_user, engram_agent_self, engram_reflection)
+// maps to a dedicated *Store instance. This replaces the Phase 1-3 approach of
+// using a single Qdrant collection with a `collection` payload field filter.
+package qdrant
+
+import (
+	"context"
+	"fmt"
+	"sort"
+
+	"github.com/FBISiri/engram/pkg/memory"
+)
+
+// MultiStore implements memory.Store by routing operations to the appropriate
+// physical Qdrant collection. It is safe for concurrent use.
+type MultiStore struct {
+	stores     map[string]*Store
+	defaultCol string // used when mem.Collection is empty or unknown
+}
+
+// NewMultiStore creates a MultiStore backed by the provided store map.
+// defaultCol is the fallback collection for writes with an unset Collection field.
+func NewMultiStore(stores map[string]*Store, defaultCol string) *MultiStore {
+	return &MultiStore{stores: stores, defaultCol: defaultCol}
+}
+
+// Close closes all backing stores.
+func (m *MultiStore) Close() error {
+	var firstErr error
+	for _, s := range m.stores {
+		if err := s.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// EnsureCollection initializes all physical collections.
+func (m *MultiStore) EnsureCollection(ctx context.Context) error {
+	for col, s := range m.stores {
+		if err := s.EnsureCollection(ctx); err != nil {
+			return fmt.Errorf("multi_store: ensure %s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+// Insert routes the memory to its target physical collection.
+// If mem.Collection is empty or unknown, it falls back to defaultCol and
+// stamps mem.Collection so the payload reflects the actual physical collection.
+func (m *MultiStore) Insert(ctx context.Context, mem *memory.Memory, vector []float32) error {
+	col := mem.Collection
+	if col == "" {
+		col = m.defaultCol
+	}
+	s, ok := m.stores[col]
+	if !ok {
+		col = m.defaultCol
+		s = m.stores[col]
+	}
+	mem.Collection = col
+	return s.Insert(ctx, mem, vector)
+}
+
+// Search fans out to all stores matching the collection filter (or all stores
+// if no collection filter is present). Results are merged and sorted by cosine
+// score descending, then truncated to opts.Limit.
+//
+// The collection filter in opts.Filters is preserved and passed to each store
+// so Qdrant's payload filter is applied (the field is still stamped at write
+// time). This is redundant after physical isolation but harmless and avoids
+// modifying opts in place.
+func (m *MultiStore) Search(ctx context.Context, vector []float32, opts memory.SearchOptions) ([]memory.ScoredMemory, error) {
+	targets := m.searchTargets(opts.Filters)
+
+	var all []memory.ScoredMemory
+	for _, s := range targets {
+		results, err := s.Search(ctx, vector, opts)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, results...)
+	}
+
+	// Global sort by raw cosine score descending, then truncate to limit.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Score > all[j].Score
+	})
+	if opts.Limit > 0 && len(all) > opts.Limit {
+		all = all[:opts.Limit]
+	}
+	return all, nil
+}
+
+// searchTargets returns the stores to query based on the collection filter.
+// A {field:"collection", op:OpIn, value:[]string{...}} filter selects specific
+// stores; absence of such a filter means all stores.
+func (m *MultiStore) searchTargets(filters []memory.Filter) []*Store {
+	for _, f := range filters {
+		if f.Field == "collection" && f.Op == memory.OpIn {
+			cols, ok := f.Value.([]string)
+			if !ok || len(cols) == 0 {
+				continue
+			}
+			var targets []*Store
+			for _, col := range cols {
+				if s, ok := m.stores[col]; ok {
+					targets = append(targets, s)
+				}
+			}
+			if len(targets) > 0 {
+				return targets
+			}
+		}
+	}
+	// No collection filter → fan-out to all stores.
+	return m.allStores()
+}
+
+// Scroll returns memories from the targeted stores.
+// When a single collection filter is present, full Qdrant-native pagination is
+// supported. For multi-store fan-out (no filter or multiple collections), the
+// implementation paginates through each store completely and returns all
+// results without external pagination (next offset = "").
+func (m *MultiStore) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]memory.Memory, string, error) {
+	// Determine if we have a single-collection target.
+	col := m.singleScrollTarget(opts.Filters)
+	if col != "" {
+		s, ok := m.stores[col]
+		if !ok {
+			return nil, "", nil
+		}
+		return s.Scroll(ctx, opts)
+	}
+
+	// Fan-out: paginate through every store completely.
+	targets := m.allStores()
+	var all []memory.Memory
+	for _, s := range targets {
+		pageOpts := opts
+		pageOpts.Offset = "" // always start from the beginning per store
+		for {
+			batch, next, err := s.Scroll(ctx, pageOpts)
+			if err != nil {
+				return nil, "", err
+			}
+			all = append(all, batch...)
+			if next == "" {
+				break
+			}
+			pageOpts.Offset = next
+		}
+	}
+	return all, "", nil
+}
+
+// singleScrollTarget returns the collection name if the filters specify exactly
+// one collection; otherwise returns "".
+func (m *MultiStore) singleScrollTarget(filters []memory.Filter) string {
+	for _, f := range filters {
+		if f.Field == "collection" && f.Op == memory.OpIn {
+			cols, ok := f.Value.([]string)
+			if ok && len(cols) == 1 {
+				return cols[0]
+			}
+		}
+	}
+	return ""
+}
+
+// Delete removes memories by IDs from all physical collections.
+// Qdrant delete is idempotent (no error for non-existent IDs).
+func (m *MultiStore) Delete(ctx context.Context, ids []string) (int, error) {
+	for _, s := range m.stores {
+		if _, err := s.Delete(ctx, ids); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
+}
+
+// Update modifies payload fields of a memory across all physical collections.
+// Qdrant SetPayload is a no-op on non-existent IDs.
+func (m *MultiStore) Update(ctx context.Context, id string, fields map[string]any) error {
+	for _, s := range m.stores {
+		if err := s.Update(ctx, id, fields); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SearchByIDs retrieves specific memories by their IDs from all stores.
+func (m *MultiStore) SearchByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
+	var all []memory.Memory
+	for _, s := range m.stores {
+		results, err := s.SearchByIDs(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, results...)
+	}
+	return all, nil
+}
+
+// Stats returns aggregated statistics across all physical collections.
+func (m *MultiStore) Stats(ctx context.Context) (*memory.CollectionStats, error) {
+	agg := &memory.CollectionStats{}
+	for _, s := range m.stores {
+		stats, err := s.Stats(ctx)
+		if err != nil {
+			return nil, err
+		}
+		agg.PointCount += stats.PointCount
+		agg.VectorCount += stats.VectorCount
+		agg.IndexedCount += stats.IndexedCount
+		agg.SegmentCount += stats.SegmentCount
+		agg.Status = stats.Status
+	}
+	return agg, nil
+}
+
+// DeleteExpired removes expired memories from all physical collections.
+func (m *MultiStore) DeleteExpired(ctx context.Context) (int, error) {
+	total := 0
+	for _, s := range m.stores {
+		n, err := s.DeleteExpired(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// allStores returns all store instances in a consistent (name-sorted) order.
+func (m *MultiStore) allStores() []*Store {
+	names := make([]string, 0, len(m.stores))
+	for name := range m.stores {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	stores := make([]*Store, 0, len(names))
+	for _, name := range names {
+		stores = append(stores, m.stores[name])
+	}
+	return stores
+}

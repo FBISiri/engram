@@ -1,4 +1,4 @@
-// cross_search.go — POST /memories/cross-search (W20 Day2 Phase 2).
+// cross_search.go — POST /memories/cross-search (Phase 4: physical isolation).
 //
 // Strict-mode cross-collection search. The request body MUST include a
 // non-empty `collections` array — defaulting to "all collections" was
@@ -7,14 +7,10 @@
 // silently leaking into user recall).
 //
 // Each collection in the list must be registered. Unknown name → 400.
-// The handler iterates the collections, runs the existing search per
-// collection, merges results, re-sorts by score, and applies the limit.
-//
-// Phase 2 caveat: underlying Store is still single Qdrant collection,
-// so all listed collections currently return the same point set. This
-// is intentional — the API surface is what BMO and the reflection
-// engine need to start migrating against. Phase 4 will plumb collection
-// name into the Store interface and provide real physical isolation.
+// The handler searches each physical Qdrant collection independently,
+// merges results, re-sorts by score, and applies the limit.
+// Dedup by ID is no longer needed since physical isolation guarantees
+// the same ID cannot exist in multiple collections.
 package server
 
 import (
@@ -108,12 +104,14 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 		perColLimit = 10
 	}
 
+	// Phase 4: each collection is a separate physical Qdrant collection, so the
+	// same ID cannot appear across collections. Dedup is no longer needed.
 	all := make([]crossSearchHit, 0, perColLimit*len(req.Collections))
-	seen := make(map[string]struct{})
 	for _, colName := range req.Collections {
+		colFilter := append(filters, memory.Filter{Field: "collection", Op: memory.OpIn, Value: []string{colName}})
 		results, err := h.srv.store.Search(r.Context(), vec, memory.SearchOptions{
 			Limit:           perColLimit,
-			Filters:         filters,
+			Filters:         colFilter,
 			ExcludeArchived: !req.IncludeArchived,
 		})
 		if err != nil {
@@ -125,13 +123,6 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		for i := range results {
 			results[i].Score = memory.Score(&results[i].Memory, results[i].Score, h.srv.weights, h.srv.decay)
-			if _, dup := seen[results[i].ID]; dup {
-				// Phase 2 dedup: same ID across "collections" today is the
-				// same row. Phase 4 will give physical isolation and dedup
-				// will become a no-op.
-				continue
-			}
-			seen[results[i].ID] = struct{}{}
 			all = append(all, crossSearchHit{
 				Memory:     results[i].Memory,
 				Score:      results[i].Score,

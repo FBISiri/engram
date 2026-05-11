@@ -106,6 +106,7 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 				"target_collection": "engram_reflection",
 			}),
 		)
+		insightMem.Collection = "engram_reflection"
 
 		var vec []float32
 		var err error

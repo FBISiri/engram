@@ -93,7 +93,7 @@ func (s *Server) registerTools() {
 		mcp.WithArray("tags", mcp.Description("Filter by tags. Memories must have at least one matching tag."), mcp.WithStringItems()),
 		mcp.WithNumber("time_start", mcp.Description("Filter memories created after this Unix timestamp.")),
 		mcp.WithNumber("time_end", mcp.Description("Filter memories created before this Unix timestamp.")),
-		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: searches the server's configured collection. Multi-collection routing is Phase 4."), mcp.WithStringItems()),
+		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: searches all collections (fan-out)."), mcp.WithStringItems()),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
@@ -591,6 +591,7 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(newContent, opts...)
+	mem.Collection = s.collectionName
 
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil

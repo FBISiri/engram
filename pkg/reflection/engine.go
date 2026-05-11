@@ -344,6 +344,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 					"runs_today":                   result.RunsToday,
 				}),
 			)
+			insightMem.Collection = "engram_reflection"
 
 			// Embed the insight.
 			var vec []float32
@@ -851,6 +852,7 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 				"target_collection":     "engram_reflection",
 			}),
 		)
+		insightMem.Collection = "engram_reflection"
 
 		var vec []float32
 		if e.embedder != nil {

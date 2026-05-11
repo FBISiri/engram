@@ -86,30 +86,37 @@ func serve(cfg *config.Config) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "Starting Engram server (transport: %s)\n", cfg.Transport)
-	fmt.Fprintf(os.Stderr, "  Qdrant:     %s (collection: %s)\n", cfg.QdrantURL, cfg.CollectionName)
+	fmt.Fprintf(os.Stderr, "  Qdrant:     %s (collections: engram_user, engram_agent_self, engram_reflection)\n", cfg.QdrantURL)
 	fmt.Fprintf(os.Stderr, "  Embedding:  %s (%dd)\n", cfg.EmbeddingModel, cfg.EmbeddingDimension)
 	fmt.Fprintf(os.Stderr, "  Scoring:    relevance=%.1f recency=%.1f importance=%.1f\n",
 		cfg.Weights.Relevance, cfg.Weights.Recency, cfg.Weights.Importance)
 
-	// 1. Create Qdrant store
-	store, err := qdrant.New(qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
-		Dimension:      uint64(cfg.EmbeddingDimension),
-	})
-	if err != nil {
-		return fmt.Errorf("create qdrant store: %w", err)
+	// 1. Create one Qdrant store per physical collection (Phase 4: physical isolation).
+	storeCfg := qdrant.Config{
+		URL:       cfg.QdrantURL,
+		APIKey:    cfg.QdrantAPIKey,
+		UseTLS:    cfg.QdrantUseTLS,
+		Dimension: uint64(cfg.EmbeddingDimension),
 	}
+	collectionNames := []string{"engram_user", "engram_agent_self", "engram_reflection"}
+	storeMap := make(map[string]*qdrant.Store, len(collectionNames))
+	for _, col := range collectionNames {
+		storeCfg.CollectionName = col
+		s, err := qdrant.New(storeCfg)
+		if err != nil {
+			return fmt.Errorf("create qdrant store for %s: %w", col, err)
+		}
+		storeMap[col] = s
+	}
+	store := qdrant.NewMultiStore(storeMap, cfg.CollectionName)
 	defer store.Close()
 
-	// Ensure collection exists
+	// Ensure all physical collections exist.
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
-		return fmt.Errorf("ensure collection: %w", err)
+		return fmt.Errorf("ensure collections: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "  Collection: ready\n")
+	fmt.Fprintf(os.Stderr, "  Collections: ready\n")
 
 	// 2. Create embedder
 	var rawEmbedder embedding.Embedder
@@ -170,15 +177,30 @@ func serve(cfg *config.Config) error {
 	}
 }
 
+// newMultiStore creates a MultiStore backed by all three logical collections.
+func newMultiStore(cfg *config.Config) (*qdrant.MultiStore, error) {
+	baseCfg := qdrant.Config{
+		URL:       cfg.QdrantURL,
+		APIKey:    cfg.QdrantAPIKey,
+		UseTLS:    cfg.QdrantUseTLS,
+		Dimension: uint64(cfg.EmbeddingDimension),
+	}
+	collectionNames := []string{"engram_user", "engram_agent_self", "engram_reflection"}
+	storeMap := make(map[string]*qdrant.Store, len(collectionNames))
+	for _, col := range collectionNames {
+		baseCfg.CollectionName = col
+		s, err := qdrant.New(baseCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create qdrant store for %s: %w", col, err)
+		}
+		storeMap[col] = s
+	}
+	return qdrant.NewMultiStore(storeMap, cfg.CollectionName), nil
+}
+
 func dreamCheck(cfg *config.Config) error {
 	// Connect to Qdrant for Gate 2 (new memories count).
-	store, err := qdrant.New(qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
-		Dimension:      uint64(cfg.EmbeddingDimension),
-	})
+	store, err := newMultiStore(cfg)
 	if err != nil {
 		// Non-fatal: run gates without store (Gate 2 will pass by default).
 		fmt.Fprintf(os.Stderr, "warning: could not connect to qdrant for gate2: %v\n", err)
@@ -226,13 +248,7 @@ func dreamRun(cfg *config.Config) error {
 	}
 
 	// Connect to Qdrant.
-	store, err := qdrant.New(qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
-		Dimension:      uint64(cfg.EmbeddingDimension),
-	})
+	store, err := newMultiStore(cfg)
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
@@ -240,7 +256,7 @@ func dreamRun(cfg *config.Config) error {
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
-		return fmt.Errorf("ensure collection: %w", err)
+		return fmt.Errorf("ensure collections: %w", err)
 	}
 
 	// Create embedder for consolidate phase (stores new insights with proper vectors).
@@ -290,13 +306,7 @@ Commands:
 // reflectionCheck evaluates whether the Reflection Engine should run now.
 // Outputs JSON: {should_trigger, skip_reason, unreflected_count, accumulated_importance, ...}
 func reflectionCheck(cfg *config.Config) error {
-	store, err := qdrant.New(qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
-		Dimension:      uint64(cfg.EmbeddingDimension),
-	})
+	store, err := newMultiStore(cfg)
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
@@ -345,13 +355,7 @@ func reflectionRun(cfg *config.Config) error {
 		}
 	}
 
-	store, err := qdrant.New(qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
-		Dimension:      uint64(cfg.EmbeddingDimension),
-	})
+	store, err := newMultiStore(cfg)
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
@@ -359,7 +363,7 @@ func reflectionRun(cfg *config.Config) error {
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
-		return fmt.Errorf("ensure collection: %w", err)
+		return fmt.Errorf("ensure collections: %w", err)
 	}
 
 	// Create embedder for storing new insights with proper vectors.
@@ -429,13 +433,7 @@ func migrateReflected(cfg *config.Config) error {
 		}
 	}
 
-	store, err := qdrant.New(qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
-		Dimension:      uint64(cfg.EmbeddingDimension),
-	})
+	store, err := newMultiStore(cfg)
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
@@ -443,7 +441,7 @@ func migrateReflected(cfg *config.Config) error {
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
-		return fmt.Errorf("ensure collection: %w", err)
+		return fmt.Errorf("ensure collections: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "migrate-reflected: dry_run=%v batch_size=%d\n", dryRun, batchSize)
