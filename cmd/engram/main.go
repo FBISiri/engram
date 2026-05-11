@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"encoding/json"
@@ -70,6 +71,11 @@ func main() {
 		}
 	case "drop-legacy":
 		if err := dropLegacy(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case "migrate-extra-collections":
+		if err := migrateExtraCollections(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -304,16 +310,17 @@ func printUsage() {
 	fmt.Println(`Usage: engram <command>
 
 Commands:
-  serve                Start the memory server (MCP and/or REST)
-  dream-check          Check Triple Gate (outputs JSON: should_run, reason, etc.)
-  dream-run            Run Dream Engine (--dry-run, --phase <name>)
-  reflection-check     Check if Reflection Engine should run (outputs JSON)
-  reflection-run       Run Reflection Engine (--dry-run, --force, --mode <v1|v2>)
-  migrate              Migrate from chat2mem to Engram
-  migrate-collections  Migrate legacy "engram" collection to new 3-collection layout (--dry-run, --batch N)
-  drop-legacy          Delete legacy "engram" collection after confirming migrate-collections succeeded
-  migrate-reflected    Backfill top-level reflected_at from legacy metadata["reflected"]=true (W17 T1)
-  version              Print version`)
+  serve                        Start the memory server (MCP and/or REST)
+  dream-check                  Check Triple Gate (outputs JSON: should_run, reason, etc.)
+  dream-run                    Run Dream Engine (--dry-run, --phase <name>)
+  reflection-check             Check if Reflection Engine should run (outputs JSON)
+  reflection-run               Run Reflection Engine (--dry-run, --force, --mode <v1|v2>)
+  migrate                      Migrate from chat2mem to Engram
+  migrate-collections          Migrate legacy "engram" collection to new 3-collection layout (--dry-run, --batch N)
+  migrate-extra-collections    Migrate extra collections (e.g. siri,bmo) into engram_user (--source, --target, --dry-run, --reembed)
+  drop-legacy                  Delete legacy collections (--collections, --confirm required)
+  migrate-reflected            Backfill top-level reflected_at from legacy metadata["reflected"]=true (W17 T1)
+  version                      Print version`)
 }
 
 // reflectionCheck evaluates whether the Reflection Engine should run now.
@@ -702,27 +709,246 @@ func migrateCollections(cfg *config.Config) error {
 	return enc.Encode(result)
 }
 
-// dropLegacy deletes the legacy "engram" Qdrant collection permanently.
-// Run this only after migrate-collections has completed and the new server
-// has been running cleanly for at least 24 h.
+// dropLegacy deletes one or more Qdrant collections permanently.
+//
+// Flags:
+//
+//	--collections  comma-separated collection names to delete (default: engram)
+//	--confirm      required safety flag; command refuses to run without it
 func dropLegacy(cfg *config.Config) error {
-	baseCfg := qdrant.Config{
-		URL:            cfg.QdrantURL,
-		APIKey:         cfg.QdrantAPIKey,
-		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: "engram",
-		Dimension:      uint64(cfg.EmbeddingDimension),
+	collectionsArg := "engram"
+	confirm := false
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--confirm":
+			confirm = true
+		case strings.HasPrefix(os.Args[i], "--collections="):
+			collectionsArg = strings.TrimPrefix(os.Args[i], "--collections=")
+		case os.Args[i] == "--collections" && i+1 < len(os.Args):
+			i++
+			collectionsArg = os.Args[i]
+		}
 	}
-	store, err := qdrant.New(baseCfg)
-	if err != nil {
-		return fmt.Errorf("connect store: %w", err)
+	if !confirm {
+		return fmt.Errorf("drop-legacy requires --confirm flag; this operation is irreversible")
 	}
-	defer store.Close()
 
-	ctx := context.Background()
-	if err := store.DropCollection(ctx); err != nil {
-		return fmt.Errorf("drop legacy collection: %w", err)
+	toDelete := strings.Split(collectionsArg, ",")
+	baseCfg := qdrant.Config{
+		URL:       cfg.QdrantURL,
+		APIKey:    cfg.QdrantAPIKey,
+		UseTLS:    cfg.QdrantUseTLS,
+		Dimension: uint64(cfg.EmbeddingDimension),
 	}
-	fmt.Fprintf(os.Stderr, "drop-legacy: legacy \"engram\" collection deleted\n")
+	ctx := context.Background()
+	for _, col := range toDelete {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			continue
+		}
+		baseCfg.CollectionName = col
+		s, err := qdrant.New(baseCfg)
+		if err != nil {
+			return fmt.Errorf("connect store %s: %w", col, err)
+		}
+		if err := s.DropCollection(ctx); err != nil {
+			s.Close()
+			return fmt.Errorf("drop collection %s: %w", col, err)
+		}
+		s.Close()
+		fmt.Fprintf(os.Stderr, "drop-legacy: deleted collection %q\n", col)
+	}
 	return nil
+}
+
+// migrateExtraCollections migrates arbitrary source collections (e.g. "siri", "bmo")
+// into a single target collection (default: engram_user).
+//
+// Design:
+//   - Scrolls each source collection in full.
+//   - For each point, checks whether the ID already exists in the target (target wins).
+//   - Stamps payload.collection to the target collection name before inserting.
+//   - Optionally re-generates embeddings for points with empty vectors (--reembed).
+//
+// Flags:
+//
+//	--source   comma-separated source collection names (required)
+//	--target   target collection name (default: engram_user)
+//	--dry-run  scan + report, don't write
+//	--reembed  regenerate vectors for points with empty vectors
+//	--batch N  scroll batch size (default: 100)
+func migrateExtraCollections(cfg *config.Config) error {
+	sourceArg := ""
+	targetName := collection.CollectionUser
+	dryRun := false
+	reembed := false
+	batchSize := 100
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--dry-run":
+			dryRun = true
+		case os.Args[i] == "--reembed":
+			reembed = true
+		case strings.HasPrefix(os.Args[i], "--source="):
+			sourceArg = strings.TrimPrefix(os.Args[i], "--source=")
+		case os.Args[i] == "--source" && i+1 < len(os.Args):
+			i++
+			sourceArg = os.Args[i]
+		case strings.HasPrefix(os.Args[i], "--target="):
+			targetName = strings.TrimPrefix(os.Args[i], "--target=")
+		case os.Args[i] == "--target" && i+1 < len(os.Args):
+			i++
+			targetName = os.Args[i]
+		case os.Args[i] == "--batch" && i+1 < len(os.Args):
+			i++
+			var n int
+			if _, err := fmt.Sscanf(os.Args[i], "%d", &n); err == nil && n > 0 {
+				batchSize = n
+			}
+		}
+	}
+	if sourceArg == "" {
+		return fmt.Errorf("--source is required (comma-separated collection names, e.g. siri,bmo)")
+	}
+	sources := strings.Split(sourceArg, ",")
+	for i, s := range sources {
+		sources[i] = strings.TrimSpace(s)
+	}
+
+	baseCfg := qdrant.Config{
+		URL:       cfg.QdrantURL,
+		APIKey:    cfg.QdrantAPIKey,
+		UseTLS:    cfg.QdrantUseTLS,
+		Dimension: uint64(cfg.EmbeddingDimension),
+	}
+	ctx := context.Background()
+
+	// Target store.
+	baseCfg.CollectionName = targetName
+	targetStore, err := qdrant.New(baseCfg)
+	if err != nil {
+		return fmt.Errorf("connect target store %s: %w", targetName, err)
+	}
+	defer targetStore.Close()
+	if !dryRun {
+		if err := targetStore.EnsureCollection(ctx); err != nil {
+			return fmt.Errorf("ensure target collection %s: %w", targetName, err)
+		}
+	}
+
+	var embedder embedding.Embedder
+	if reembed {
+		switch cfg.EmbedderProvider {
+		case "voyage":
+			embedder = embedding.NewVoyage(embedding.VoyageConfig{
+				APIKey:    cfg.VoyageAPIKey,
+				Model:     cfg.EmbeddingModel,
+				Dimension: cfg.EmbeddingDimension,
+			})
+		default:
+			embedder = embedding.NewOpenAI(embedding.OpenAIConfig{
+				APIKey:    cfg.OpenAIAPIKey,
+				Model:     cfg.EmbeddingModel,
+				BaseURL:   cfg.OpenAIBaseURL,
+				Dimension: cfg.EmbeddingDimension,
+			})
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "migrate-extra-collections: sources=%v target=%s dry_run=%v reembed=%v batch_size=%d\n",
+		sources, targetName, dryRun, reembed, batchSize)
+
+	sourceCounts := map[string]int{}
+	targetInserted := 0
+	skippedDuplicate := 0
+	errCount := 0
+
+	for _, srcName := range sources {
+		baseCfg.CollectionName = srcName
+		srcStore, err := qdrant.New(baseCfg)
+		if err != nil {
+			return fmt.Errorf("connect source store %s: %w", srcName, err)
+		}
+
+		var offset string
+		for {
+			batch, next, err := srcStore.ScrollWithVectors(ctx, memory.ScrollOptions{
+				Limit:  batchSize,
+				Offset: offset,
+			})
+			if err != nil {
+				srcStore.Close()
+				return fmt.Errorf("scroll %s: %w", srcName, err)
+			}
+			if len(batch) == 0 {
+				break
+			}
+
+			// Collect IDs to batch-check existence in target.
+			ids := make([]string, len(batch))
+			for i, sm := range batch {
+				ids[i] = sm.ID
+			}
+			existingInTarget := map[string]bool{}
+			if !dryRun {
+				existing, err := targetStore.SearchByIDs(ctx, ids)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  warn: SearchByIDs failed: %v\n", err)
+				}
+				for _, m := range existing {
+					existingInTarget[m.ID] = true
+				}
+			}
+
+			for i := range batch {
+				sm := &batch[i]
+				sourceCounts[srcName]++
+
+				if existingInTarget[sm.ID] {
+					skippedDuplicate++
+					continue
+				}
+
+				sm.Collection = targetName
+
+				if dryRun {
+					continue
+				}
+
+				if reembed && len(sm.Vector) == 0 {
+					vec, err := embedder.Embed(ctx, sm.Content)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "  reembed id=%s err=%v\n", sm.ID, err)
+						errCount++
+						continue
+					}
+					sm.Vector = vec
+				}
+
+				if err := targetStore.Insert(ctx, &sm.Memory, sm.Vector); err != nil {
+					fmt.Fprintf(os.Stderr, "  insert id=%s src=%s err=%v\n", sm.ID, srcName, err)
+					errCount++
+					continue
+				}
+				targetInserted++
+			}
+
+			if next == "" || next == offset {
+				break
+			}
+			offset = next
+		}
+		srcStore.Close()
+	}
+
+	result := map[string]any{
+		"dry_run":           dryRun,
+		"source_counts":     sourceCounts,
+		"target_inserted":   targetInserted,
+		"skipped_duplicate": skippedDuplicate,
+		"errors":            errCount,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
