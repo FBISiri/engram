@@ -9,6 +9,7 @@ package qdrant
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 
 	"github.com/FBISiri/engram/pkg/memory"
@@ -69,20 +70,38 @@ func (m *MultiStore) Insert(ctx context.Context, mem *memory.Memory, vector []fl
 // if no collection filter is present). Results are merged and sorted by cosine
 // score descending, then truncated to opts.Limit.
 //
-// The collection filter in opts.Filters is preserved and passed to each store
-// so Qdrant's payload filter is applied (the field is still stamped at write
-// time). This is redundant after physical isolation but harmless and avoids
-// modifying opts in place.
+// A single-store failure is logged as WARN and skipped (partial results) so
+// one unavailable collection does not take down the entire search. The B2
+// X-Engram-Partial header will be added in Phase 5-B2 on top of this.
+//
+// Fan-out uses a goroutine per store (currently 3). If future collections are
+// added, continue using sync.WaitGroup/errgroup — do not loop-expand manually.
 func (m *MultiStore) Search(ctx context.Context, vector []float32, opts memory.SearchOptions) ([]memory.ScoredMemory, error) {
 	targets := m.searchTargets(opts.Filters)
 
+	type result struct {
+		col     string
+		results []memory.ScoredMemory
+		err     error
+	}
+	ch := make(chan result, len(targets))
+
+	for i, s := range targets {
+		col := m.colNameForStore(s, i)
+		go func(col string, s *Store) {
+			res, err := s.Search(ctx, vector, opts)
+			ch <- result{col: col, results: res, err: err}
+		}(col, s)
+	}
+
 	var all []memory.ScoredMemory
-	for _, s := range targets {
-		results, err := s.Search(ctx, vector, opts)
-		if err != nil {
-			return nil, err
+	for range targets {
+		r := <-ch
+		if r.err != nil {
+			log.Printf("WARN handleSearch fan-out: store=%s err=%v", r.col, r.err)
+			continue
 		}
-		all = append(all, results...)
+		all = append(all, r.results...)
 	}
 
 	// Global sort by raw cosine score descending, then truncate to limit.
@@ -93,6 +112,15 @@ func (m *MultiStore) Search(ctx context.Context, vector []float32, opts memory.S
 		all = all[:opts.Limit]
 	}
 	return all, nil
+}
+
+// colNameForStore returns a human-readable name for log messages.
+// It uses the store's collection name when available, falling back to its index.
+func (m *MultiStore) colNameForStore(s *Store, idx int) string {
+	if s != nil {
+		return s.CollectionName()
+	}
+	return fmt.Sprintf("store[%d]", idx)
 }
 
 // searchTargets returns the stores to query based on the collection filter.
