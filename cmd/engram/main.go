@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 
 	otelpkg "github.com/FBISiri/engram/internal/otel"
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/dream"
 	"github.com/FBISiri/engram/pkg/embedding"
@@ -108,7 +109,7 @@ func serve(cfg *config.Config) error {
 		}
 		storeMap[col] = s
 	}
-	store := qdrant.NewMultiStore(storeMap, cfg.CollectionName)
+	store := qdrant.NewMultiStore(storeMap, collection.CollectionUser)
 	defer store.Close()
 
 	// Ensure all physical collections exist.
@@ -195,7 +196,7 @@ func newMultiStore(cfg *config.Config) (*qdrant.MultiStore, error) {
 		}
 		storeMap[col] = s
 	}
-	return qdrant.NewMultiStore(storeMap, cfg.CollectionName), nil
+	return qdrant.NewMultiStore(storeMap, collection.CollectionUser), nil
 }
 
 func dreamCheck(cfg *config.Config) error {

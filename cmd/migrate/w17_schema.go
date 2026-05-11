@@ -51,7 +51,7 @@ func run() error {
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
 		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
+		CollectionName: "engram_user",
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
 	if err != nil {

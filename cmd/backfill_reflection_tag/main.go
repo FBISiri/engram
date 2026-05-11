@@ -100,15 +100,16 @@ func main() {
 	if opts.qdrantURL != "" {
 		cfg.QdrantURL = opts.qdrantURL
 	}
+	colName := "engram_user"
 	if opts.collection != "" {
-		cfg.CollectionName = opts.collection
+		colName = opts.collection
 	}
 
 	store, err := qdrant.New(qdrant.Config{
 		URL:            cfg.QdrantURL,
 		APIKey:         cfg.QdrantAPIKey,
 		UseTLS:         cfg.QdrantUseTLS,
-		CollectionName: cfg.CollectionName,
+		CollectionName: colName,
 		Dimension:      uint64(cfg.EmbeddingDimension),
 	})
 	if err != nil {

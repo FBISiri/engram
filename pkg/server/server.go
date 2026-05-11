@@ -31,7 +31,6 @@ type Server struct {
 	decay          memory.DecayConfig
 	mmrLambda      float64
 	dedupThreshold float64
-	collectionName string
 	mcpServer      *mcpserver.MCPServer
 	embedCache     memory.EmbedCache // optional; set via SetEmbedCache
 }
@@ -59,7 +58,6 @@ func NewServer(store memory.Store, embedder embedding.Embedder, cfg *config.Conf
 		decay:          cfg.Decay,
 		mmrLambda:      cfg.MMRLambda,
 		dedupThreshold: cfg.DedupThreshold,
-		collectionName: cfg.CollectionName,
 	}
 
 	s.mcpServer = mcpserver.NewMCPServer(
@@ -346,7 +344,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			AccessCount:      r.AccessCount,
 			LastAccessedAt:   r.LastAccessedAt,
 			Metadata:         r.Metadata,
-			SourceCollection: collectionOrFallback(r.Collection, s.collectionName),
+			SourceCollection: collectionOrFallback(r.Collection, collection.CollectionUser),
 		}
 	}
 
