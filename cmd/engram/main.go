@@ -109,7 +109,7 @@ func serve(cfg *config.Config) error {
 		UseTLS:    cfg.QdrantUseTLS,
 		Dimension: uint64(cfg.EmbeddingDimension),
 	}
-	collectionNames := []string{"engram_user", "engram_agent_self", "engram_reflection"}
+	collectionNames := []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection}
 	storeMap := make(map[string]*qdrant.Store, len(collectionNames))
 	for _, col := range collectionNames {
 		storeCfg.CollectionName = col
@@ -196,7 +196,7 @@ func newMultiStore(cfg *config.Config) (*qdrant.MultiStore, error) {
 		UseTLS:    cfg.QdrantUseTLS,
 		Dimension: uint64(cfg.EmbeddingDimension),
 	}
-	collectionNames := []string{"engram_user", "engram_agent_self", "engram_reflection"}
+	collectionNames := []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection}
 	storeMap := make(map[string]*qdrant.Store, len(collectionNames))
 	for _, col := range collectionNames {
 		baseCfg.CollectionName = col
