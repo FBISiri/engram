@@ -408,7 +408,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(content, opts...)
-	mem.Collection = s.collectionName
+	mem.Collection = CollectionFromContext(ctx)
 
 	// Embed content
 	vec, err := s.embedder.Embed(ctx, content)
@@ -591,7 +591,7 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(newContent, opts...)
-	mem.Collection = s.collectionName
+	mem.Collection = CollectionFromContext(ctx)
 
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
