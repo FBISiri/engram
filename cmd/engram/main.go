@@ -63,6 +63,16 @@ func main() {
 	case "migrate":
 		fmt.Println("Migration tool not yet implemented.")
 		os.Exit(1)
+	case "migrate-collections":
+		if err := migrateCollections(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	case "drop-legacy":
+		if err := dropLegacy(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	case "migrate-reflected":
 		if err := migrateReflected(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -294,14 +304,16 @@ func printUsage() {
 	fmt.Println(`Usage: engram <command>
 
 Commands:
-  serve             Start the memory server (MCP and/or REST)
-  dream-check       Check Triple Gate (outputs JSON: should_run, reason, etc.)
-  dream-run         Run Dream Engine (--dry-run, --phase <name>)
-  reflection-check  Check if Reflection Engine should run (outputs JSON)
-  reflection-run    Run Reflection Engine (--dry-run, --force, --mode <v1|v2>)
-  migrate           Migrate from chat2mem to Engram
-  migrate-reflected Backfill top-level reflected_at from legacy metadata["reflected"]=true (W17 T1)
-  version           Print version`)
+  serve                Start the memory server (MCP and/or REST)
+  dream-check          Check Triple Gate (outputs JSON: should_run, reason, etc.)
+  dream-run            Run Dream Engine (--dry-run, --phase <name>)
+  reflection-check     Check if Reflection Engine should run (outputs JSON)
+  reflection-run       Run Reflection Engine (--dry-run, --force, --mode <v1|v2>)
+  migrate              Migrate from chat2mem to Engram
+  migrate-collections  Migrate legacy "engram" collection to new 3-collection layout (--dry-run, --batch N)
+  drop-legacy          Delete legacy "engram" collection after confirming migrate-collections succeeded
+  migrate-reflected    Backfill top-level reflected_at from legacy metadata["reflected"]=true (W17 T1)
+  version              Print version`)
 }
 
 // reflectionCheck evaluates whether the Reflection Engine should run now.
@@ -524,4 +536,160 @@ func migrateReflected(cfg *config.Config) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)
+}
+
+// migrateCollections scrolls the legacy "engram" collection and writes each
+// memory into the correct new physical collection based on its payload.collection
+// field. Memories with an empty or unrecognised collection field fall back to
+// engram_user (Phase4 D1 spec).
+//
+// Uses ScrollWithVectors to copy points without re-calling the embedding API.
+//
+// Flags: --dry-run, --batch N (default 100)
+func migrateCollections(cfg *config.Config) error {
+	dryRun := false
+	batchSize := 100
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--dry-run":
+			dryRun = true
+		case "--batch":
+			if i+1 < len(os.Args) {
+				var n int
+				if _, err := fmt.Sscanf(os.Args[i+1], "%d", &n); err == nil && n > 0 {
+					batchSize = n
+				}
+				i++
+			}
+		}
+	}
+
+	baseCfg := qdrant.Config{
+		URL:       cfg.QdrantURL,
+		APIKey:    cfg.QdrantAPIKey,
+		UseTLS:    cfg.QdrantUseTLS,
+		Dimension: uint64(cfg.EmbeddingDimension),
+	}
+
+	// Legacy source store — do not call EnsureCollection (must already exist).
+	baseCfg.CollectionName = "engram"
+	legacyStore, err := qdrant.New(baseCfg)
+	if err != nil {
+		return fmt.Errorf("connect legacy store: %w", err)
+	}
+	defer legacyStore.Close()
+
+	// Target stores — one per new collection.
+	targetStoreMap := map[string]*qdrant.Store{}
+	for _, col := range []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection} {
+		baseCfg.CollectionName = col
+		s, err := qdrant.New(baseCfg)
+		if err != nil {
+			return fmt.Errorf("connect target store %s: %w", col, err)
+		}
+		defer s.Close()
+		targetStoreMap[col] = s
+	}
+
+	ctx := context.Background()
+	if !dryRun {
+		for col, s := range targetStoreMap {
+			if err := s.EnsureCollection(ctx); err != nil {
+				return fmt.Errorf("ensure collection %s: %w", col, err)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "migrate-collections: dry_run=%v batch_size=%d\n", dryRun, batchSize)
+
+	// validTargets is the set of recognised physical collection names.
+	validTargets := map[string]bool{
+		collection.CollectionUser:       true,
+		collection.CollectionAgentSelf:  true,
+		collection.CollectionReflection: true,
+	}
+
+	counts := map[string]int{} // source payload.collection value → count
+	inserted := 0
+	errCount := 0
+	var offset string
+
+	for {
+		batch, next, err := legacyStore.ScrollWithVectors(ctx, memory.ScrollOptions{
+			Limit:  batchSize,
+			Offset: offset,
+		})
+		if err != nil {
+			return fmt.Errorf("scroll legacy: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		for i := range batch {
+			sm := &batch[i]
+			origCol := sm.Collection
+			counts[origCol]++
+
+			// Resolve target collection; empty/unknown → engram_user.
+			target := origCol
+			if !validTargets[target] {
+				target = collection.CollectionUser
+			}
+			sm.Collection = target
+
+			if dryRun {
+				continue
+			}
+
+			targetStore := targetStoreMap[target]
+			if err := targetStore.Insert(ctx, &sm.Memory, sm.Vector); err != nil {
+				fmt.Fprintf(os.Stderr, "  insert id=%s target=%s err=%v\n", sm.ID, target, err)
+				errCount++
+				continue
+			}
+			inserted++
+		}
+
+		if next == "" || next == offset {
+			break
+		}
+		offset = next
+	}
+
+	result := map[string]any{
+		"dry_run":            dryRun,
+		"source_collection":  "engram",
+		"payload_col_counts": counts,
+		"inserted":           inserted,
+		"errors":             errCount,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
+}
+
+// dropLegacy deletes the legacy "engram" Qdrant collection permanently.
+// Run this only after migrate-collections has completed and the new server
+// has been running cleanly for at least 24 h.
+func dropLegacy(cfg *config.Config) error {
+	baseCfg := qdrant.Config{
+		URL:            cfg.QdrantURL,
+		APIKey:         cfg.QdrantAPIKey,
+		UseTLS:         cfg.QdrantUseTLS,
+		CollectionName: "engram",
+		Dimension:      uint64(cfg.EmbeddingDimension),
+	}
+	store, err := qdrant.New(baseCfg)
+	if err != nil {
+		return fmt.Errorf("connect store: %w", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.DropCollection(ctx); err != nil {
+		return fmt.Errorf("drop legacy collection: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "drop-legacy: legacy \"engram\" collection deleted\n")
+	return nil
 }

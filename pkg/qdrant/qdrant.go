@@ -81,6 +81,14 @@ func (s *Store) Close() error {
 	return s.client.Close()
 }
 
+// CollectionName returns the Qdrant collection name this store is bound to.
+func (s *Store) CollectionName() string { return s.collection }
+
+// DropCollection deletes the Qdrant collection and all its data permanently.
+func (s *Store) DropCollection(ctx context.Context) error {
+	return s.client.DeleteCollection(ctx, s.collection)
+}
+
 // payloadFields defines the payload field names stored alongside each point.
 const (
 	fieldID            = "id"
@@ -380,6 +388,68 @@ func (s *Store) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]memory
 	}
 
 	return memories, nextOffset, nil
+}
+
+// ScrollWithVectors is like Scroll but includes the embedding vector for each
+// returned memory (in ScoredMemory.Vector, Score=0). Used by migration tooling
+// to copy points across physical collections without re-embedding.
+func (s *Store) ScrollWithVectors(ctx context.Context, opts memory.ScrollOptions) ([]memory.ScoredMemory, string, error) {
+	limit := uint32(opts.Limit)
+	if limit == 0 {
+		limit = 50
+	}
+
+	filter := buildFilter(opts.Filters)
+	var mustConds []*qdrant.Condition
+	if filter != nil {
+		mustConds = append(mustConds, filter.Must...)
+	}
+	mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	now := float64(time.Now().Unix())
+	mustNotConds := []*qdrant.Condition{
+		qdrant.NewFilterAsCondition(&qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
+				qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
+			},
+		}),
+	}
+
+	req := &qdrant.ScrollPoints{
+		CollectionName: s.collection,
+		Filter: &qdrant.Filter{
+			Must:    mustConds,
+			MustNot: mustNotConds,
+		},
+		Limit:       qdrant.PtrOf(limit),
+		WithPayload: qdrant.NewWithPayload(true),
+		WithVectors: qdrant.NewWithVectors(true),
+	}
+	if opts.Offset != "" {
+		req.Offset = qdrant.NewID(opts.Offset)
+	}
+
+	results, err := s.client.Scroll(ctx, req)
+	if err != nil {
+		return nil, "", fmt.Errorf("qdrant: scroll_with_vectors: %w", err)
+	}
+
+	out := make([]memory.ScoredMemory, 0, len(results))
+	for _, pt := range results {
+		sm := memory.ScoredMemory{Memory: *pointToMemory(pt.Id, pt.Payload)}
+		if pt.Vectors != nil {
+			if dense := pt.Vectors.GetVector(); dense != nil {
+				sm.Vector = dense.GetData()
+			}
+		}
+		out = append(out, sm)
+	}
+
+	var nextOffset string
+	if len(results) == int(limit) && len(results) > 0 {
+		nextOffset = extractString(results[len(results)-1].Id)
+	}
+	return out, nextOffset, nil
 }
 
 // Stats returns collection statistics.
