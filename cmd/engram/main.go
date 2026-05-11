@@ -112,17 +112,17 @@ func serve(cfg *config.Config) error {
 	fmt.Fprintf(os.Stderr, "  Collection: ready\n")
 
 	// 2. Create embedder
-	var embedder embedding.Embedder
+	var rawEmbedder embedding.Embedder
 	switch cfg.EmbedderProvider {
 	case "voyage":
-		embedder = embedding.NewVoyage(embedding.VoyageConfig{
+		rawEmbedder = embedding.NewVoyage(embedding.VoyageConfig{
 			APIKey:    cfg.VoyageAPIKey,
 			Model:     cfg.EmbeddingModel,
 			Dimension: cfg.EmbeddingDimension,
 		})
 		fmt.Fprintf(os.Stderr, "  Embedder:   voyage (%s, %dd)\n", cfg.EmbeddingModel, cfg.EmbeddingDimension)
 	default:
-		embedder = embedding.NewOpenAI(embedding.OpenAIConfig{
+		rawEmbedder = embedding.NewOpenAI(embedding.OpenAIConfig{
 			APIKey:    cfg.OpenAIAPIKey,
 			Model:     cfg.EmbeddingModel,
 			BaseURL:   cfg.OpenAIBaseURL,
@@ -131,8 +131,14 @@ func serve(cfg *config.Config) error {
 		fmt.Fprintf(os.Stderr, "  Embedder:   openai (%s, %dd)\n", cfg.EmbeddingModel, cfg.EmbeddingDimension)
 	}
 
+	// Wrap embedder with LRU cache (P5-A1).
+	embedCache := memory.NewEmbedCache(0) // default 10k entries
+	embedder := embedding.NewCachingEmbedder(rawEmbedder, embedCache, cfg.EmbeddingModel+"/v1")
+	fmt.Fprintf(os.Stderr, "  EmbedCache: LRU 10k entries\n")
+
 	// 3. Create and start server
 	srv := server.NewServer(store, embedder, cfg)
+	srv.SetEmbedCache(embedCache)
 
 	// 4. Start background expiry cleanup goroutine.
 	// Uses context.Background() since ServeStdio blocks until process exit;

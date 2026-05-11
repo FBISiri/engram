@@ -33,6 +33,21 @@ type Server struct {
 	dedupThreshold float64
 	collectionName string
 	mcpServer      *mcpserver.MCPServer
+	embedCache     memory.EmbedCache // optional; set via SetEmbedCache
+}
+
+// SetEmbedCache registers a cache so its stats can be exposed via /metrics.
+func (s *Server) SetEmbedCache(c memory.EmbedCache) {
+	s.embedCache = c
+}
+
+// EmbedCacheStats returns cumulative hit/miss counts for the embed cache.
+// Returns 0, 0 if no cache has been configured.
+func (s *Server) EmbedCacheStats() (hits, misses int64) {
+	if s.embedCache == nil {
+		return 0, 0
+	}
+	return s.embedCache.Stats()
 }
 
 // NewServer creates a new Engram MCP server with all tools registered.

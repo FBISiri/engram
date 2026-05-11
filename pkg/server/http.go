@@ -113,6 +113,9 @@ func (h *HTTPServer) registerRoutes() {
 	// W20 Day2 Phase 2: cross-collection search (strict mode — collections
 	// list is required, no implicit all-collection fallback).
 	h.mux.HandleFunc("POST /memories/cross-search", h.withAuth(h.handleCrossSearch))
+
+	// P5-A1: embed cache metrics — no auth required (safe to scrape from monitoring).
+	h.mux.HandleFunc("GET /metrics", h.handleMetrics)
 }
 
 // Handler returns the underlying http.Handler for use with httptest.Server or
@@ -181,6 +184,18 @@ type healthResponse struct {
 	Qdrant     string `json:"qdrant"`                // collection status from Qdrant
 	PointCount uint64 `json:"point_count"`           // total points in collection
 	Error      string `json:"error,omitempty"`       // non-empty when degraded
+}
+
+// handleMetrics exposes embed cache counters in Prometheus text format.
+func (h *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	hits, misses := h.srv.EmbedCacheStats()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# HELP engram_embed_cache_hit_total Total embed cache hits.\n")
+	fmt.Fprintf(w, "# TYPE engram_embed_cache_hit_total counter\n")
+	fmt.Fprintf(w, "engram_embed_cache_hit_total %d\n", hits)
+	fmt.Fprintf(w, "# HELP engram_embed_cache_miss_total Total embed cache misses.\n")
+	fmt.Fprintf(w, "# TYPE engram_embed_cache_miss_total counter\n")
+	fmt.Fprintf(w, "engram_embed_cache_miss_total %d\n", misses)
 }
 
 // handleHealth performs a deep health check by pinging the Qdrant collection
