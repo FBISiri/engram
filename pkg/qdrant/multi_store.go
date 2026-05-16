@@ -219,34 +219,45 @@ func (m *MultiStore) Delete(ctx context.Context, ids []string) (int, error) {
 // layer may surface a NotFound status when the point is not in a given
 // collection. We ignore NotFound errors so the fan-out never fails because
 // the point only lives in one of the three physical collections.
+//
+// Resilience: we try every store regardless of errors. If at least one store
+// succeeds we return nil immediately (the ID was found and updated). If all
+// stores error we return nil when all errors are NotFound-type (the ID was
+// already deleted — treat as an orphan success so callers move forward). Only
+// when all stores error AND at least one error is a genuine non-NotFound error
+// do we surface an error. This prevents a broken/empty store (e.g.
+// engram_agent_self at 0 points) from blocking updates to the correct store.
 func (m *MultiStore) Update(ctx context.Context, id string, fields map[string]any) error {
+	var firstRealErr error
 	for _, s := range m.stores {
 		if err := s.Update(ctx, id, fields); err != nil {
-			if isGRPCNotFound(err) {
-				continue
+			if !isGRPCNotFound(err) && firstRealErr == nil {
+				firstRealErr = err
 			}
-			return err
+			continue // try remaining stores regardless of error type
 		}
+		return nil // at least one store succeeded — ID was updated
 	}
-	return nil
+	// All stores errored. firstRealErr is nil iff every error was NotFound
+	// (orphan — the memory was deleted). Treat as success so the engine can
+	// advance; the orphan won't appear in future Scroll results.
+	return firstRealErr
 }
 
 // isGRPCNotFound walks the error chain looking for a gRPC NotFound status.
-// Also matches Internal/Unknown errors whose message contains "not found" —
-// some Qdrant versions surface a non-NotFound code for SetPayload on a
-// non-existent point ID (observed in production as the orphan-ID bug).
+// Also matches any gRPC error whose message contains "not found" — Qdrant
+// versions have varied in which status code they return for SetPayload on a
+// non-existent point (NotFound, Internal, Unknown, and others observed in
+// production). Matching the message broadly is the safest defence.
 func isGRPCNotFound(err error) bool {
 	for err != nil {
 		if s, ok := status.FromError(err); ok {
 			if s.Code() == codes.NotFound {
 				return true
 			}
-			// Belt-and-suspenders: Qdrant may return Internal/Unknown with a
-			// "not found" message instead of the canonical NotFound code.
-			if s.Code() == codes.Internal || s.Code() == codes.Unknown {
-				if strings.Contains(strings.ToLower(s.Message()), "not found") {
-					return true
-				}
+			// Belt-and-suspenders: match any gRPC code whose message says "not found".
+			if strings.Contains(strings.ToLower(s.Message()), "not found") {
+				return true
 			}
 		}
 		err = errors.Unwrap(err)
@@ -255,12 +266,18 @@ func isGRPCNotFound(err error) bool {
 }
 
 // SearchByIDs retrieves specific memories by their IDs from all stores.
+// A single-store failure is logged as WARN and skipped (partial results) so
+// a broken/empty store does not prevent lookups against healthy stores.
+// Callers that need strict all-or-nothing semantics should check the length
+// of the result against the input, but for existence-check uses (e.g.
+// filterExistingIDs) partial results are preferable to a hard error.
 func (m *MultiStore) SearchByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
 	var all []memory.Memory
 	for _, s := range m.stores {
 		results, err := s.SearchByIDs(ctx, ids)
 		if err != nil {
-			return nil, err
+			log.Printf("WARN SearchByIDs fan-out: store=%s err=%v (skipping)", s.CollectionName(), err)
+			continue // partial results — don't let one broken store block others
 		}
 		all = append(all, results...)
 	}
