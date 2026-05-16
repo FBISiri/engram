@@ -521,8 +521,25 @@ func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	// Delete all expired points.
+	// Guard: stamp reflected_at on all about-to-expire points so the reflection
+	// engine's fetchUnreflected (IsEmpty filter) won't return them after this
+	// moment. Best-effort — errors are ignored since we're deleting anyway.
+	reflectedNow := qdrant.NewValueMap(map[string]any{"reflected_at": now})
 	wait := true
+	_, _ = s.client.SetPayload(ctx, &qdrant.SetPayloadPoints{
+		CollectionName: s.collection,
+		Wait:           &wait,
+		Payload:        reflectedNow,
+		PointsSelector: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+				Points: &qdrant.PointsIdsList{
+					Ids: allIDs,
+				},
+			},
+		},
+	})
+
+	// Delete all expired points.
 	_, err := s.client.Delete(ctx, &qdrant.DeletePoints{
 		CollectionName: s.collection,
 		Wait:           &wait,

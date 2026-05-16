@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 
 	"github.com/FBISiri/engram/pkg/memory"
 	"google.golang.org/grpc/codes"
@@ -231,10 +232,22 @@ func (m *MultiStore) Update(ctx context.Context, id string, fields map[string]an
 }
 
 // isGRPCNotFound walks the error chain looking for a gRPC NotFound status.
+// Also matches Internal/Unknown errors whose message contains "not found" —
+// some Qdrant versions surface a non-NotFound code for SetPayload on a
+// non-existent point ID (observed in production as the orphan-ID bug).
 func isGRPCNotFound(err error) bool {
 	for err != nil {
-		if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
-			return true
+		if s, ok := status.FromError(err); ok {
+			if s.Code() == codes.NotFound {
+				return true
+			}
+			// Belt-and-suspenders: Qdrant may return Internal/Unknown with a
+			// "not found" message instead of the canonical NotFound code.
+			if s.Code() == codes.Internal || s.Code() == codes.Unknown {
+				if strings.Contains(strings.ToLower(s.Message()), "not found") {
+					return true
+				}
+			}
 		}
 		err = errors.Unwrap(err)
 	}

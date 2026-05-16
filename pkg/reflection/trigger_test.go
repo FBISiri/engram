@@ -66,8 +66,16 @@ func (s *triggerMockStore) Search(_ context.Context, _ []float32, _ memory.Searc
 	return nil, nil
 }
 func (s *triggerMockStore) Delete(_ context.Context, _ []string) (int, error)       { return 0, nil }
-func (s *triggerMockStore) SearchByIDs(_ context.Context, _ []string) ([]memory.Memory, error) {
-	return nil, nil
+func (s *triggerMockStore) SearchByIDs(_ context.Context, ids []string) ([]memory.Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found []memory.Memory
+	for _, id := range ids {
+		if m, ok := s.memories[id]; ok {
+			found = append(found, m)
+		}
+	}
+	return found, nil
 }
 func (s *triggerMockStore) EnsureCollection(_ context.Context) error { return nil }
 func (s *triggerMockStore) Stats(_ context.Context) (*memory.CollectionStats, error) {

@@ -115,6 +115,7 @@ type RunResult struct {
 	InsightsCreated   int      `json:"insights_created"`
 	DraftsWritten     int      `json:"drafts_written"`      // W17 v1.1: confidence<0.6 → Obsidian draft
 	SourcesMarked     int      `json:"sources_marked"`
+	SourcesOrphaned   int      `json:"sources_orphaned,omitempty"` // IDs deleted between fetch and mark (TOCTOU)
 	Duration          string   `json:"duration"`
 	TriggerImportance float64  `json:"trigger_importance,omitempty"`
 	DryRun            bool     `json:"dry_run"`
@@ -381,7 +382,23 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		// guard — prevents "reflected with no insights" data loss on transient errors).
 		if result.InsightsCreated > 0 || result.DraftsWritten > 0 {
 			reflectedTimestamp := float64(time.Now().Unix())
-			for _, id := range sourceIDs {
+
+			// TOCTOU guard: verify source IDs still exist before marking. TTL
+			// expiry or consolidation may have deleted some memories between
+			// fetchUnreflected and now. Orphaned IDs would cause Update to fail
+			// (Qdrant NotFound), blocking mark-reflected for the whole batch.
+			validIDs, orphanCount, lookupErr := filterExistingIDs(ctx, e.store, sourceIDs)
+			if lookupErr != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("source-id existence check failed (using all %d ids): %v", len(sourceIDs), lookupErr))
+				validIDs = sourceIDs
+			} else if orphanCount > 0 {
+				result.SourcesOrphaned = orphanCount
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("skipped %d orphan source IDs (already deleted by TTL or consolidation)", orphanCount))
+			}
+
+			for _, id := range validIDs {
 				if err := e.store.Update(ctx, id, map[string]any{
 					"reflected_at": reflectedTimestamp,
 				}); err != nil {

@@ -243,6 +243,39 @@ func readDailyCount(path string) (int, error) {
 	return count, nil
 }
 
+// filterExistingIDs returns only IDs from the provided list that still exist
+// in the store right now. IDs not found (deleted by TTL expiry, consolidation,
+// or manual cleanup since fetchUnreflected ran) are omitted and their count
+// reported as orphanCount.
+//
+// This guards the mark-reflected step against the TOCTOU race: memories
+// deleted between fetchUnreflected and store.Update can't be marked, so
+// skipping them is correct — the memories are already gone.
+//
+// On SearchByIDs failure, all IDs are returned unchanged (fail-open) so a
+// transient lookup error doesn't silently drop source marks.
+func filterExistingIDs(ctx context.Context, store memory.Store, ids []string) (existing []string, orphanCount int, err error) {
+	if len(ids) == 0 {
+		return nil, 0, nil
+	}
+	found, err := store.SearchByIDs(ctx, ids)
+	if err != nil {
+		return ids, 0, err // fail-open: caller uses all IDs
+	}
+	foundSet := make(map[string]bool, len(found))
+	for _, m := range found {
+		foundSet[m.ID] = true
+	}
+	for _, id := range ids {
+		if foundSet[id] {
+			existing = append(existing, id)
+		} else {
+			orphanCount++
+		}
+	}
+	return existing, orphanCount, nil
+}
+
 // writeDailyCount writes today's count to file.
 func writeDailyCount(path string, count int) error {
 	today := time.Now().In(cstLocation).Format("2006-01-02")

@@ -378,6 +378,12 @@ func (h *HTTPServer) handleDeleteMemory(w http.ResponseWriter, r *http.Request) 
 		"archived_at":      now,
 		"updated_at":       now,
 	}
+	// Guard: stamp reflected_at so this memory exits the unreflected pool.
+	// Without this, archived memories with reflected_at=0 would keep appearing
+	// in fetchUnreflected on every reflection run.
+	if mems[0].ReflectedAt == 0 {
+		updates["reflected_at"] = now
+	}
 	if err := h.srv.store.Update(r.Context(), id, updates); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update error: %v", err)})
 		return

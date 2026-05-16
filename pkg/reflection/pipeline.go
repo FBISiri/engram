@@ -120,7 +120,20 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 			for i, m := range batch {
 				sourceIDs[i] = m.ID
 			}
-			for _, id := range sourceIDs {
+
+			// TOCTOU guard: verify source IDs still exist before marking.
+			validIDs, orphanCount, lookupErr := filterExistingIDs(ctx, e.store, sourceIDs)
+			if lookupErr != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("source-id existence check failed (using all %d ids): %v", len(sourceIDs), lookupErr))
+				validIDs = sourceIDs
+			} else if orphanCount > 0 {
+				result.SourcesOrphaned += orphanCount
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("skipped %d orphan source IDs (already deleted by TTL or consolidation)", orphanCount))
+			}
+
+			for _, id := range validIDs {
 				if err := e.store.Update(ctx, id, map[string]any{
 					"reflected_at": reflectedTimestamp,
 				}); err != nil {
