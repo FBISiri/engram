@@ -204,6 +204,7 @@ func TestDeleteBySemanticSearch(t *testing.T) {
 	result, err := callTool(srv, "memory_delete", map[string]any{
 		"query":                "Shanghai Changning",
 		"similarity_threshold": float64(0.5),
+		"limit":                float64(1),
 	})
 	if err != nil {
 		t.Fatalf("delete failed: %v", err)

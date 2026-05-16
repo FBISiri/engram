@@ -644,7 +644,7 @@ func TestUpdateMemory(t *testing.T) {
 		"new_content":          "User lives in Shanghai",
 		"type":                 "identity",
 		"importance":           float64(8),
-		"similarity_threshold": float64(0.5),
+		"similarity_threshold": float64(0.92),
 	})
 	if err != nil {
 		t.Fatalf("update failed: %v", err)
@@ -704,11 +704,11 @@ func TestDeleteMemory(t *testing.T) {
 		t.Fatalf("expected 1 memory, got %d", store.count())
 	}
 
-	// Delete it
+	// Delete it (limit=1 bypasses batch safety guard; threshold=0.5 works for mock embedder)
 	result, err := callTool(srv, "memory_delete", map[string]any{
 		"query":                "espresso coffee morning drink preference",
-		"similarity_threshold": float64(0.3),
-		"limit":                float64(10),
+		"similarity_threshold": float64(0.5),
+		"limit":                float64(1),
 	})
 	if err != nil {
 		t.Fatalf("delete failed: %v", err)
@@ -741,9 +741,10 @@ func TestDeleteMemory(t *testing.T) {
 func TestDeleteNoMatches(t *testing.T) {
 	srv, _ := newTestServer()
 
-	// Delete from empty store
+	// Delete from empty store (limit=1 bypasses batch safety check)
 	result, err := callTool(srv, "memory_delete", map[string]any{
 		"query": "something that doesn't exist",
+		"limit": float64(1),
 	})
 	if err != nil {
 		t.Fatalf("delete failed: %v", err)
@@ -761,6 +762,87 @@ func TestDeleteNoMatches(t *testing.T) {
 	}
 	if resp.DeletedCount != 0 {
 		t.Errorf("expected 0 deletions, got %d", resp.DeletedCount)
+	}
+}
+
+func TestUpdateMemoryGuardrail(t *testing.T) {
+	srv, _ := newTestServer()
+
+	result, err := callTool(srv, "memory_update", map[string]any{
+		"old_content":          "some old content",
+		"new_content":          "some new content",
+		"similarity_threshold": float64(0.7),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for unsafe threshold, got success")
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "unsafe") {
+		t.Errorf("expected 'unsafe' in error message, got: %s", text)
+	}
+}
+
+func TestDeleteMemoryGuardrail(t *testing.T) {
+	srv, _ := newTestServer()
+
+	result, err := callTool(srv, "memory_delete", map[string]any{
+		"query":                "some query",
+		"similarity_threshold": float64(0.7),
+		"limit":                float64(5),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for unsafe threshold+limit combo, got success")
+	}
+	text := extractText(result)
+	if !strings.Contains(text, "unsafe") {
+		t.Errorf("expected 'unsafe' in error message, got: %s", text)
+	}
+}
+
+func TestDeleteMemoryDryRun(t *testing.T) {
+	srv, store := newTestServer()
+
+	_, err := callTool(srv, "memory_add", map[string]any{
+		"content": "User prefers tea",
+		"type":    "identity",
+	})
+	if err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_delete", map[string]any{
+		"query":                "tea preference",
+		"similarity_threshold": float64(0.5),
+		"limit":                float64(1),
+		"dry_run":              true,
+	})
+	if err != nil {
+		t.Fatalf("dry_run delete failed: %v", err)
+	}
+	text := extractText(result)
+	if result.IsError {
+		t.Fatalf("dry_run returned error: %s", text)
+	}
+
+	var resp struct {
+		Status           string `json:"status"`
+		WouldDeleteCount int    `json:"would_delete_count"`
+	}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to parse dry_run response: %v", err)
+	}
+	if resp.Status != "dry_run" {
+		t.Errorf("expected status 'dry_run', got %q", resp.Status)
+	}
+	// Memory should still exist
+	if store.count() != 1 {
+		t.Errorf("dry_run should not delete memories, got count=%d", store.count())
 	}
 }
 
