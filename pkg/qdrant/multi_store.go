@@ -8,11 +8,14 @@ package qdrant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
 
 	"github.com/FBISiri/engram/pkg/memory"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // MultiStore implements memory.Store by routing operations to the appropriate
@@ -211,14 +214,31 @@ func (m *MultiStore) Delete(ctx context.Context, ids []string) (int, error) {
 }
 
 // Update modifies payload fields of a memory across all physical collections.
-// Qdrant SetPayload is a no-op on non-existent IDs.
+// SetPayload on a non-existent ID is documented as a no-op, but the gRPC
+// layer may surface a NotFound status when the point is not in a given
+// collection. We ignore NotFound errors so the fan-out never fails because
+// the point only lives in one of the three physical collections.
 func (m *MultiStore) Update(ctx context.Context, id string, fields map[string]any) error {
 	for _, s := range m.stores {
 		if err := s.Update(ctx, id, fields); err != nil {
+			if isGRPCNotFound(err) {
+				continue
+			}
 			return err
 		}
 	}
 	return nil
+}
+
+// isGRPCNotFound walks the error chain looking for a gRPC NotFound status.
+func isGRPCNotFound(err error) bool {
+	for err != nil {
+		if s, ok := status.FromError(err); ok && s.Code() == codes.NotFound {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
 }
 
 // SearchByIDs retrieves specific memories by their IDs from all stores.
