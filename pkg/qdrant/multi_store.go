@@ -314,6 +314,20 @@ func (m *MultiStore) DeleteExpired(ctx context.Context) (int, error) {
 	return total, nil
 }
 
+// PerCollectionStats returns the point count for each physical collection.
+// Errors for individual stores are silently skipped (partial results returned).
+func (m *MultiStore) PerCollectionStats(ctx context.Context) map[string]uint64 {
+	result := make(map[string]uint64, len(m.stores))
+	for name, s := range m.stores {
+		stats, err := s.Stats(ctx)
+		if err != nil {
+			continue
+		}
+		result[name] = stats.PointCount
+	}
+	return result
+}
+
 // allStores returns all store instances in a consistent (name-sorted) order.
 func (m *MultiStore) allStores() []*Store {
 	names := make([]string, 0, len(m.stores))

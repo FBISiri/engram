@@ -18,6 +18,7 @@ import (
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/memory"
+	engrammetrics "github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
 )
 
@@ -32,21 +33,32 @@ type Server struct {
 	mmrLambda      float64
 	dedupThreshold float64
 	mcpServer      *mcpserver.MCPServer
-	embedCache     memory.EmbedCache // optional; set via SetEmbedCache
+	embedCache     memory.EmbedCache       // optional; set via SetEmbedCache
+	metrics        *engrammetrics.Metrics  // optional; set via SetMetrics
+}
+
+// SetMetrics registers prometheus metrics so handlers can record latency.
+func (s *Server) SetMetrics(m *engrammetrics.Metrics) {
+	s.metrics = m
+}
+
+// collectionStatter is satisfied by qdrant.MultiStore.
+type collectionStatter interface {
+	PerCollectionStats(ctx context.Context) map[string]uint64
+}
+
+// PerCollectionStats returns per-collection memory counts if the backing store
+// supports it; returns nil otherwise.
+func (s *Server) PerCollectionStats(ctx context.Context) map[string]uint64 {
+	if cs, ok := s.store.(collectionStatter); ok {
+		return cs.PerCollectionStats(ctx)
+	}
+	return nil
 }
 
 // SetEmbedCache registers a cache so its stats can be exposed via /metrics.
 func (s *Server) SetEmbedCache(c memory.EmbedCache) {
 	s.embedCache = c
-}
-
-// EmbedCacheStats returns cumulative hit/miss counts for the embed cache.
-// Returns 0, 0 if no cache has been configured.
-func (s *Server) EmbedCacheStats() (hits, misses int64) {
-	if s.embedCache == nil {
-		return 0, 0
-	}
-	return s.embedCache.Stats()
 }
 
 // NewServer creates a new Engram MCP server with all tools registered.
@@ -154,6 +166,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	ctx, span := tracer.Start(ctx, "engram.memory.search")
 	defer span.End()
 	start := time.Now()
+	if s.metrics != nil {
+		defer func() { s.metrics.SearchDuration.Observe(time.Since(start).Seconds()) }()
+	}
 
 	// Parse parameters
 	query, err := request.RequireString("query")
@@ -230,7 +245,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	)
 
 	// Embed query
+	embedStart := time.Now()
 	vec, err := s.embedder.Embed(ctx, query)
+	if s.metrics != nil {
+		s.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	}
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "embedding error")
@@ -411,7 +430,11 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	mem.Collection = CollectionFromContext(ctx)
 
 	// Embed content
+	embedStart := time.Now()
 	vec, err := s.embedder.Embed(ctx, content)
+	if s.metrics != nil {
+		s.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	}
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "embedding error")
@@ -563,7 +586,11 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	// Step 1: Embed both contents upfront in a single batch call
+	embedStart := time.Now()
 	vecs, err := s.embedder.EmbedBatch(ctx, []string{oldContent, newContent})
+	if s.metrics != nil {
+		s.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	}
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("embedding error: %v", err)), nil
 	}

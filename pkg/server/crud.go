@@ -86,7 +86,11 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		mem.Metadata = body.Metadata
 	}
 
+	embedStart := time.Now()
 	vec, err := h.srv.embedder.Embed(r.Context(), body.Content)
+	if h.srv.metrics != nil {
+		h.srv.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("embed error: %v", err)})
 		return
@@ -333,7 +337,11 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 		mem.LifecycleStatus = memory.LifecycleActive
 	}
 
+	embedStart := time.Now()
 	vec, err := h.srv.embedder.Embed(r.Context(), body.Content)
+	if h.srv.metrics != nil {
+		h.srv.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("embed error: %v", err)})
 		return
@@ -450,6 +458,10 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use POST"})
 		return
 	}
+	start := time.Now()
+	if h.srv.metrics != nil {
+		defer func() { h.srv.metrics.SearchDuration.Observe(time.Since(start).Seconds()) }()
+	}
 
 	var req struct {
 		Query           string   `json:"query"`
@@ -507,7 +519,11 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 		filters = append(filters, memory.Filter{Field: "tags", Op: memory.OpIn, Value: req.Tags})
 	}
 
+	embedStart := time.Now()
 	vec, err := h.srv.embedder.Embed(r.Context(), req.Query)
+	if h.srv.metrics != nil {
+		h.srv.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("embed error: %v", err)})
 		return

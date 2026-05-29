@@ -44,16 +44,19 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/collection"
+	"github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // HTTPServer wraps the Engram Server with an HTTP interface.
 type HTTPServer struct {
-	srv     *Server
-	port    int
-	apiKey  string
-	mux     *http.ServeMux
-	httpSrv *http.Server
+	srv       *Server
+	port      int
+	apiKey    string
+	mux       *http.ServeMux
+	httpSrv   *http.Server
+	startTime time.Time
 }
 
 // NewHTTPServer creates an HTTPServer bound to the given port.
@@ -67,11 +70,18 @@ func NewHTTPServer(s *Server, port int, apiKey string) *HTTPServer {
 	collection.DefaultRegistry.Init()
 
 	h := &HTTPServer{
-		srv:    s,
-		port:   port,
-		apiKey: apiKey,
-		mux:    http.NewServeMux(),
+		srv:       s,
+		port:      port,
+		apiKey:    apiKey,
+		mux:       http.NewServeMux(),
+		startTime: time.Now(),
 	}
+
+	// Initialise prometheus metrics and register them on the server so handlers
+	// can record observations.
+	m := metrics.New(s.embedCache, s.PerCollectionStats)
+	s.SetMetrics(m)
+
 	h.registerRoutes()
 	return h
 }
@@ -180,22 +190,20 @@ func (h *HTTPServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // healthResponse is the JSON body returned by GET /health.
 type healthResponse struct {
-	Status     string `json:"status"`               // "ok" or "degraded"
-	Qdrant     string `json:"qdrant"`                // collection status from Qdrant
-	PointCount uint64 `json:"point_count"`           // total points in collection
-	Error      string `json:"error,omitempty"`       // non-empty when degraded
+	Status         string                   `json:"status"`
+	Qdrant         string                   `json:"qdrant"`
+	PointCount     uint64                   `json:"point_count"`
+	Error          string                   `json:"error,omitempty"`
+	UptimeSeconds  float64                  `json:"uptime_seconds,omitempty"`
+	MemoryCount    map[string]uint64        `json:"memory_count,omitempty"`
+	LastReflection *reflection.CheckResult  `json:"last_reflection,omitempty"`
 }
 
-// handleMetrics exposes embed cache counters in Prometheus text format.
+// handleMetrics serves all registered Prometheus metrics via the standard
+// exposition format. Scrape this endpoint to collect search/embed latency
+// histograms, embed cache counters, and per-collection memory counts.
 func (h *HTTPServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	hits, misses := h.srv.EmbedCacheStats()
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, "# HELP engram_embed_cache_hit_total Total embed cache hits.\n")
-	fmt.Fprintf(w, "# TYPE engram_embed_cache_hit_total counter\n")
-	fmt.Fprintf(w, "engram_embed_cache_hit_total %d\n", hits)
-	fmt.Fprintf(w, "# HELP engram_embed_cache_miss_total Total embed cache misses.\n")
-	fmt.Fprintf(w, "# TYPE engram_embed_cache_miss_total counter\n")
-	fmt.Fprintf(w, "engram_embed_cache_miss_total %d\n", misses)
+	promhttp.HandlerFor(h.srv.metrics.Registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
 }
 
 // handleHealth performs a deep health check by pinging the Qdrant collection
@@ -214,11 +222,30 @@ func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, healthResponse{
-		Status:     "ok",
-		Qdrant:     stats.Status,
-		PointCount: stats.PointCount,
-	})
+	resp := healthResponse{
+		Status:        "ok",
+		Qdrant:        stats.Status,
+		PointCount:    stats.PointCount,
+		UptimeSeconds: time.Since(h.startTime).Seconds(),
+	}
+
+	if perCol := h.srv.PerCollectionStats(ctx); perCol != nil {
+		counts := make(map[string]uint64, len(perCol)+1)
+		var total uint64
+		for col, n := range perCol {
+			counts[col] = n
+			total += n
+		}
+		counts["total"] = total
+		resp.MemoryCount = counts
+	}
+
+	eng := reflection.NewEngine(h.srv.store, h.srv.embedder, reflection.DefaultConfig())
+	if checkResult, err := eng.Check(ctx); err == nil {
+		resp.LastReflection = checkResult
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // reflectRequest is the optional JSON body for POST /reflect.
