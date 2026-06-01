@@ -46,6 +46,7 @@ import (
 	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -190,13 +191,19 @@ func (h *HTTPServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // healthResponse is the JSON body returned by GET /health.
 type healthResponse struct {
-	Status         string                   `json:"status"`
-	Qdrant         string                   `json:"qdrant"`
-	PointCount     uint64                   `json:"point_count"`
-	Error          string                   `json:"error,omitempty"`
-	UptimeSeconds  float64                  `json:"uptime_seconds,omitempty"`
-	MemoryCount    map[string]uint64        `json:"memory_count,omitempty"`
-	LastReflection *reflection.CheckResult  `json:"last_reflection,omitempty"`
+	Status           string                  `json:"status"`
+	Qdrant           string                  `json:"qdrant"`
+	PointCount       uint64                  `json:"point_count"`
+	Error            string                  `json:"error,omitempty"`
+	UptimeSeconds    float64                 `json:"uptime_seconds,omitempty"`
+	MemoryCount      map[string]uint64       `json:"memory_count,omitempty"`
+	LastReflection   *reflection.CheckResult `json:"last_reflection,omitempty"`
+	EmbeddingLatency *embeddingLatency       `json:"embedding_latency,omitempty"`
+}
+
+type embeddingLatency struct {
+	P50Seconds float64 `json:"p50_seconds"`
+	P99Seconds float64 `json:"p99_seconds"`
 }
 
 // handleMetrics serves all registered Prometheus metrics via the standard
@@ -245,7 +252,53 @@ func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp.LastReflection = checkResult
 	}
 
+	if h.srv.metrics != nil {
+		if mfs, err := h.srv.metrics.Registry.Gather(); err == nil {
+			p50, ok50 := histogramPercentile(mfs, "engram_embed_duration_seconds", 0.50)
+			p99, ok99 := histogramPercentile(mfs, "engram_embed_duration_seconds", 0.99)
+			if ok50 || ok99 {
+				resp.EmbeddingLatency = &embeddingLatency{P50Seconds: p50, P99Seconds: p99}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// histogramPercentile estimates the given quantile (0–1) from the named
+// Prometheus histogram in mfs using linear interpolation across buckets.
+// Returns (value, true) when at least one observation exists, (0, false) otherwise.
+func histogramPercentile(mfs []*dto.MetricFamily, name string, q float64) (float64, bool) {
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		if len(mf.Metric) == 0 {
+			return 0, false
+		}
+		h := mf.Metric[0].GetHistogram()
+		if h == nil || h.GetSampleCount() == 0 {
+			return 0, false
+		}
+		total := float64(h.GetSampleCount())
+		target := q * total
+		var prevBound, prevCount float64
+		for _, b := range h.GetBucket() {
+			count := float64(b.GetCumulativeCount())
+			bound := b.GetUpperBound()
+			if count >= target {
+				if count == prevCount {
+					return bound, true
+				}
+				return prevBound + (target-prevCount)/(count-prevCount)*(bound-prevBound), true
+			}
+			prevBound = bound
+			prevCount = count
+		}
+		// All observations landed in the +Inf bucket; fall back to mean.
+		return h.GetSampleSum() / total, true
+	}
+	return 0, false
 }
 
 // reflectRequest is the optional JSON body for POST /reflect.
