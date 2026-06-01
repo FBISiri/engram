@@ -47,6 +47,13 @@ type collectionStatter interface {
 	PerCollectionStats(ctx context.Context) map[string]uint64
 }
 
+// targetedUpdater is satisfied by qdrant.MultiStore.
+// It allows updating only the collection that owns a point, avoiding fan-out
+// NotFound WARNs when SetPayload targets all collections.
+type targetedUpdater interface {
+	UpdateInCollection(ctx context.Context, id string, fields map[string]any, sourceCollection string) error
+}
+
 // PerCollectionStats returns per-collection memory counts if the backing store
 // supports it; returns nil otherwise.
 func (s *Server) PerCollectionStats(ctx context.Context) map[string]uint64 {
@@ -322,11 +329,17 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		}
 		go func() {
 			now := float64(time.Now().Unix())
+			tu, hasTargeted := s.store.(targetedUpdater)
 			for i, id := range toUpdate {
-				_ = s.store.Update(context.Background(), id, map[string]any{
+				fields := map[string]any{
 					"access_count":     results[i].AccessCount + 1,
 					"last_accessed_at": now,
-				})
+				}
+				if hasTargeted {
+					_ = tu.UpdateInCollection(context.Background(), id, fields, results[i].Collection)
+				} else {
+					_ = s.store.Update(context.Background(), id, fields)
+				}
 			}
 		}()
 	}

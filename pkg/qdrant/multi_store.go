@@ -214,6 +214,17 @@ func (m *MultiStore) Delete(ctx context.Context, ids []string) (int, error) {
 	return len(ids), nil
 }
 
+// UpdateInCollection updates payload fields only in the specified physical
+// collection, avoiding the fan-out NotFound WARNs that occur when SetPayload
+// targets all collections but the point exists in only one.
+// Falls back to the full fan-out Update if sourceCollection is unknown.
+func (m *MultiStore) UpdateInCollection(ctx context.Context, id string, fields map[string]any, sourceCollection string) error {
+	if s, ok := m.stores[sourceCollection]; ok {
+		return s.Update(ctx, id, fields)
+	}
+	return m.Update(ctx, id, fields)
+}
+
 // Update modifies payload fields of a memory across all physical collections.
 // SetPayload on a non-existent ID is documented as a no-op, but the gRPC
 // layer may surface a NotFound status when the point is not in a given
