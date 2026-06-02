@@ -17,7 +17,6 @@
 #     args: ["serve"]
 #     env:
 #       ENGRAM_QDRANT_URL: "localhost:6334"
-#       ENGRAM_COLLECTION_NAME: "engram"
 #       ENGRAM_OPENAI_API_KEY: "<your-openai-api-key>"
 #       ENGRAM_OPENAI_BASE_URL: "https://api.openai.com/v1"
 #       ENGRAM_EMBEDDING_MODEL: "text-embedding-3-small"

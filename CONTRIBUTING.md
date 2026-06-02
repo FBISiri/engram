@@ -58,7 +58,6 @@ Engram is configured entirely via environment variables. For local development, 
 export ENGRAM_QDRANT_URL=localhost:6334
 export ENGRAM_OPENAI_API_KEY=sk-...
 # Optional overrides:
-export ENGRAM_COLLECTION_NAME=engram_dev   # use a separate collection for dev
 export ENGRAM_DEDUP_THRESHOLD=0.92
 export ENGRAM_TRANSPORT=stdio
 ```
@@ -125,7 +124,7 @@ ENGRAM_OPENAI_API_KEY=sk-... make integration-test
 # or: ENGRAM_OPENAI_API_KEY=sk-... ./integration_test.sh
 ```
 
-**Note**: Integration tests write real data to Qdrant. Use a dedicated collection (`ENGRAM_COLLECTION_NAME=engram_test`) to avoid polluting production data.
+**Note**: Integration tests write real data to Qdrant. Collection names are determined automatically by the `X-Caller-Type` header (maps to `engram_user`, `engram_agent_self`, or `engram_reflection`). No manual collection configuration is needed.
 
 ### Linting
 

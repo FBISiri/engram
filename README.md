@@ -213,7 +213,6 @@ All via environment variables:
 |----------|---------|-------------|
 | `ENGRAM_QDRANT_URL` | `localhost:6334` | Qdrant gRPC address |
 | `ENGRAM_QDRANT_API_KEY` | — | Qdrant API key (if secured) |
-| `ENGRAM_COLLECTION_NAME` | `engram` | Qdrant collection name |
 | `ENGRAM_EMBEDDER_PROVIDER` | `openai` | Embedding provider: `openai` or `voyage` |
 | `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model name |
 | `ENGRAM_EMBEDDING_DIMENSION` | `1536` | Embedding vector size |
