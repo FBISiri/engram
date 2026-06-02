@@ -9,7 +9,10 @@ releases begin.
 
 _No unreleased changes._
 
-## [0.2.0] — 2026-04-19
+## [0.2.0] — 2026-04-19 (Docker images: 2026-06-02)
+
+> Docker Hub: `imsiri/engram:0.2.0`, `imsiri/engram:latest`, `imsiri/engram:0.2`
+> Published: 2026-06-02 01:43 UTC (workflow run 26792927494)
 
 First tagged release after `v0.1.0`. Consolidates ~6 months of work across the
 Reflection Engine, Dream Engine, HTTP transport, TTL/expiry schema, and the
@@ -94,6 +97,41 @@ v1.1 Reflection upgrade (confidence, evidence grounding, event-driven trigger).
 ### Infrastructure
 - GitHub Actions workflow publishes Docker images to `imsiri/engram` on Docker
   Hub (`8c90c5a`, `19f51da`).
+- **Docker Publish fix** — builder image upgraded from `golang:1.24-alpine` to
+  `golang:1.25-alpine` to match `go.mod` requirement (`053a5ce`).
+
+### Post-release additions (included in v0.2.0 Docker image)
+
+These features were committed after the initial v0.2.0 tag but are included
+in the final published Docker images.
+
+#### Added
+- **Reflection confidence counters + Gate3 threshold=40** — `runs_today`
+  metric added to `RunResult` and OTel spans (`e485ccf`, `ff6197a`).
+- **Embed cache** — P5-A1 LRU embedding cache with `/metrics` endpoint
+  (`1a67541`).
+- **Physical collection isolation (Phase 4)** — multi-collection architecture
+  with `CollectionFromContext` routing, scoped dedup, migration tooling
+  (`migrate-collections`, `drop-legacy`, `migrate-extra-collections`),
+  and fan-out resilience (`274d9c3`, `461805a`, `75c0950`, `eff0989`,
+  `175feab`, `4252a29`, `364a27a`, `324f464`).
+- **Mass-delete guardrail** — `dry_run` support for `memory_update` /
+  `memory_delete` to preview changes before applying (`f53b2f3`).
+- **Enhanced /health endpoint** — `uptime_seconds`, `memory_count`,
+  `last_reflection`, `embedding_latency` p50/p99, Prometheus metrics wiring
+  (`13455b4`, `c046cd6`).
+
+#### Fixed
+- Multi-store fan-out: `NotFound` errors in `Update`, `SearchByIDs`, and
+  `SetPayload` are now logged at WARN and do not fail the operation
+  (`b7b6374`, `9afb8b1`, `b49bb01`).
+- Reflection orphan-ID issue causing `sources_marked=0` resolved
+  (`2e0af12`).
+- Deprecated `GetData()` replaced with `GetDense().GetData()` for Qdrant
+  vector extraction (`6632dea`).
+
+#### Performance
+- Batch embed `old+new` content in `handleUpdate` (`a67c09c`).
 
 ## [0.1.0] — Initial tagged release
 
