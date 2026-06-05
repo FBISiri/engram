@@ -148,23 +148,80 @@ When `valid_until` is not explicitly set on `memory_add` / `memory_update`, Engr
 | `reflection_check` | Check Reflection Engine trigger conditions without running |
 | `reflection_run` | Run one Reflection Engine cycle (supports `dry_run` mode) |
 
+### Transport Modes: stdio vs HTTP
+
+Engram supports two transport modes, configurable via `ENGRAM_TRANSPORT`:
+
+| Mode | Value | Use Case | How It Works |
+|------|-------|----------|-------------|
+| **MCP stdio** | `stdio` (default) | MCP clients (Claude Desktop, Army of the Agent) | Reads JSON-RPC from stdin, writes to stdout. The MCP client manages the process lifecycle. |
+| **HTTP REST** | `http` | Direct API integration, dashboards, scripts | Starts an HTTP server on `ENGRAM_HTTP_PORT` (default 8080). RESTful JSON API with Bearer auth. |
+| **Both** | `both` | Run MCP + REST simultaneously | Useful when you need MCP for an agent AND REST for monitoring/admin. |
+
+**When to use stdio**: You're integrating with an MCP-compatible client. The client spawns Engram as a subprocess and communicates via stdin/stdout. Zero network config needed.
+
+**When to use HTTP**: You need programmatic access from scripts, dashboards, or non-MCP clients. Also required for the `/health` endpoint used by container orchestrators (Kubernetes, Docker health checks).
+
+```bash
+# stdio mode (default) — for MCP clients
+./engram serve
+
+# HTTP mode — for REST API access
+ENGRAM_TRANSPORT=http ENGRAM_API_KEY=your-secret ./engram serve
+
+# Both — MCP + REST simultaneously
+ENGRAM_TRANSPORT=both ENGRAM_API_KEY=your-secret ./engram serve
+```
+
 ### REST API (HTTP Transport)
 
 Enable with `ENGRAM_TRANSPORT=http` or `ENGRAM_TRANSPORT=both` (MCP + HTTP).
 
-```
-POST   /reflect         Run one Reflection Engine cycle (optional: {"dry_run": true})
-GET    /reflect/check   Check reflection trigger conditions
-GET    /health          Deep liveness — pings Qdrant in addition to returning {"status": "ok"}. Auth is bypassed so load balancers / Kubernetes probes work without a token.
-```
+Authentication: set `ENGRAM_API_KEY` to require `Authorization: Bearer <key>` on all HTTP requests. The `/health` and `/metrics` endpoints bypass auth for monitoring.
 
-Authentication: set `ENGRAM_API_KEY` to require `Authorization: Bearer <key>` on all HTTP requests.
+**Core Memory Operations**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/memories` | Store a new memory (auto-deduplicates) |
+| `POST` | `/memories/search` | Semantic search with filters |
+| `GET` | `/memories/{id}` | Get a specific memory by ID |
+| `PATCH` | `/memories/{id}` | Partial update of a memory |
+| `PUT` | `/memories/{id}` | Full replace of a memory |
+| `DELETE` | `/memories/{id}` | Delete a memory |
+| `POST` | `/memories/{id}/reset` | Reset memory access stats |
+| `POST` | `/memories/cross-search` | Search across multiple collections |
+
+**Collection Management**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/collections` | Create a new collection |
+| `GET` | `/collections` | List all collections |
+| `POST` | `/collections/{name}/memories` | Add memory to a specific collection |
+| `POST` | `/collections/{name}/memories/search` | Search within a specific collection |
+
+**Reflection & Maintenance**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/reflect` | Run one Reflection Engine cycle (optional: `{"dry_run": true}`) |
+| `GET` | `/reflect/check` | Check reflection trigger conditions |
+| `GET` | `/memories/expiry-candidates` | List memories approaching expiration |
+| `DELETE` | `/memories/expired` | Purge expired memories |
+
+**Observability**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Deep liveness — pings Qdrant (no auth required) |
+| `GET` | `/metrics` | Prometheus metrics (no auth required) |
 
 ## Reflection Engine
 
 The Reflection Engine periodically synthesizes high-level insights from unreflected memories, inspired by the *Generative Agents* paper. It runs lighter and more frequently than the Dream Engine.
 
-**Trigger**: accumulated importance of unreflected memories ≥ threshold (default: 50). Min interval: 2 hours. Max per day: 3 runs.
+**Trigger**: accumulated importance of unreflected memories ≥ threshold (default: 40). Min interval: 2 hours. Max per day: 3 runs.
 
 **Output**: `insight`-type memories with `source="system"`, tagged with reflection source IDs. Source memories are marked as `reflected=true`.
 
@@ -239,15 +296,20 @@ See [full configuration reference](docs/configuration.md) for all options.
 ```
 engram/
 ├── cmd/engram/          CLI entry point
+├── internal/
+│   └── otel/            OpenTelemetry tracing (file/stdout exporters)
 ├── pkg/
-│   ├── memory/          Core types, scoring, dedup, MMR, expiry
-│   ├── embedding/       Embedder interface + OpenAI + Voyage AI
-│   ├── qdrant/          Qdrant Store implementation
-│   ├── server/          MCP server (stdio) + HTTP server (REST)
-│   ├── reflection/      Reflection Engine — lightweight periodic synthesis
+│   ├── collection/      Multi-collection registry (user, agent_self, reflection)
+│   ├── config/          Configuration from env vars
 │   ├── dream/           Dream Engine — deep 4-phase memory consolidation
-│   ├── sync/            Write-through + Ring Buffer (BoltDB commit log)
-│   └── config/          Configuration from env vars
+│   ├── embedding/       Embedder interface + OpenAI + Voyage AI + LRU cache
+│   ├── memory/          Core types, scoring, dedup, MMR, expiry, TTL
+│   ├── metrics/         Prometheus metrics
+│   ├── qdrant/          Qdrant Store + MultiStore implementation
+│   ├── reflection/      Reflection Engine — V1 (flat) + V2 (focal point)
+│   ├── server/          MCP server (stdio) + HTTP server (REST + CRUD)
+│   └── sync/            Write-through + Ring Buffer (BoltDB commit log)
+├── docs/                API reference + configuration guide
 ├── Dockerfile           Multi-stage build
 ├── docker-compose.yml   Engram + Qdrant
 └── integration_test.sh  End-to-end MCP test
