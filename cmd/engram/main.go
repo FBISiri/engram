@@ -19,6 +19,7 @@ import (
 	"github.com/FBISiri/engram/pkg/qdrant"
 	"github.com/FBISiri/engram/pkg/reflection"
 	"github.com/FBISiri/engram/pkg/server"
+	"github.com/FBISiri/engram/pkg/trajectory"
 )
 
 var (
@@ -164,7 +165,17 @@ func serve(cfg *config.Config) error {
 	srv := server.NewServer(store, embedder, cfg)
 	srv.SetEmbedCache(embedCache)
 
-	// 4. Start background expiry cleanup goroutine.
+	// 4a. Start trajectory logger if ENGRAM_TRAJECTORY_DIR is set.
+	trajectoryDir := os.Getenv("ENGRAM_TRAJECTORY_DIR")
+	if trajectoryDir == "" {
+		trajectoryDir = "/data/engram/trajectories"
+	}
+	tl := trajectory.New(trajectoryDir)
+	defer tl.Close()
+	srv.SetTrajectoryLogger(tl)
+	fmt.Fprintf(os.Stderr, "  Trajectory: %s\n", trajectoryDir)
+
+	// 4b. Start background expiry cleanup goroutine.
 	// Uses context.Background() since ServeStdio blocks until process exit;
 	// the goroutine will be cleaned up when the process terminates.
 	serverCtx, serverCancel := context.WithCancel(context.Background())

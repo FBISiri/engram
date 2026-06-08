@@ -235,15 +235,73 @@ test(memory): add scoring edge cases for zero importance
 
 Use [GitHub Issues](https://github.com/FBISiri/engram/issues) to report bugs or request features.
 
-For **bugs**, include:
-- Engram version / commit hash
-- Go version (`go version`)
-- Qdrant version
-- Steps to reproduce
-- Expected vs actual behavior
-- Relevant logs or error messages
+### Bug Report Template
 
-For **feature requests**, describe the use case and why existing functionality doesn't cover it.
+When filing a bug, please include:
+
+```markdown
+**Environment**
+- Engram version / commit: 
+- Go version (`go version`): 
+- Qdrant version: 
+- OS / arch: 
+- Transport mode (stdio / http / both): 
+
+**Steps to Reproduce**
+1. 
+2. 
+3. 
+
+**Expected Behavior**
+
+**Actual Behavior**
+
+**Logs / Error Output**
+(paste relevant logs, redact any API keys)
+
+**Additional Context**
+(screenshots, config snippets, etc.)
+```
+
+### Feature Request Template
+
+```markdown
+**Use Case**
+Describe the problem you're trying to solve.
+
+**Proposed Solution**
+Describe what you'd like to happen.
+
+**Alternatives Considered**
+Any other approaches you've thought about.
+
+**Additional Context**
+Links, references, or examples from other systems.
+```
+
+### PR Description Template
+
+When opening a PR, structure your description as:
+
+```markdown
+## What
+Brief description of the change.
+
+## Why
+The motivation — link to issue if applicable (`Closes #N`).
+
+## How
+Key implementation details, trade-offs, or design decisions.
+
+## Testing
+- [ ] Unit tests added/updated
+- [ ] Integration test passes (`make integration-test`)
+- [ ] Lint passes (`make lint`)
+- [ ] Documentation updated (if API/config changed)
+
+## Breaking Changes
+List any breaking changes (API, config, behavior) or write "None".
+```
 
 ---
 

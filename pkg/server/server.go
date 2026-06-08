@@ -20,6 +20,7 @@ import (
 	"github.com/FBISiri/engram/pkg/memory"
 	engrammetrics "github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
+	"github.com/FBISiri/engram/pkg/trajectory"
 )
 
 var tracer = otel.Tracer("engram.memory")
@@ -35,6 +36,8 @@ type Server struct {
 	mcpServer      *mcpserver.MCPServer
 	embedCache     memory.EmbedCache       // optional; set via SetEmbedCache
 	metrics        *engrammetrics.Metrics  // optional; set via SetMetrics
+	traj           *trajectory.Logger      // optional; set via SetTrajectoryLogger
+	overrides      runtimeOverrides        // hot-reloadable config
 }
 
 // SetMetrics registers prometheus metrics so handlers can record latency.
@@ -66,6 +69,11 @@ func (s *Server) PerCollectionStats(ctx context.Context) map[string]uint64 {
 // SetEmbedCache registers a cache so its stats can be exposed via /metrics.
 func (s *Server) SetEmbedCache(c memory.EmbedCache) {
 	s.embedCache = c
+}
+
+// SetTrajectoryLogger registers a trajectory logger so search/update operations are logged.
+func (s *Server) SetTrajectoryLogger(l *trajectory.Logger) {
+	s.traj = l
 }
 
 // NewServer creates a new Engram MCP server with all tools registered.
@@ -162,6 +170,23 @@ func (s *Server) registerTools() {
 		mcp.WithBoolean("dry_run", mcp.Description("If true, simulate the run without writing any changes. Default: false.")),
 	)
 	s.mcpServer.AddTool(reflectionRunTool, s.handleReflectionRun)
+
+	// Tool 7: memory_apply_config — hot-reload retrieval/update config (for ALMA eval loops).
+	applyConfigTool := mcp.NewTool("memory_apply_config",
+		mcp.WithDescription("Hot-reload memory retrieval/update config without restarting the server. Used by ALMA evaluation loops to iterate on MemoryConfig. Config changes take effect immediately."),
+		mcp.WithString("config", mcp.Required(), mcp.Description(`JSON string with MemoryConfig. Example: {"retrieve_config":{"recency_weight":0.3},"update_config":{"dedupe_threshold":0.90}}`)),
+	)
+	s.mcpServer.AddTool(applyConfigTool, s.handleApplyConfig)
+
+	// Tool 8: memory_reset — snapshot current state or restore from snapshot (for ALMA eval loops).
+	resetTool := mcp.NewTool("memory_reset",
+		mcp.WithDescription(`Snapshot or restore memory state for ALMA evaluation loops.
+action=snapshot  Create a JSONL snapshot of all current memories. Returns snapshot_id.
+action=restore   Delete all current memories and restore from snapshot_id (re-embeds content). Use in evaluation environments only.`),
+		mcp.WithString("action", mcp.Required(), mcp.Description("snapshot or restore")),
+		mcp.WithString("snapshot_id", mcp.Description("Required for action=restore. The snapshot_id returned by a previous snapshot call.")),
+	)
+	s.mcpServer.AddTool(resetTool, s.handleReset)
 }
 
 // =============================================================================
@@ -288,8 +313,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	// Apply 3-component scoring (the store returns raw cosine similarity)
+	weights := s.overrides.getWeights(s.weights)
 	for i := range results {
-		results[i].Score = memory.Score(&results[i].Memory, results[i].Score, s.weights, s.decay)
+		results[i].Score = memory.Score(&results[i].Memory, results[i].Score, weights, s.decay)
 	}
 
 	// Sort by final score descending
@@ -387,11 +413,29 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
 	}
 
+	// Trajectory logging (async, non-blocking)
+	if s.traj != nil {
+		items := make([]trajectory.ResultItem, len(output))
+		for i, r := range output {
+			items[i] = trajectory.ResultItem{ID: r.ID, Content: r.Content, Score: r.Score}
+		}
+		s.traj.Log(trajectory.Record{
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Operation: "retrieve",
+			Query:     query,
+			Results:   items,
+			Strategy:  "semantic_search",
+			LatencyMs: time.Since(start).Milliseconds(),
+			Caller:    CallerTypeFromContext(ctx),
+		})
+	}
+
 	return mcp.NewToolResultText(string(data)), nil
 }
 
 // handleAdd implements the memory.add tool.
 func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	addStart := time.Now()
 	ctx, span := tracer.Start(ctx, "engram.memory.add")
 	defer span.End()
 
@@ -458,6 +502,18 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	dupData, dupFound := s.checkDedup(ctx, vec, content)
 	if dupFound {
 		span.SetAttributes(attribute.Bool("dedup.hit", true))
+		if s.traj != nil {
+			s.traj.Log(trajectory.Record{
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Operation: "update",
+				Content:   content,
+				Type:      string(memType),
+				Tags:      tags,
+				DedupHit:  true,
+				LatencyMs: time.Since(addStart).Milliseconds(),
+				Caller:    CallerTypeFromContext(ctx),
+			})
+		}
 		return mcp.NewToolResultText(string(dupData)), nil
 	}
 
@@ -482,6 +538,20 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	data, err := json.Marshal(result)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
+
+	// Trajectory logging (async, non-blocking)
+	if s.traj != nil {
+		s.traj.Log(trajectory.Record{
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Operation: "update",
+			Content:   content,
+			Type:      string(memType),
+			Tags:      tags,
+			DedupHit:  false,
+			LatencyMs: time.Since(addStart).Milliseconds(),
+			Caller:    CallerTypeFromContext(ctx),
+		})
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
@@ -519,7 +589,7 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) 
 		topScore = dupeResults[0].Score
 	}
 
-	dup := memory.IsDuplicate(dupeResults, s.dedupThreshold)
+	dup := memory.IsDuplicate(dupeResults, s.overrides.getDedupThreshold(s.dedupThreshold))
 
 	decision := "add"
 	if dup != nil {
