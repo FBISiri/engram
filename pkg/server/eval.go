@@ -126,7 +126,7 @@ func snapshotDir() string {
 	if d := os.Getenv("ENGRAM_SNAPSHOT_DIR"); d != "" {
 		return d
 	}
-	return "/data/engram/snapshots"
+	return "/data/armyoftheagent/engram/snapshots"
 }
 
 func (s *Server) handleReset(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

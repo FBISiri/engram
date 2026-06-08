@@ -168,7 +168,7 @@ func serve(cfg *config.Config) error {
 	// 4a. Start trajectory logger if ENGRAM_TRAJECTORY_DIR is set.
 	trajectoryDir := os.Getenv("ENGRAM_TRAJECTORY_DIR")
 	if trajectoryDir == "" {
-		trajectoryDir = "/data/engram/trajectories"
+		trajectoryDir = "/data/armyoftheagent/engram/trajectories"
 	}
 	tl := trajectory.New(trajectoryDir)
 	defer tl.Close()
