@@ -4,8 +4,17 @@ Thank you for your interest in contributing to Engram! This document covers how 
 
 ---
 
+## Issue-First Policy
+
+**Discuss before you implement.** For any non-trivial change — new features, API additions, significant refactors — please open a GitHub issue first to describe what you want to do and why. This avoids wasted effort if the direction doesn't fit the project, and gives maintainers a chance to point out related work or suggest a better approach.
+
+Small, clearly-scoped bug fixes don't need a prior issue — a PR with a good description is fine. When in doubt, open an issue.
+
+---
+
 ## Table of Contents
 
+- [Issue-First Policy](#issue-first-policy)
 - [Development Setup](#development-setup)
 - [Project Structure](#project-structure)
 - [Running Tests](#running-tests)

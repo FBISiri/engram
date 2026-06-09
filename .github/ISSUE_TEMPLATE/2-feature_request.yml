@@ -1,0 +1,62 @@
+name: Feature Request
+description: Propose a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, please check existing issues and discussions to avoid duplicates. Read the [Issue-First Policy](../CONTRIBUTING.md#issue-first-policy) — for substantial changes, this issue is the place to align before writing code.
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case
+      description: Describe the problem you're trying to solve. What is the motivation?
+      placeholder: "e.g. When running multiple agents concurrently, I need to isolate memories per-agent without spinning up separate Engram instances."
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Proposed Solution
+      description: Describe what you'd like Engram to do. Be as specific as possible about the API, config, or behavior change.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Affected Module
+      description: Which part of the codebase would this primarily touch?
+      options:
+        - memory (core types / scoring / dedup)
+        - embedding (OpenAI / Voyage / embedder interface)
+        - qdrant (vector store)
+        - server (MCP tools / HTTP endpoints)
+        - reflection (Reflection Engine)
+        - dream (Dream Engine)
+        - config (environment variables)
+        - infrastructure (Docker / CI / Makefile)
+        - docs
+        - other / unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How will we know this feature is done? List observable outcomes or behaviors.
+      placeholder: |
+        - [ ] `memory_search` accepts an optional `namespace` parameter
+        - [ ] Memories in different namespaces do not appear in each other's search results
+        - [ ] Existing behavior is unchanged when `namespace` is omitted
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any other approaches you thought about, and why you prefer this one.
