@@ -1,0 +1,444 @@
+{
+  "version": "core_v1",
+  "fixture_set": "core_v1",
+  "tasks": [
+    {
+      "id": "RP-01",
+      "category": "retrieve_precision",
+      "description": "Exact fact recall: Frank's working hours directive",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Frank 的工作时间窗约束，主动任务禁止时段", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp01-target"],
+        "rank_constraints": [{"eval_id": "mem-rp01-target", "max_rank": 3}]
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-02",
+      "category": "retrieve_precision",
+      "description": "Paraphrase query (no original keywords): BMO code review responsibilities",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "谁负责在代码合并之前做最后的技术把关，多久内没反应不会阻塞", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp02-target"],
+        "rank_constraints": []
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-03",
+      "category": "retrieve_precision",
+      "description": "Mixed Chinese-English query: token optimization experience",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "bmo-gmail MCP token usage optimization thread history", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp03-target"],
+        "rank_constraints": []
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-04",
+      "category": "retrieve_precision",
+      "description": "Dense distractors: Engram dedup threshold with 5 near-topic noise records",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Engram 服务端自动去重的相似度阈值是多少", "limit": 6}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp04-target"],
+        "rank_above_eval_ids": {
+          "target": "mem-rp04-target",
+          "above": ["mem-rp04-noise1", "mem-rp04-noise2", "mem-rp04-noise3", "mem-rp04-noise4", "mem-rp04-noise5"]
+        }
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-05",
+      "category": "retrieve_precision",
+      "description": "Tag filter: thread tag retrieval returns only tagged memories",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "shipship ack BMO funnel event", "limit": 5, "tags": ["thread:19eaf7f4891f1e23"]}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp05-a"],
+        "all_results_have_tag": "thread:19eaf7f4891f1e23"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-06",
+      "category": "retrieve_precision",
+      "description": "Type filter: directive only - no non-directive results",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "邮件 thread 超过多少轮需要切换", "limit": 5, "types": ["directive"]}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp06-target-directive"],
+        "all_results_have_type": "directive"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-07",
+      "category": "retrieve_precision",
+      "description": "Long query (>100 chars): event loop mail backlog incident",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Event loop 邮件处理积压问题，Frank 的邮件等待时间过长，2026年6月的复盘总结，根因分析以及改进措施包括处理顺序和队列管理", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rp07-target"],
+        "rank_constraints": []
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "RP-08",
+      "category": "retrieve_precision",
+      "description": "Negation: fact not in corpus - top-3 scores below threshold",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Siri 购买了一辆自行车并存放在上海虹桥火车站附近", "limit": 3}
+      },
+      "expect": {
+        "all_scores_below_threshold": 0.70,
+        "must_contain_eval_ids": []
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "DD-01",
+      "category": "dedup_accuracy",
+      "description": "Exact duplicate write - server dedupe, total count unchanged",
+      "action": {
+        "tool": "memory_add",
+        "args": {
+          "content": "2026-05-20 完成 Obsidian execution-log 安全写入协议升级，PUT 操作幂等性通过集成测试验证。",
+          "type": "event",
+          "importance": 5,
+          "source": "agent",
+          "tags": []
+        },
+        "fixture_anchor": "mem-dd01-anchor"
+      },
+      "expect": {
+        "count_unchanged": true,
+        "description": "Total memory count in engram_eval_user should not increase after exact duplicate write"
+      },
+      "metric": "decision_accuracy"
+    },
+    {
+      "id": "DD-02",
+      "category": "dedup_accuracy",
+      "description": "High-similarity paraphrase (>0.92 zone) - no new entry",
+      "action": {
+        "tool": "memory_add",
+        "args": {
+          "content": "GPS 骑行检测的执行频率：每隔 5 个 event loop 周期运行一次，状态持久化在 /tmp/siri-state/ 目录下。",
+          "type": "insight",
+          "importance": 6,
+          "source": "agent",
+          "tags": []
+        },
+        "fixture_anchor": "mem-dd02-anchor"
+      },
+      "expect": {
+        "count_unchanged": true,
+        "description": "High-similarity paraphrase should be deduped by server (>0.92 zone)"
+      },
+      "metric": "decision_accuracy"
+    },
+    {
+      "id": "DD-03",
+      "category": "dedup_accuracy",
+      "description": "0.82-0.92 zone near-similar semantic subset - should trigger update workflow",
+      "action": {
+        "tool": "memory_search_then_add",
+        "args": {
+          "content": "Sensor 校验机制：日历任务完成后运行，检测遗漏的副作用。",
+          "type": "insight",
+          "importance": 6,
+          "source": "agent",
+          "tags": []
+        },
+        "fixture_anchor": "mem-dd03-anchor"
+      },
+      "expect": {
+        "search_score_above": 0.82,
+        "search_score_below": 0.92,
+        "description": "Near-similar semantic subset should fall in 0.82-0.92 zone, triggering update workflow"
+      },
+      "metric": "decision_accuracy"
+    },
+    {
+      "id": "DD-04",
+      "category": "dedup_accuracy",
+      "description": "0.70-0.82 zone semantically different - should add, two entries coexist",
+      "action": {
+        "tool": "memory_add",
+        "args": {
+          "content": "重试机制的核心设计：任务失败后创建新的日历事件触发重试，而不是在原任务内部循环重试。",
+          "type": "insight",
+          "importance": 5,
+          "source": "agent",
+          "tags": ["retry", "eval-dd04-temp"]
+        },
+        "fixture_anchor": "mem-dd04-anchor"
+      },
+      "expect": {
+        "count_increased": true,
+        "search_score_above": 0.70,
+        "search_score_below": 0.82,
+        "description": "Semantically different (0.70-0.82 zone) should add new entry"
+      },
+      "metric": "decision_accuracy",
+      "cleanup_tag": "eval-dd04-temp"
+    },
+    {
+      "id": "DD-05",
+      "category": "dedup_accuracy",
+      "description": "<0.70 new content - add, no harm to existing memories",
+      "action": {
+        "tool": "memory_add",
+        "args": {
+          "content": "eval harness DD-05 测试内容：完全新颖的内容，与现有记忆无语义关联，验证低相似度场景下的正常写入行为。",
+          "type": "event",
+          "importance": 3,
+          "source": "agent",
+          "tags": ["eval-dd05-temp"]
+        }
+      },
+      "expect": {
+        "count_increased": true,
+        "description": "Completely new content (<0.70) should always add"
+      },
+      "metric": "decision_accuracy",
+      "cleanup_tag": "eval-dd05-temp"
+    },
+    {
+      "id": "DD-06",
+      "category": "dedup_accuracy",
+      "description": "memory_update with threshold <0.85 - rejected (anti mass-delete regression)",
+      "action": {
+        "tool": "memory_update",
+        "args": {
+          "old_content": "memory_update threshold test",
+          "new_content": "memory_update threshold test new",
+          "similarity_threshold": 0.70
+        }
+      },
+      "expect": {
+        "should_fail": true,
+        "error_contains": "threshold",
+        "description": "similarity_threshold <0.85 must be rejected by the MCP tool"
+      },
+      "metric": "decision_accuracy"
+    },
+    {
+      "id": "RC-01",
+      "category": "recency_bias",
+      "description": "Same topic new vs old, neutral query - newer record ranks first",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "每日计划生成的触发时间", "limit": 5}
+      },
+      "expect": {
+        "rank_before": {
+          "first_eval_id": "mem-rc01-new",
+          "second_eval_id": "mem-rc01-old"
+        },
+        "description": "Newer record (mem-rc01-new, T_NEW) should rank above older (mem-rc01-old, T_OLD)"
+      },
+      "metric": "rank_order_accuracy"
+    },
+    {
+      "id": "RC-02",
+      "category": "recency_bias",
+      "description": "Old importance=10 vs new importance=3 - importance partially offsets recency",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "团队项目归属分工 armyoftheagent", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rc02-old-important"],
+        "rank_constraints": [{"eval_id": "mem-rc02-old-important", "max_rank": 3}],
+        "description": "High importance old record (importance=10) should appear in top-3 despite being older"
+      },
+      "metric": "rank_order_accuracy"
+    },
+    {
+      "id": "RC-03",
+      "category": "recency_bias",
+      "description": "time_start/time_end filter - 0 hits outside window",
+      "action": {
+        "tool": "memory_search",
+        "args": {
+          "query": "Qdrant collection 演练",
+          "limit": 5,
+          "time_start": 1746835200,
+          "time_end": 1748044800
+        }
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-rc03-inwindow"],
+        "must_not_contain_eval_ids": ["mem-rc03-outwindow"],
+        "description": "Only in-window record should appear; out-window record excluded"
+      },
+      "metric": "rank_order_accuracy",
+      "notes": "time_start=2026-05-10 00:00 UTC, time_end=2026-05-24 00:00 UTC. mem-rc03-inwindow is at T_MID=2026-05-10, mem-rc03-outwindow is at T_OLD=2026-03-01"
+    },
+    {
+      "id": "RC-04",
+      "category": "recency_bias",
+      "description": "Expired memory (valid_until past) - not in results",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Obsidian REST API 证书轮换不可用临时通知", "limit": 5}
+      },
+      "expect": {
+        "must_not_contain_eval_ids": ["mem-rc04-expired"],
+        "must_contain_eval_ids": ["mem-rc04-valid"],
+        "description": "Expired memory (valid_until=2026-05-01) must not appear; valid memory should appear"
+      },
+      "metric": "rank_order_accuracy"
+    },
+    {
+      "id": "XC-01",
+      "category": "cross_collection",
+      "description": "Default fan-out: target in engram_eval_reflection - retrieved with correct source_collection",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Siri 自我修正类记忆 重复副作用 reflection 合成洞察", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-xc01-target-reflection"],
+        "result_source_collection": {"eval_id": "mem-xc01-target-reflection", "collection": "engram_eval_reflection"},
+        "description": "Cross-collection fan-out must retrieve reflection memory and tag source_collection correctly"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "XC-02",
+      "category": "cross_collection",
+      "description": "Explicit collections filter - 0 out-of-scope results",
+      "action": {
+        "tool": "memory_search",
+        "args": {
+          "query": "Dream Engine 联想合成 night low peak",
+          "limit": 5,
+          "collections": ["engram_eval_user"]
+        }
+      },
+      "expect": {
+        "must_not_contain_eval_ids": ["mem-xc03-reflection"],
+        "all_results_in_collections": ["engram_eval_user"],
+        "description": "With collections filter [engram_eval_user], reflection memories must not appear"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "XC-03",
+      "category": "cross_collection",
+      "description": "Cross-collection score normalization: both collections have equally relevant memories - rank interleaved",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Dream Engine 上线运行观察联想合成", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-xc03-user", "mem-xc03-reflection"],
+        "description": "Both user and reflection Dream Engine memories should appear in top-5 (score normalization check)"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "XC-04",
+      "category": "cross_collection",
+      "description": "Reflection insight and raw user memory on same topic both in top-5",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Frank 骑行 周末 距离 气温", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-xc04-user-raw", "mem-xc04-reflection-insight"],
+        "description": "Both reflection insight and raw user event about Frank cycling should appear in top-5"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "TR-01",
+      "category": "trajectory_replay",
+      "description": "STUB: Event loop scenario - directive retrieval during calendar task",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "event loop 处理顺序 Frank 优先级", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-tr01-seed"],
+        "stub": true,
+        "description": "STUB: seed directive for event loop ordering should be retrievable"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "TR-02",
+      "category": "trajectory_replay",
+      "description": "STUB: Historical miss case - calendar notification without event_id",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "日历通知邮件 event_id 字段缺失 正确处理方式", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-tr02-seed"],
+        "stub": true,
+        "description": "STUB: miss case insight should be retrievable"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "TR-03",
+      "category": "trajectory_replay",
+      "description": "STUB: Retrieval fusion injection quality",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "retrieval fusion 注入质量 event loop 命中率", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-tr03-seed"],
+        "stub": true,
+        "description": "STUB: retrieval fusion insight should be retrievable"
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "TR-04",
+      "category": "trajectory_replay",
+      "description": "STUB: Thread tag recall completeness in multi-turn task",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "thread tag 多轮任务 完整召回 回溯", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-tr04-seed"],
+        "stub": true,
+        "description": "STUB: thread tag recall practice insight should be retrievable"
+      },
+      "metric": "precision_at_5"
+    }
+  ],
+  "gate": {
+    "overall_min": 0.80,
+    "per_category_min": 0.65
+  },
+  "categories": ["retrieve_precision", "dedup_accuracy", "recency_bias", "cross_collection", "trajectory_replay"]
+}
