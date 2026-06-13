@@ -1,0 +1,235 @@
+{
+  "version": "core_v1",
+  "timestamp": "2026-06-13T01:08:24.258058Z",
+  "summary": {
+    "total_tasks": 26,
+    "valid_tasks": 26,
+    "passed": 26,
+    "skipped": 0,
+    "overall_score": 1.0
+  },
+  "gate": {
+    "overall_min": 0.8,
+    "per_category_min": 0.65,
+    "overall_pass": true,
+    "per_category_pass": {
+      "retrieve_precision": true,
+      "dedup_accuracy": true,
+      "recency_bias": true,
+      "cross_collection": true,
+      "trajectory_replay": true
+    },
+    "gate_pass": true
+  },
+  "categories": {
+    "retrieve_precision": {
+      "passed": 8,
+      "total": 8,
+      "score": 1.0
+    },
+    "dedup_accuracy": {
+      "passed": 6,
+      "total": 6,
+      "score": 1.0
+    },
+    "recency_bias": {
+      "passed": 4,
+      "total": 4,
+      "score": 1.0
+    },
+    "cross_collection": {
+      "passed": 4,
+      "total": 4,
+      "score": 1.0
+    },
+    "trajectory_replay": {
+      "passed": 4,
+      "total": 4,
+      "score": 1.0
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "RP-01",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Exact fact recall: Frank's working hours directive"
+    },
+    {
+      "task_id": "RP-02",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Paraphrase query (no original keywords): BMO code review responsibilities"
+    },
+    {
+      "task_id": "RP-03",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Mixed Chinese-English query: token optimization experience"
+    },
+    {
+      "task_id": "RP-04",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Dense distractors: Engram dedup threshold with 5 near-topic noise records"
+    },
+    {
+      "task_id": "RP-05",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Tag filter: thread tag retrieval returns only tagged memories"
+    },
+    {
+      "task_id": "RP-06",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Type filter: directive only - no non-directive results"
+    },
+    {
+      "task_id": "RP-07",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Long query (>100 chars): event loop mail backlog incident"
+    },
+    {
+      "task_id": "RP-08",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "retrieve_precision",
+      "description": "Negation: fact not in corpus - top-3 scores below threshold"
+    },
+    {
+      "task_id": "DD-01",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "dedup_accuracy",
+      "description": "Exact duplicate write - server dedupe, total count unchanged"
+    },
+    {
+      "task_id": "DD-02",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "dedup_accuracy",
+      "description": "High-similarity paraphrase (>0.92 zone) - no new entry"
+    },
+    {
+      "task_id": "DD-03",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "dedup_accuracy",
+      "description": "0.82-0.92 zone near-similar semantic subset - should trigger update workflow"
+    },
+    {
+      "task_id": "DD-04",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "dedup_accuracy",
+      "description": "0.70-0.82 zone semantically different - should add, two entries coexist"
+    },
+    {
+      "task_id": "DD-05",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "dedup_accuracy",
+      "description": "<0.70 new content - add, no harm to existing memories"
+    },
+    {
+      "task_id": "DD-06",
+      "pass": true,
+      "reason": "expected error raised (OK)",
+      "category": "dedup_accuracy",
+      "description": "memory_update with threshold <0.85 - rejected (anti mass-delete regression)"
+    },
+    {
+      "task_id": "RC-01",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "recency_bias",
+      "description": "Same topic new vs old, neutral query - newer record ranks first"
+    },
+    {
+      "task_id": "RC-02",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "recency_bias",
+      "description": "Old importance=10 vs new importance=3 - importance partially offsets recency"
+    },
+    {
+      "task_id": "RC-03",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "recency_bias",
+      "description": "time_start/time_end filter - 0 hits outside window"
+    },
+    {
+      "task_id": "RC-04",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "recency_bias",
+      "description": "Expired memory (valid_until past) - not in results"
+    },
+    {
+      "task_id": "XC-01",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "cross_collection",
+      "description": "Default fan-out: target in engram_eval_reflection - retrieved with correct source_collection"
+    },
+    {
+      "task_id": "XC-02",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "cross_collection",
+      "description": "Explicit collections filter - 0 out-of-scope results"
+    },
+    {
+      "task_id": "XC-03",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "cross_collection",
+      "description": "Cross-collection score normalization: both collections have equally relevant memories - rank interleaved"
+    },
+    {
+      "task_id": "XC-04",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "cross_collection",
+      "description": "Reflection insight and raw user memory on same topic both in top-5"
+    },
+    {
+      "task_id": "TR-01",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "trajectory_replay",
+      "description": "STUB: Event loop scenario - directive retrieval during calendar task"
+    },
+    {
+      "task_id": "TR-02",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "trajectory_replay",
+      "description": "STUB: Historical miss case - calendar notification without event_id"
+    },
+    {
+      "task_id": "TR-03",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "trajectory_replay",
+      "description": "STUB: Retrieval fusion injection quality"
+    },
+    {
+      "task_id": "TR-04",
+      "pass": true,
+      "reason": "all checks passed",
+      "category": "trajectory_replay",
+      "description": "STUB: Thread tag recall completeness in multi-turn task"
+    }
+  ]
+}

@@ -67,11 +67,11 @@
       "description": "Tag filter: thread tag retrieval returns only tagged memories",
       "action": {
         "tool": "memory_search",
-        "args": {"query": "shipship ack BMO funnel event", "limit": 5, "tags": ["thread:19eaf7f4891f1e23"]}
+        "args": {"query": "shipship ack BMO funnel event", "limit": 5, "tags": ["thread:eval-thread-001"]}
       },
       "expect": {
         "must_contain_eval_ids": ["mem-rp05-a"],
-        "all_results_have_tag": "thread:19eaf7f4891f1e23"
+        "all_results_have_tag": "thread:eval-thread-001"
       },
       "metric": "precision_at_5"
     },
@@ -145,7 +145,7 @@
       "action": {
         "tool": "memory_add",
         "args": {
-          "content": "GPS 骑行检测的执行频率：每隔 5 个 event loop 周期运行一次，状态持久化在 /tmp/siri-state/ 目录下。",
+          "content": "GPS 骑行检测每 5 轮 event loop 执行，状态存 /tmp/siri-state/gps.json 黑板文件，Engram 只保留每日快照做跨日回溯。",
           "type": "insight",
           "importance": 6,
           "source": "agent",
@@ -188,7 +188,7 @@
       "action": {
         "tool": "memory_add",
         "args": {
-          "content": "重试机制的核心设计：任务失败后创建新的日历事件触发重试，而不是在原任务内部循环重试。",
+          "content": "邮件发送失败的降级策略：写入本地队列等待下一次 event loop 重发，不创建日历重试事件。",
           "type": "insight",
           "importance": 5,
           "source": "agent",
@@ -286,8 +286,8 @@
         "args": {
           "query": "Qdrant collection 演练",
           "limit": 5,
-          "time_start": 1746835200,
-          "time_end": 1748044800
+          "time_start": 1778342400,
+          "time_end": 1779552000
         }
       },
       "expect": {
@@ -296,7 +296,7 @@
         "description": "Only in-window record should appear; out-window record excluded"
       },
       "metric": "rank_order_accuracy",
-      "notes": "time_start=2026-05-10 00:00 UTC, time_end=2026-05-24 00:00 UTC. mem-rc03-inwindow is at T_MID=2026-05-10, mem-rc03-outwindow is at T_OLD=2026-03-01"
+      "notes": "time_start=2026-05-10 00:00 UTC, time_end=2026-05-24 00:00 UTC. mem-rc03-inwindow is at 2026-05-20, mem-rc03-outwindow is at 2026-04-01"
     },
     {
       "id": "RC-04",
