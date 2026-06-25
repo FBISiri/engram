@@ -25,3 +25,4 @@ Thumbs.db
 qdrant_data/
 engram.bak*
 w17_schema
+eval/harness/__pycache__/
