@@ -105,6 +105,29 @@ mcp_servers:
       ENGRAM_OPENAI_API_KEY: "sk-..."
 ```
 
+### Store one → search → see the fused score
+
+This short walkthrough shows the first visible difference between Engram and querying a
+raw vector DB. Store one memory, then search for it:
+
+```
+# Store (content in English travels better across sessions)
+memory_add(
+  content="Frank prefers concise commit messages, imperative mood, no emoji.",
+  type="identity",
+  importance=8,
+  tags=["frank", "preference"]
+)
+
+# Search
+memory_search(query="how does Frank like commit messages", limit=3)
+```
+
+Each result carries a `score`. That `score` is **not** raw cosine similarity — it is the
+fused `relevance × recency × importance` rank (see [Scoring](#scoring)). This is the first
+thing you notice that a raw vector DB does not give you: between two equally relevant
+memories, the more important and more recent one ranks first.
+
 ## Integration Test
 
 Run the full end-to-end integration test against a live Qdrant instance:
@@ -134,6 +157,46 @@ Memories can have an optional `valid_until` field (Unix timestamp). A background
 ### TTL Auto-Calculator
 
 When `valid_until` is not explicitly set on `memory_add` / `memory_update`, Engram derives a sensible TTL from a **type × importance** matrix (e.g., low-importance `event` memories expire within days, high-importance `insight` memories within months, `identity` / `directive` types never expire by default). Explicit `valid_until` values always win — the auto-calculator only fills in when the caller omits it.
+
+## The Three-Layer Write Gate
+
+Write quality is the core of Engram: a gate that only checks "is this a duplicate" still
+lets the store rot. The gate is not one wall but three layers, each tightening on the last,
+each closing a specific degradation mode.
+
+| Layer | Where it lives | Threshold / rule | What it catches |
+|-------|----------------|------------------|-----------------|
+| **1. Server-side auto-dedup** | engram server, inside `memory_add` | similarity **> 0.92** → reject the write | High-confidence **verbatim duplicates** — the same fact written again in slightly different words |
+| **2. Semantic-near band (0.70–0.92)** | caller-side write discipline (not server-enforced) | run `memory_search` first, inspect the top score | **Semantic fragments** — "not an exact dup, but it's the same fact" |
+| **3. Type + importance self-check** | the writer (human or rule) | pick the right `type`, set `importance` accurately | Misclassification — things that should decay set to permanent, or vice versa |
+
+Layer 1 is the const `DefaultDedupThreshold = 0.92` in `pkg/memory/dedup.go`.
+
+**Layer 2 — the decision flow** for the 0.70–0.92 gray band. This is caller-side
+discipline, not enforced by the server:
+
+```
+score = top result of memory_search(query=content_to_write, limit=3)
+  > 0.82        → memory_update  (replace the old memory, don't add a new one)
+  0.70 – 0.82   → judge: genuinely different? → add ; same / subset? → update
+  < 0.70        → memory_add     (novel enough — write it)
+```
+
+**Why three layers instead of just the server's 0.92?**
+
+- 0.92 only catches near-verbatim duplicates. But the worst source of memory rot is not
+  literal copies — it is **ten phrasings of the same fact**. Each scores 0.75–0.88;
+  individually each looks "not a dup" and gets written; eventually the top-k fills with
+  synonymous fragments and squeezes out everything else. Layer 2 owns exactly this band,
+  updating instead of blindly appending.
+- Layer 3 governs a memory's fate **after** the write. Type sets the forgetting rate
+  (`identity` / `directive` permanent, `event` ~3 day, `insight` ~90 day half-life);
+  importance sets the recall weight. A gate that checks "is it a dup" but never "how long
+  should this live / how important is it" still lets the store rot over time.
+
+In one line: **0.92 stops verbatim copies, 0.70–0.92 stops semantic fragments, type +
+importance stops misclassification** — all serving one goal: every memory added must not
+lower the store's signal-to-noise ratio.
 
 ## API
 
@@ -349,6 +412,33 @@ Same span name `engram.reflection.run` emitted by `RunV2` and `RunSingleEvent`.
 Error paths set `span.RecordError(err)` + `span.SetStatus(codes.Error, ...)`.
 
 `engram.memory.dedup_check` is a child span of `engram.memory.add`.
+
+## Evaluation
+
+Engram ships its own regression eval (`eval/taskset/core_v1.json`). The most recent run
+(2026-06-13, `core_v1`) was **26/26 (100%), gate PASS** — the gate requires ≥80% overall
+and ≥65% per category. Source: `eval/reports/report_2026-06-13.md`.
+
+The 26 cases span five categories, each mapping to one thing a memory system must get right:
+
+| Category | Cases | What it checks |
+|----------|-------|----------------|
+| `retrieve_precision` | 8 | Given a query, recall what should be recalled and keep out what shouldn't |
+| `dedup_accuracy` | 6 | Duplicates / near-dups are rejected; errors are raised when expected (1 case is "expected-error = pass") |
+| `recency_bias` | 4 | When two memories are equally relevant, the fresher one ranks first (the recency factor really works) |
+| `cross_collection` | 4 | Multi-collection isolation: `engram` and `bmo` don't bleed into each other |
+| `trajectory_replay` | 4 | After replaying a write sequence, the final memory state matches expectations |
+
+**What this number is — and is not.** This is *our own* regression eval. It is not a
+third-party benchmark and not a large-scale benchmark. 26/26 means "these 26 defined
+behaviors did not regress," not "100% correct on any distribution." Its real purpose is a
+regression guardrail: when we change a dedup threshold, a scoring weight, or the retrieval
+fusion, we re-run these 26 cases and immediately see which behavior broke.
+
+We deliberately **do not report mem0's, Letta's, or Zep's published benchmark numbers**.
+Borrowing someone else's accuracy to flatter our own is dishonest and meaningless — their
+tasks, data, and methodology are different from ours. 26/26 says only how Engram does on
+Engram's own taskset, and nothing more.
 
 ## Background
 
