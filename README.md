@@ -83,14 +83,25 @@ KV 记忆靠精确 key 命中，没有语义召回、没有重要性、没有去
 
 **① 4 种记忆类型 —— 决定遗忘速率与召回权重**
 
-| 类型 | 半衰期 | 典型内容 |
+| 类型 | 召回衰减半衰期 | 典型内容 |
 |---|---|---|
 | `identity` | 永久（不衰减） | 关于「我是谁」、价值观、长期偏好 |
 | `directive` | 永久（不衰减） | 行为规则、硬约束、Frank 的指令 |
-| `insight` | ~90 天 | 洞察、经验教训、技术观察 |
-| `event` | ~3.5 天 | 发生过的具体事件、临时事实 |
+| `insight` | ~144 天 | 洞察、经验教训、技术观察 |
+| `event` | ~2.9 天 | 发生过的具体事件、临时事实 |
 
 类型不是僵硬的子类目——更细的区分交给 `tags`。类型只负责一件事：**这条记忆该活多久、被召回时权重多大。**
+
+> **两套机制，别混淆。** 上表的「半衰期」指**召回排序**里的时间衰减：`recency = decay^小时数`，`event` 每小时 ×0.99（半衰 ~2.9 天）、`insight` ×0.9998（半衰 ~144 天）、`identity`/`directive` 不衰减。它只影响排序权重，不删数据。真正决定记忆**何时被硬删除**的是另一套 **TTL（`valid_until`）**，按「类型 × importance 档位」分级：
+>
+> | 类型 | importance <5 | 5–7 | ≥8 |
+> |---|---|---|---|
+> | `identity` | 永久 | 永久 | 永久 |
+> | `directive` | 90 天 | 永久 | 永久 |
+> | `insight` | 30 天 | 90 天 | 永久 |
+> | `event` | 3 天 | 7 天 | 30 天 |
+>
+> `permanent` tag → 永不过期；`time-sensitive`/`location` tag → 封顶 7 天。以 `pkg/memory/ttl.go`（TTL 矩阵）与 `pkg/memory/memory.go`（衰减系数）的实现为准。
 
 **② importance（1–10）—— 设准比设高重要**
 重要性参与检索排序。它的价值在于「准」而不是「高」：把什么都设成 9，等于没设。该是 3 的小事就标 3，让真正的硬约束（8+）能在排序里浮上来。
@@ -194,7 +205,7 @@ score = memory_search(query=待写内容, limit=3) 的最高分
 **为什么要分三层、而不是只靠服务端那个 0.92？**
 
 - 0.92 只能挡住「几乎一字不差」的重复。但记忆退化最严重的来源不是逐字复制，而是**同一事实的十种说法**——每条相似度 0.75~0.88，单独看都「不算重复」，逐条都能写进去，最后 top-k 被同义碎片占满（第 1 章「重复碎片」）。第 2 层就是专门收这段区间，把「该更新的更新掉」而不是「无脑追加」。
-- 第 3 层管的是写入**之后**的命运：类型决定遗忘速率（identity/directive 永久，event ~3.5 天、insight ~90 天半衰），importance 决定召回权重。门禁如果只看「重不重复」、不看「这条该活多久、多重要」，库还是会慢慢腐烂。
+- 第 3 层管的是写入**之后**的命运：类型决定召回衰减速率（identity/directive 永久，event 半衰 ~2.9 天、insight ~144 天），类型 × importance 决定 TTL 硬删时限（见 §4 表）。门禁如果只看「重不重复」、不看「这条该活多久、多重要」，库还是会慢慢腐烂。
 
 一句话：**0.92 防逐字复制，0.70–0.92 防语义碎片，类型+importance 防记忆错配。** 三层都是为了同一个目标——让库里每多一条，信噪比不下降。
 
@@ -244,7 +255,7 @@ flowchart TD
 
     %% ---- 存储内部 ----
     QDRANT -.- COLS["collections: engram / bmo / engram_reflection"]
-    QDRANT -.- TYPES["记忆类型 (payload):<br/>identity(永久) · directive(永久)<br/>insight(~90d) · event(~3.5d)"]
+    QDRANT -.- TYPES["记忆类型 (payload):<br/>identity(永久) · directive(永久)<br/>insight(半衰~144d) · event(半衰~2.9d)"]
 ```
 
 **读这张图的三条主线：**
@@ -280,10 +291,10 @@ flowchart TD
 不对标、不借数字。我们**刻意不报 mem0 的官方 benchmark**（也不对标 Letta / Zep）——他们测的任务、数据、口径都和我们不同，借别人的准确率抬自己既不诚实也没意义。Engram 只用自己的回归 eval（见下「评估」）来衡量自己。理念上 Engram 和这些系统同属「agent 记忆」赛道，但它的取舍是「写路质量优先 + 类型化遗忘」。
 
 **能多租户吗？**
-当前形态是 in-process、服务 BMO + Siri 的多 collection 隔离。面向外部租户的 per-tenant API（加密身份、按 key 绑定 collection、限流、错误码体系）是 Q3 正在推进的产品化方向，设计已成稿（见 `/Engram/external-api-spec-v0.md`），但尚未随本 README 描述的核心系统一起发布。
+当前形态是 in-process、服务 BMO + Siri 的多 collection 隔离。面向外部租户的 per-tenant API（加密身份、按 key 绑定 collection、限流、错误码体系）是 Q3 正在推进的产品化方向，尚未随本 README 描述的核心系统一起发布。现有的 REST/MCP 接口参数文档见 [`docs/api.md`](docs/api.md)。
 
 **记忆会自己消失吗？**
-会，按类型。`event` ~3.5 天、`insight` ~90 天半衰；`identity` / `directive` 永久。这是「该忘的让它淡出」的刻意设计，不是 bug。
+会，分两层。**召回衰减**：`event` 半衰 ~2.9 天、`insight` ~144 天，`identity`/`directive` 不衰减——旧记忆排序权重逐渐下沉。**硬删除（TTL）**：按类型 × importance 分级（见 §4 表），到期真正删除；`identity`/`directive`（mid/high）永久保留。这是「该忘的让它淡出、到期清走」的刻意设计，不是 bug。
 
 ---
 
