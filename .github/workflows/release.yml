@@ -45,14 +45,14 @@ jobs:
           fi
 
       - name: GoReleaser dry-run check (validate config)
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
           args: check
         continue-on-error: true   # don't fail on missing .goreleaser.yaml (caught above)
 
       - name: Run GoReleaser release
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
           args: release --clean
