@@ -38,7 +38,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62            # pinned for timing reproducibility
+          version: v2.1             # v2.x built with Go 1.24+, supports go 1.25 modules (was v1.62 which only built with Go 1.23)
           args: --timeout=2m        # action has its own internal lint cache
 
       - name: Unit tests (short, no external deps)
