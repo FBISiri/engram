@@ -1,0 +1,54 @@
+name: push-fast
+
+# Tier 1: fast feedback on every push to any branch.
+# Target: ≤ 3 min. No external services (no Qdrant, no embedder).
+# Only static checks + short unit tests (testing.Short() respected).
+#
+# ⚠️ Secrets needed: NONE for this tier.
+# Race detector is intentionally omitted here (2–10× slower); it runs in pr-full-ci.
+
+on:
+  push:
+    branches-ignore: []   # all branches
+
+concurrency:
+  group: push-${{ github.ref }}
+  cancel-in-progress: true   # cancel superseded runs on same ref (force-push safe)
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-unit:
+    name: Lint + Unit (≤3 min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3          # hard budget enforcement — fails job if exceeded
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod   # reads exact version from go.mod
+          cache: true               # module download + build cache keyed on go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62            # pinned for timing reproducibility
+          args: --timeout=2m        # action has its own internal lint cache
+
+      - name: Unit tests (short, no external deps)
+        run: go test -short -count=1 -timeout 2m30s ./...
+        # -short: skips integration tests that call testing.Short() check
+        # -count=1: disable test result cache (always run)
+        # No -race here — runs in PR tier to protect 3-min budget
+
+# ── Performance notes ──────────────────────────────────────────────────────────
+# If lint+unit approaches 3 min on a warm cache, split into two parallel jobs:
+#   jobs: lint (golangci) ‖ unit (go test -short) — each fitting independently.
+# First run (cold module cache): expect ~90s module download + ~60s lint = ~2.5 min.
+# Subsequent runs (warm cache): ~20s module + ~40s lint + ~20s tests ≈ 80s total.

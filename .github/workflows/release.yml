@@ -1,0 +1,66 @@
+name: release
+
+# Tier 3: goreleaser multi-platform release on semver tag push.
+# Runs in PARALLEL with docker-publish.yml (both fire on v*.*.* tags) — intended.
+#
+# Produces:
+#   - linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 tar.gz archives
+#   - checksums.txt (sha256)
+#   - GitHub Release with auto-changelog from git log
+#
+# ⚠️ Secrets needed:
+#   GITHUB_TOKEN — auto-provided by Actions (no manual setup needed)
+#   (No embedder keys needed for release tier — binaries only)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # required to create GitHub Release and upload assets
+
+jobs:
+  goreleaser:
+    name: GoReleaser multi-platform release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # goreleaser needs full git history for changelog generation
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify .goreleaser.yaml exists
+        run: |
+          if [ ! -f .goreleaser.yaml ]; then
+            echo "❌ .goreleaser.yaml not found in repo root — release cannot proceed"
+            echo "   pigo: please create .goreleaser.yaml from the spec in /Engram/cicd-design.md"
+            exit 1
+          fi
+
+      - name: GoReleaser dry-run check (validate config)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: check
+        continue-on-error: true   # don't fail on missing .goreleaser.yaml (caught above)
+
+      - name: Run GoReleaser release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # auto-provided, no manual secret needed
+
+# ── Relationship with docker-publish.yml ──────────────────────────────────────
+# Both workflows fire on the same v*.*.* tag push. That is intentional:
+#   docker-publish.yml → multi-arch Docker image (linux/amd64, linux/arm64)
+#   release.yml        → cross-platform binary archives + GitHub Release page
+# They run fully in parallel; no ordering dependency.

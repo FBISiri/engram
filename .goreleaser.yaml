@@ -1,0 +1,60 @@
+# .goreleaser.yaml — Engram multi-platform release config
+# Generated: 2026-07-01 by Siri (CI/CD pipeline W2 design)
+# Usage: goreleaser release --clean  (triggered by release.yml on v*.*.* tag)
+# Local test: goreleaser release --snapshot --clean  (no tag needed, no publish)
+
+version: 2
+
+project_name: engram
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod verify
+
+builds:
+  - id: engram
+    main: ./cmd/engram/       # matches Makefile: go build -o engram ./cmd/engram/
+    binary: engram
+    env:
+      - CGO_ENABLED=0         # fully static binaries, no libc dependency
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # ldflags mirror the Makefile build target exactly
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.gitCommit={{.ShortCommit}}
+      - -X main.buildTime={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: FBISiri      # confirmed from go.mod: github.com/FBISiri/engram
+    name: engram
+  draft: false
+  prerelease: auto      # v1.0.0-rc.1 etc. auto-marked as prerelease
+  # name_template defaults to "{{.Tag}}" — changelog auto-generated from git log

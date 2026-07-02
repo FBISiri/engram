@@ -1,0 +1,61 @@
+# engram-long-cycle.config.yaml
+#
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║  DESIGN REFERENCE — NOT LOADED BY THE ENGRAM BINARY.                    ║
+# ║                                                                        ║
+# ║  This file documents the intended Config-3 long-cycle tuning. The      ║
+# ║  engram binary is configured via ENGRAM_* environment variables        ║
+# ║  (see .env.example and README Step 2), NOT by loading this YAML.       ║
+# ║  There is no --config flag / YAML loader in pkg/config.                ║
+# ║                                                                        ║
+# ║  Reflection V2 mode + threshold are set on the reflection engine       ║
+# ║  (reflection.Config struct / `--mode v2`); Dream gates are hardcoded   ║
+# ║  in pkg/dream/gate.go. Editing values here does NOT change runtime     ║
+# ║  behavior — treat this as documentation of the desired tuning.         ║
+# ╚════════════════════════════════════════════════════════════════════════╝
+#
+# Config 3 — Reflection-Heavy Long-Cycle Memory.
+# Tunes the Reflection Engine (V2 focal-point) and documents Dream Engine
+# behavior for a long-running autonomous agent that must get *smarter* over
+# months, not just accumulate raw memories.
+engram:
+  collection_name: siri_long_cycle   # or your agent name
+  qdrant:
+    host: localhost
+    grpc_port: 6334
+    rest_port: 6333
+  vectors:
+    size: 1024
+    distance: Cosine
+
+  # ─── Reflection Engine tuning ──────────────────────────────────────────
+  reflection:
+    mode: v2                     # focal-point mode; better cross-domain synthesis
+    threshold: 30.0              # lower than default 40 -> triggers earlier
+                                 # rationale: long-cycle agents write 5-10 memories/hour;
+                                 # at default 40 you'd wait 5-8 hours. 30 keeps cycle tight.
+    min_interval_h: 2.0          # standard: never run < 2h apart
+    max_per_day: 3               # standard: 3 runs/day max
+    max_input_size: 20           # memories fed per flat run (v1); v2 ignores this for gathering
+
+    # V2-specific tuning
+    focal_input_size: 50         # unreflected mems fed to focal question generation
+    focal_questions: 3           # focal questions to generate per run
+    evidence_per_focal: 10       # memories retrieved per focal question
+    min_insight_confidence: 0.5  # insights below this -> Obsidian draft, not store
+    dialectic_timeout_s: 15      # per-focal LLM call timeout
+
+  # ─── Dream Engine tuning ───────────────────────────────────────────────
+  dream:
+    # Gates are not directly configurable via this file - they're hardcoded in
+    # pkg/dream/gate.go. The values below document the effective behavior.
+    gate1_time_h: 20             # [read-only] hours between dream runs
+    gate2_new_memories: 20       # [read-only] minimum new mems to trigger
+    # Phase behavior
+    consolidation:
+      min_events_per_tag: 3      # [read-only] minimum events in one tag-group to consolidate
+      max_age_days: 7            # [read-only] only events from last 7 days are gathered
+    prune:
+      importance_threshold: 3    # [read-only] prune if importance <= 3
+      access_count_threshold: 0  # [read-only] prune if access_count = 0
+      # Combined: must satisfy both conditions simultaneously

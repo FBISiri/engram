@@ -1,0 +1,225 @@
+name: pr-full-ci
+
+# Tier 2: Full CI on pull_request → main.
+# This is the BRANCH-PROTECTION REQUIRED CHECK. All jobs must be green for merge.
+#
+# Components:
+#   job 1 (parallel): race-enabled unit tests + integration tests (real Qdrant service container)
+#   job 2 (parallel): eval gate — boot engram server + run eval/harness/harness.py (26 tasks)
+#   job 3 (sequential, needs 1+2): docker build smoke-test (no push)
+#
+# ⚠️ SECRETS REQUIRED — must be provisioned by Siri/BMO before enabling as required check:
+#   ENGRAM_OPENAI_API_KEY   — OpenAI embeddings (text-embedding-3-small, dim 1536)
+#                             pigo CANNOT add this; must be set by Siri/BMO in
+#                             GitHub → Settings → Secrets and variables → Actions
+#   ENGRAM_API_KEY          — bearer token for engram server auth (harness uses this)
+#                             harness has a hardcoded default fallback, but CI should set its own
+#
+# NOTE: eval/harness/harness.py currently defaults to Voyage embedder.
+#   We override to OpenAI via env vars below (deterministic, 1536-dim gate).
+#   ENGRAM_VOYAGE_API_KEY is NOT needed when ENGRAM_EMBEDDER_PROVIDER=openai.
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened ]
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Job 1: Integration tests (race + real Qdrant) ───────────────────────────
+  integration:
+    name: Integration Tests (race + Qdrant)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333    # REST API (used by harness.py QDRANT_URL)
+          - 6334:6334    # gRPC (used by engram server ENGRAM_QDRANT_URL)
+
+    env:
+      # Engram server: connect to service-container Qdrant (no auth needed)
+      ENGRAM_QDRANT_URL: localhost:6334
+      QDRANT_URL: http://localhost:6333       # harness.py uses this form
+      # Embedder: standardized on OpenAI for determinism
+      ENGRAM_OPENAI_API_KEY: ${{ secrets.ENGRAM_OPENAI_API_KEY }}
+      ENGRAM_OPENAI_BASE_URL: https://api.openai.com/v1
+      ENGRAM_EMBEDDER_PROVIDER: openai
+      ENGRAM_EMBEDDING_MODEL: text-embedding-3-small
+      ENGRAM_EMBEDDING_DIMENSION: "1536"
+      # Auth: set server + integration client to same token
+      ENGRAM_API_KEY: ${{ secrets.ENGRAM_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Wait for Qdrant to be ready
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:6333/healthz > /dev/null 2>&1; then
+              echo "✅ Qdrant ready after ${i}s"
+              break
+            fi
+            echo "Waiting for Qdrant... (${i}s)"
+            sleep 1
+          done
+
+      - name: Race-enabled unit tests
+        run: go test -race -count=1 -timeout 10m ./...
+        # -race: enabled here (not in push tier) — catches data races before merge
+
+      - name: Build binary
+        run: make build
+
+      - name: Integration tests
+        run: ./integration_test.sh
+        # integration_test.sh spins up the binary via coproc, runs MCP-over-stdio tests
+        # Hard-fails (exit 1) if ENGRAM_OPENAI_API_KEY is not set
+
+  # ── Job 2: Eval gate 26/26 ───────────────────────────────────────────────────
+  eval-gate:
+    name: Eval Gate (26/26)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+          - 6334:6334
+
+    env:
+      ENGRAM_QDRANT_URL: localhost:6334
+      QDRANT_URL: http://localhost:6333
+      # ⚠️ Override harness default (Voyage) → OpenAI for deterministic gate
+      ENGRAM_OPENAI_API_KEY: ${{ secrets.ENGRAM_OPENAI_API_KEY }}
+      ENGRAM_OPENAI_BASE_URL: https://api.openai.com/v1
+      ENGRAM_EMBEDDER_PROVIDER: openai
+      ENGRAM_EMBEDDING_MODEL: text-embedding-3-small
+      ENGRAM_EMBEDDING_DIMENSION: "1536"
+      ENGRAM_API_KEY: ${{ secrets.ENGRAM_API_KEY }}
+      ENGRAM_URL: http://localhost:8080
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install harness dependencies
+        run: pip install requests
+
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:6333/healthz > /dev/null 2>&1; then
+              echo "✅ Qdrant ready"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Build engram binary
+        run: make build
+
+      - name: Start engram server (background)
+        run: |
+          ./engram serve --port 8080 &
+          echo $! > engram.pid
+          # Wait for server to accept connections
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "✅ Engram server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run eval harness (26 tasks)
+        run: |
+          python3 eval/harness/harness.py --taskset core_v1 2>&1 | tee eval_output.txt
+          # harness.py exits non-zero if gate_pass is False (sys.exit(0 if gate_pass else 1))
+          # Belt-and-suspenders: verify gate_pass in output even if exit code is wrong
+        # NOTE: gate is overall_min=0.80 AND per_category_min=0.65 across 26 tasks
+        # "26/26" shorthand means all tasks pass per taskset gate config
+
+      - name: Verify eval gate (belt-and-suspenders)
+        run: |
+          # Confirm we see PASS in the output; grep as secondary guard
+          if grep -q "FAIL" eval_output.txt && ! grep -q "PASS" eval_output.txt; then
+            echo "❌ Eval gate FAILED — see eval_output.txt above"
+            exit 1
+          fi
+          echo "✅ Eval gate: PASS"
+
+      - name: Upload eval results
+        if: always()   # preserve results even on failure for debugging
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-pr-${{ github.event.pull_request.number }}
+          path: eval_output.txt
+          retention-days: 30
+
+      - name: Stop engram server
+        if: always()
+        run: |
+          if [ -f engram.pid ]; then
+            kill "$(cat engram.pid)" 2>/dev/null || true
+            rm -f engram.pid
+          fi
+
+  # ── Job 3: Docker build smoke test ───────────────────────────────────────────
+  docker-build:
+    name: Docker Build (smoke test, no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [ integration, eval-gate ]   # only run if both gates are green
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: engram:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# ── Branch protection note (configured by Siri/BMO, not YAML) ─────────────────
+# After ENGRAM_OPENAI_API_KEY is confirmed provisioned (§4.5 verification):
+#   Settings → Branches → main → Require status checks:
+#     ✅ "Integration Tests (race + Qdrant)"
+#     ✅ "Eval Gate (26/26)"
+#     ✅ "Docker Build (smoke test, no push)"   [optional but recommended]
+#   ✅ Require branches to be up to date before merging
+#   ✅ Include administrators
+#   ❌ Allow force pushes
+#
+# ⚠️ DO NOT make checks required before ENGRAM_OPENAI_API_KEY is provisioned —
+#    otherwise every PR blocks permanently (integration test exits 1 without key).
