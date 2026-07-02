@@ -1,0 +1,17 @@
+{
+  "_comment": "Claude Code MCP config — copy to .mcp.json and set real paths/keys.",
+  "_docs": "https://docs.anthropic.com/en/docs/claude-code/mcp",
+
+  "mcpServers": {
+    "engram": {
+      "command": "/path/to/engram",
+      "args": ["serve"],
+      "env": {
+        "ENGRAM_QDRANT_URL": "localhost:6334",
+        "ENGRAM_OPENAI_API_KEY": "sk-...",
+        "ENGRAM_COLLECTION_NAME": "my_project",
+        "ENGRAM_TRANSPORT": "stdio"
+      }
+    }
+  }
+}

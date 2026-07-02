@@ -26,3 +26,6 @@ qdrant_data/
 engram.bak*
 w17_schema
 eval/harness/__pycache__/
+
+# Trajectory logs (runtime data, may contain sensitive API traces)
+trajectories/

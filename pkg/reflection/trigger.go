@@ -53,7 +53,7 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 	}
 
 	// Read daily count early so CheckResult.RunsToday is always populated,
-	// even when Gate 1 returns early (otherwise callers see a misleading 0).
+	// even when early gates block execution.
 	dailyCount, err := readDailyCount(filepath.Join(dir, reflectionDailyFile))
 	if err != nil {
 		// Non-fatal: treat as 0.
@@ -67,23 +67,23 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 	if err != nil {
 		return nil, nil, fmt.Errorf("read last run: %w", err)
 	}
+	gate1Blocked := false
 	if !lastRunTime.IsZero() {
 		result.HoursSinceLastRun = time.Since(lastRunTime).Hours()
 		minInterval := time.Duration(e.cfg.MinIntervalH * float64(time.Hour))
 		if time.Since(lastRunTime) < minInterval && !e.cfg.Force {
 			result.SkipReason = fmt.Sprintf("too soon: last run %.1fh ago (min interval %.1fh)",
 				result.HoursSinceLastRun, e.cfg.MinIntervalH)
-			return result, nil, nil
+			gate1Blocked = true
 		}
 	}
 
 	// Gate 2: Daily run count check (count already loaded above).
-	if dailyCount >= reflectionMaxPerDay && !e.cfg.Force {
-		result.SkipReason = fmt.Sprintf("daily limit reached: %d/%d runs today", dailyCount, reflectionMaxPerDay)
-		return result, nil, nil
-	}
+	gate2Blocked := dailyCount >= reflectionMaxPerDay && !e.cfg.Force
 
-	// Gate 3: Importance accumulation check.
+	// Gate 3: Importance accumulation — always computed so AccumulatedImportance
+	// is accurate even when Gate 1 or Gate 2 blocks ShouldTrigger. Tests and
+	// callers rely on this field for observability regardless of trigger outcome.
 	unreflected, err := e.fetchUnreflected(ctx, 200)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetch unreflected: %w", err)
@@ -95,6 +95,15 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 		total += m.Importance
 	}
 	result.AccumulatedImportance = total
+
+	// Apply Gate 1 / Gate 2 early-return now that accumulated_importance is set.
+	if gate1Blocked {
+		return result, nil, nil
+	}
+	if gate2Blocked {
+		result.SkipReason = fmt.Sprintf("daily limit reached: %d/%d runs today", dailyCount, reflectionMaxPerDay)
+		return result, nil, nil
+	}
 
 	if total < e.cfg.Threshold {
 		result.SkipReason = fmt.Sprintf("importance accumulation %.1f < threshold %.1f (%d unreflected memories)",
