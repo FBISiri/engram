@@ -68,14 +68,14 @@ func (l *Logger) run() {
 	)
 	defer func() {
 		if f != nil {
-			f.Close()
+			_ = f.Close()
 		}
 	}()
 	for r := range l.ch {
 		date := r.Timestamp[:10] // YYYY-MM-DD
 		if date != currentDate {
 			if f != nil {
-				f.Close()
+				_ = f.Close()
 				f = nil
 			}
 			if err := os.MkdirAll(l.dir, 0755); err == nil {

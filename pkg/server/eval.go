@@ -164,7 +164,7 @@ func (s *Server) doSnapshot(ctx context.Context) (*mcp.CallToolResult, error) {
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("create snapshot file: %v", err)), nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	for _, m := range memories {
 		data, err := json.Marshal(snapshotRecord{m})
@@ -194,7 +194,7 @@ func (s *Server) doRestore(ctx context.Context, snapshotID string) (*mcp.CallToo
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("open snapshot %s: %v", snapshotID, err)), nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Parse snapshot records
 	var records []snapshotRecord

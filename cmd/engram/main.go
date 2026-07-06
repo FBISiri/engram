@@ -100,7 +100,7 @@ func serve(cfg *config.Config) error {
 		return fmt.Errorf("init tracing: %w", err)
 	}
 	if tp != nil {
-		defer tp.Shutdown(context.Background())
+		defer func() { _ = tp.Shutdown(context.Background()) }()
 	}
 
 	fmt.Fprintf(os.Stderr, "Starting Engram server (transport: %s)\n", cfg.Transport)
@@ -127,7 +127,7 @@ func serve(cfg *config.Config) error {
 		storeMap[col] = s
 	}
 	store := qdrant.NewMultiStore(storeMap, collection.CollectionUser)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Ensure all physical collections exist.
 	ctx := context.Background()
@@ -238,7 +238,7 @@ func dreamCheck(cfg *config.Config) error {
 		}
 		return dream.PrintGateResult(result)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	result, err := dream.CheckGates(store)
 	if err != nil {
@@ -253,7 +253,7 @@ func dreamRun(cfg *config.Config) error {
 		return fmt.Errorf("init tracing: %w", err)
 	}
 	if tp != nil {
-		defer tp.Shutdown(context.Background())
+		defer func() { _ = tp.Shutdown(context.Background()) }()
 	}
 
 	// Parse flags from os.Args[2:].
@@ -280,7 +280,7 @@ func dreamRun(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
@@ -341,7 +341,7 @@ func reflectionCheck(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	eng := reflection.NewEngine(store, nil, reflection.DefaultConfig())
 	ctx := context.Background()
@@ -363,7 +363,7 @@ func reflectionRun(cfg *config.Config) error {
 		return fmt.Errorf("init tracing: %w", err)
 	}
 	if tp != nil {
-		defer tp.Shutdown(context.Background())
+		defer func() { _ = tp.Shutdown(context.Background()) }()
 	}
 
 	dryRun := false
@@ -390,7 +390,7 @@ func reflectionRun(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
@@ -468,7 +468,7 @@ func migrateReflected(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {
@@ -599,7 +599,7 @@ func migrateCollections(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connect legacy store: %w", err)
 	}
-	defer legacyStore.Close()
+	defer func() { _ = legacyStore.Close() }()
 
 	// Target stores — one per new collection.
 	targetStoreMap := map[string]*qdrant.Store{}
@@ -609,7 +609,7 @@ func migrateCollections(cfg *config.Config) error {
 		if err != nil {
 			return fmt.Errorf("connect target store %s: %w", col, err)
 		}
-		defer s.Close()
+		defer func() { _ = s.Close() }()
 		targetStoreMap[col] = s
 	}
 
@@ -763,10 +763,10 @@ func dropLegacy(cfg *config.Config) error {
 			return fmt.Errorf("connect store %s: %w", col, err)
 		}
 		if err := s.DropCollection(ctx); err != nil {
-			s.Close()
+			_ = s.Close()
 			return fmt.Errorf("drop collection %s: %w", col, err)
 		}
-		s.Close()
+		_ = s.Close()
 		fmt.Fprintf(os.Stderr, "drop-legacy: deleted collection %q\n", col)
 	}
 	return nil
@@ -840,7 +840,7 @@ func migrateExtraCollections(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connect target store %s: %w", targetName, err)
 	}
-	defer targetStore.Close()
+	defer func() { _ = targetStore.Close() }()
 	if !dryRun {
 		if err := targetStore.EnsureCollection(ctx); err != nil {
 			return fmt.Errorf("ensure target collection %s: %w", targetName, err)
@@ -888,7 +888,7 @@ func migrateExtraCollections(cfg *config.Config) error {
 				Offset: offset,
 			})
 			if err != nil {
-				srcStore.Close()
+				_ = srcStore.Close()
 				return fmt.Errorf("scroll %s: %w", srcName, err)
 			}
 			if len(batch) == 0 {
@@ -949,7 +949,7 @@ func migrateExtraCollections(cfg *config.Config) error {
 			}
 			offset = next
 		}
-		srcStore.Close()
+		_ = srcStore.Close()
 	}
 
 	result := map[string]any{

@@ -1,6 +1,7 @@
 package reflection
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -102,7 +103,7 @@ func TestBuildSingleEventPrompt_OmitsEvidenceHeaderWhenEmpty(t *testing.T) {
 
 func TestRunSingleEvent_RejectsEmptyCause(t *testing.T) {
 	eng := NewEngine(nil, nil, DefaultConfig())
-	_, err := eng.RunSingleEvent(nil, SingleEventInput{
+	_, err := eng.RunSingleEvent(context.TODO(), SingleEventInput{
 		Summary: "missing cause",
 	})
 	if err == nil {
@@ -115,7 +116,7 @@ func TestRunSingleEvent_RejectsEmptyCause(t *testing.T) {
 
 func TestRunSingleEvent_RejectsEmptySummary(t *testing.T) {
 	eng := NewEngine(nil, nil, DefaultConfig())
-	_, err := eng.RunSingleEvent(nil, SingleEventInput{
+	_, err := eng.RunSingleEvent(context.TODO(), SingleEventInput{
 		Cause:   TriggerTaskFailure,
 		Summary: "   ",
 	})

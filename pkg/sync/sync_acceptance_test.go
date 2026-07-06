@@ -427,7 +427,7 @@ func (f *failingLog) Close() error                                { return nil }
 func cleanupStore(t *testing.T, store engram_sync.WriteThroughStore) {
 	t.Helper()
 	if c, ok := store.(closeable); ok {
-		t.Cleanup(func() { c.Close() })
+		t.Cleanup(func() { _ = c.Close() })
 	}
 }
 
@@ -470,7 +470,7 @@ func newTestStoreWithConfig(t *testing.T, cfg engram_sync.RingBufferConfig) (eng
 func newTestStoreAtPath(t *testing.T, path string) (engram_sync.WriteThroughStore, engram_sync.CommitLog) {
 	t.Helper()
 	if prev, ok := prevStores[path]; ok {
-		prev.Close()
+		_ = prev.Close()
 		delete(prevStores, path)
 	}
 	store, log, err := engram_sync.NewWriteThrough(newMockStore(), path, engram_sync.DefaultRingBufferConfig())
@@ -480,7 +480,7 @@ func newTestStoreAtPath(t *testing.T, path string) (engram_sync.WriteThroughStor
 	if c, ok := store.(closeable); ok {
 		prevStores[path] = c
 		t.Cleanup(func() {
-			c.Close()
+			_ = c.Close()
 			delete(prevStores, path)
 		})
 	}

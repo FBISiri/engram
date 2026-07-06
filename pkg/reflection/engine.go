@@ -621,7 +621,7 @@ func callHaikuReal(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("haiku request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("haiku returned status %d", resp.StatusCode)
@@ -706,11 +706,11 @@ func writeReflectionDraft(ins ParsedInsight, tags []string, sourceIDs []string) 
 
 	var sb strings.Builder
 	sb.WriteString("# Low-confidence reflection draft\n\n")
-	sb.WriteString(fmt.Sprintf("- created: %s\n", now.Format(time.RFC3339)))
-	sb.WriteString(fmt.Sprintf("- confidence: %.2f\n", ins.Confidence))
-	sb.WriteString(fmt.Sprintf("- importance: %.0f\n", ins.Importance))
-	sb.WriteString(fmt.Sprintf("- tags: %s\n", strings.Join(tags, ", ")))
-	sb.WriteString(fmt.Sprintf("- source_ids: %s\n", strings.Join(sourceIDs, ", ")))
+	fmt.Fprintf(&sb, "- created: %s\n", now.Format(time.RFC3339))
+	fmt.Fprintf(&sb, "- confidence: %.2f\n", ins.Confidence)
+	fmt.Fprintf(&sb, "- importance: %.0f\n", ins.Importance)
+	fmt.Fprintf(&sb, "- tags: %s\n", strings.Join(tags, ", "))
+	fmt.Fprintf(&sb, "- source_ids: %s\n", strings.Join(sourceIDs, ", "))
 	sb.WriteString("\n## Insight\n\n")
 	sb.WriteString(ins.Content)
 	sb.WriteString("\n")
@@ -909,10 +909,10 @@ func buildSingleEventPrompt(in SingleEventInput) string {
 	var sb strings.Builder
 	sb.WriteString("You are the reflection engine for an AI agent named Siri. ")
 	sb.WriteString("A specific event just occurred that warrants an immediate one-line insight.\n\n")
-	sb.WriteString(fmt.Sprintf("Trigger cause: %s\n", in.Cause))
-	sb.WriteString(fmt.Sprintf("Event summary: %s\n", in.Summary))
+	fmt.Fprintf(&sb, "Trigger cause: %s\n", in.Cause)
+	fmt.Fprintf(&sb, "Event summary: %s\n", in.Summary)
 	if len(in.EvidenceIDs) > 0 {
-		sb.WriteString(fmt.Sprintf("Related memory IDs (grounding): %s\n", strings.Join(in.EvidenceIDs, ", ")))
+		fmt.Fprintf(&sb, "Related memory IDs (grounding): %s\n", strings.Join(in.EvidenceIDs, ", "))
 	}
 	sb.WriteString("\nProduce EXACTLY ONE insight in this format (including --- delimiters):\n")
 	sb.WriteString("---\n")

@@ -210,12 +210,6 @@ func readTimestampFile(path string) (time.Time, error) {
 	return t, nil
 }
 
-// dailyCountEntry holds the date and count stored in the daily count file.
-type dailyCountEntry struct {
-	Date  string `json:"date"`
-	Count int    `json:"count"`
-}
-
 // cstLocation is the Asia/Shanghai timezone used for daily count boundaries.
 // Siri operates in CST (+8), so "today" must align with CST midnight, not UTC.
 // Without this, runs at 7am CST (= 23:xx UTC previous day) are attributed to

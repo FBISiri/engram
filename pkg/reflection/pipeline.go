@@ -183,7 +183,7 @@ func generateFocalQuestions(ctx context.Context, batch []memory.Memory, n int) (
 func buildFocalPrompt(batch []memory.Memory, n int) string {
 	var sb strings.Builder
 	sb.WriteString("You are the reflection engine for an AI agent named Siri.\n\n")
-	sb.WriteString(fmt.Sprintf("Below are %d recent memories. Generate exactly %d focal questions ", len(batch), n))
+	fmt.Fprintf(&sb, "Below are %d recent memories. Generate exactly %d focal questions ", len(batch), n)
 	sb.WriteString("that would be most productive for cross-domain reflection and pattern discovery.\n\n")
 	sb.WriteString("Memories:\n")
 
@@ -192,10 +192,10 @@ func buildFocalPrompt(batch []memory.Memory, n int) string {
 		if len(content) > 200 {
 			content = content[:200] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("%d. [%s, importance=%.0f] %s\n", i+1, m.Type, m.Importance, content))
+		fmt.Fprintf(&sb, "%d. [%s, importance=%.0f] %s\n", i+1, m.Type, m.Importance, content)
 	}
 
-	sb.WriteString(fmt.Sprintf("\nRespond with a JSON array of exactly %d question strings. No markdown fences.\n", n))
+	fmt.Fprintf(&sb, "\nRespond with a JSON array of exactly %d question strings. No markdown fences.\n", n)
 	sb.WriteString(`Example: ["What patterns emerge...", "How does X relate to Y...", "What tensions exist..."]`)
 	return sb.String()
 }

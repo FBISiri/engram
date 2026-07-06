@@ -59,7 +59,7 @@ func (w *writeThroughStore) autoFlushLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			w.Flush(context.Background())
+			_ = w.Flush(context.Background())
 		case <-w.stopCh:
 			return
 		}

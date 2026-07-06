@@ -26,7 +26,7 @@ func TestValidUntilFields_Positive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidUntil not RFC3339: %v", err)
 	}
-	diff := parsed.Sub(time.Now())
+	diff := time.Until(parsed)
 	if diff < 29*24*time.Hour || diff > 31*24*time.Hour {
 		t.Errorf("ValidUntil should be ~30d from now, got %v", diff)
 	}
@@ -102,7 +102,7 @@ func TestValidUntilFields_MinAggregation(t *testing.T) {
 func TestRunSpanAttributes_OTel(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	tr := tp.Tracer("test")
 

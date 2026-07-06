@@ -44,7 +44,7 @@ func TestHTTPHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
@@ -67,7 +67,7 @@ func TestHTTPHealth_NoAuthRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200 (no auth needed), got %d", resp.StatusCode)
 	}
@@ -92,7 +92,7 @@ func TestHTTPHealth_Degraded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /health: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("want 503, got %d", resp.StatusCode)
 	}
@@ -118,7 +118,7 @@ func TestHTTPReflectCheck_ReturnsValidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /reflect/check: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
@@ -137,7 +137,7 @@ func TestHTTPReflectCheck_WrongMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /reflect/check: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("want 405, got %d", resp.StatusCode)
 	}
@@ -154,7 +154,7 @@ func TestHTTPReflect_DryRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /reflect: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
@@ -173,7 +173,7 @@ func TestHTTPReflect_WrongMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /reflect: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("want 405, got %d", resp.StatusCode)
 	}
@@ -190,7 +190,7 @@ func TestHTTPAuth_MissingToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /reflect/check: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d", resp.StatusCode)
 	}
@@ -204,7 +204,7 @@ func TestHTTPAuth_ValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}

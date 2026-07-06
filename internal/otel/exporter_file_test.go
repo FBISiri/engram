@@ -19,7 +19,7 @@ func TestFileExporter_WritesJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer exp.Shutdown(context.Background())
+	defer func() { _ = exp.Shutdown(context.Background()) }()
 
 	stubs := tracetest.SpanStubs{
 		{Name: "span-1", SpanKind: trace.SpanKindInternal},
@@ -39,7 +39,7 @@ func TestFileExporter_WritesJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open trace file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var lineCount int
 	scanner := bufio.NewScanner(f)
@@ -74,7 +74,7 @@ func TestFileExporter_FileNaming(t *testing.T) {
 	if err := exp.ExportSpans(context.Background(), stubs.Snapshots()); err != nil {
 		t.Fatal(err)
 	}
-	exp.Shutdown(context.Background())
+	_ = exp.Shutdown(context.Background())
 
 	today := time.Now().Format("2006-01-02")
 	expected := "engram-traces-" + today + ".jsonl"
@@ -94,7 +94,7 @@ func TestFileExporter_EmptyBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer exp.Shutdown(context.Background())
+	defer func() { _ = exp.Shutdown(context.Background()) }()
 
 	if err := exp.ExportSpans(context.Background(), nil); err != nil {
 		t.Fatalf("ExportSpans with nil should not error: %v", err)

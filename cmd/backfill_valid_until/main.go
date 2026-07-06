@@ -90,7 +90,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "connect qdrant: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	res, err := run(context.Background(), store, opts)
 	if err != nil {
