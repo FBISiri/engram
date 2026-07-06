@@ -36,9 +36,9 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.62            # pinned for timing reproducibility
+          version: v2.12.2          # v2 — matches .golangci.yml (version: "2") & go.mod (go1.25)
           args: --timeout=2m        # action has its own internal lint cache
 
       - name: Unit tests (short, no external deps)
