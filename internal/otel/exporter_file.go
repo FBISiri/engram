@@ -68,7 +68,7 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 
 func (w *rotatingWriter) rotate(date string) error {
 	if w.file != nil {
-		w.file.Close()
+		_ = w.file.Close()
 	}
 	path := filepath.Join(w.dir, fmt.Sprintf("engram-traces-%s.jsonl", date))
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)

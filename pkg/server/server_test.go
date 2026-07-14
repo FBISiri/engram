@@ -580,11 +580,11 @@ func TestSearchWithTypeFilter(t *testing.T) {
 	srv, _ := newTestServer()
 
 	// Add memories of different types
-	callTool(srv, "memory_add", map[string]any{
+	_, _ = callTool(srv, "memory_add", map[string]any{
 		"content": "User lives in Shanghai",
 		"type":    "identity",
 	})
-	callTool(srv, "memory_add", map[string]any{
+	_, _ = callTool(srv, "memory_add", map[string]any{
 		"content": "Went to Shanghai for a trip",
 		"type":    "event",
 	})
@@ -600,7 +600,7 @@ func TestSearchWithTypeFilter(t *testing.T) {
 
 	text := extractText(result)
 	var results []map[string]any
-	json.Unmarshal([]byte(text), &results)
+	_ = json.Unmarshal([]byte(text), &results)
 
 	for _, r := range results {
 		if r["type"].(string) != "identity" {
@@ -755,7 +755,7 @@ func TestDeleteNoMatches(t *testing.T) {
 		Status       string `json:"status"`
 		DeletedCount int    `json:"deleted_count"`
 	}
-	json.Unmarshal([]byte(text), &resp)
+	_ = json.Unmarshal([]byte(text), &resp)
 
 	if resp.Status != "no_matches" {
 		t.Errorf("expected status 'no_matches', got %q", resp.Status)
@@ -891,7 +891,7 @@ func TestImportanceClamping(t *testing.T) {
 			Importance float64 `json:"importance"`
 		} `json:"memory"`
 	}
-	json.Unmarshal([]byte(text), &resp)
+	_ = json.Unmarshal([]byte(text), &resp)
 
 	if resp.Memory.Importance != 10 {
 		t.Errorf("expected importance clamped to 10, got %f", resp.Memory.Importance)
@@ -1317,8 +1317,8 @@ func callToolWithCallerType(srv *Server, toolName string, args map[string]any, c
 func TestSearchResult_SourceCollectionPresent(t *testing.T) {
 	srv, _ := newTestServerWithCollection("engram_user")
 
-	callTool(srv, "memory_add", map[string]any{"content": "user identity fixture", "type": "identity"})
-	callTool(srv, "memory_add", map[string]any{"content": "user insight fixture", "type": "insight"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user identity fixture", "type": "identity"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user insight fixture", "type": "insight"})
 
 	result, err := callTool(srv, "memory_search", map[string]any{"query": "user fixture", "limit": float64(5)})
 	if err != nil {
@@ -1361,7 +1361,7 @@ func TestSearchResult_SourceCollectionMatchesCallerType(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.callerType, func(t *testing.T) {
 			srv, _ := newTestServerWithCollection(tc.wantCol)
-			callToolWithCallerType(srv, "memory_add", map[string]any{"content": "fixture for " + tc.callerType, "type": "insight"}, tc.callerType)
+			_, _ = callToolWithCallerType(srv, "memory_add", map[string]any{"content": "fixture for " + tc.callerType, "type": "insight"}, tc.callerType)
 
 			result, err := callToolWithCallerType(srv, "memory_search", map[string]any{"query": "fixture", "limit": float64(1)}, tc.callerType)
 			if err != nil {
@@ -1388,7 +1388,7 @@ func TestSearchCollectionsParam_UnknownReturnsError(t *testing.T) {
 	collection.DefaultRegistry.Init() // ensure baseline collections are registered
 
 	srv, _ := newTestServerWithCollection(collection.CollectionUser)
-	callTool(srv, "memory_add", map[string]any{"content": "some memory", "type": "event"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "some memory", "type": "event"})
 
 	result, err := callTool(srv, "memory_search", map[string]any{
 		"query":       "some",
@@ -1408,7 +1408,7 @@ func TestSearchCollectionsParam_KnownIsAccepted(t *testing.T) {
 	collection.DefaultRegistry.Init()
 
 	srv, _ := newTestServerWithCollection(collection.CollectionUser)
-	callTool(srv, "memory_add", map[string]any{"content": "engram_user fixture", "type": "identity"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "engram_user fixture", "type": "identity"})
 
 	result, err := callTool(srv, "memory_search", map[string]any{
 		"query":       "engram_user fixture",
@@ -1430,7 +1430,7 @@ func TestSearchCollectionsParam_FilterIsolation(t *testing.T) {
 
 	// Write a memory to engram_user server
 	srv, _ := newTestServerWithCollection(collection.CollectionUser)
-	callTool(srv, "memory_add", map[string]any{"content": "user memory fixture", "type": "identity"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user memory fixture", "type": "identity"})
 
 	// Searching with collections=[engram_user] should find the memory
 	result, err := callTool(srv, "memory_search", map[string]any{
@@ -1441,7 +1441,7 @@ func TestSearchCollectionsParam_FilterIsolation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	var hitsUser []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &hitsUser)
+	_ = json.Unmarshal([]byte(extractText(result)), &hitsUser)
 	if len(hitsUser) == 0 {
 		t.Error("expected memory to be found when filtering by its own collection")
 	}
@@ -1455,7 +1455,7 @@ func TestSearchCollectionsParam_FilterIsolation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	var hitsReflection []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &hitsReflection)
+	_ = json.Unmarshal([]byte(extractText(result)), &hitsReflection)
 	if len(hitsReflection) != 0 {
 		t.Errorf("expected no results when filtering by a different collection, got %d", len(hitsReflection))
 	}

@@ -162,8 +162,8 @@ func promptIDForm(id string) string {
 func buildDialecticPrompt(pq PerQuestionEvidence) string {
 	var sb strings.Builder
 	sb.WriteString("You are the dialectic reflection engine for an AI agent named Siri.\n\n")
-	sb.WriteString(fmt.Sprintf("Focal question: %s\n\n", pq.Question))
-	sb.WriteString(fmt.Sprintf("Below are %d evidence memories retrieved for this question. ", len(pq.Evidence)))
+	fmt.Fprintf(&sb, "Focal question: %s\n\n", pq.Question)
+	fmt.Fprintf(&sb, "Below are %d evidence memories retrieved for this question. ", len(pq.Evidence))
 	sb.WriteString("Synthesize a dialectic insight that identifies tensions, contradictions, or nuanced patterns across these memories.\n\n")
 
 	sb.WriteString("Evidence:\n")
@@ -172,7 +172,7 @@ func buildDialecticPrompt(pq PerQuestionEvidence) string {
 		if len(content) > 300 {
 			content = content[:300] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("%d. [id=%s] %s\n", i+1, promptIDForm(m.ID), content))
+		fmt.Fprintf(&sb, "%d. [id=%s] %s\n", i+1, promptIDForm(m.ID), content)
 	}
 
 	sb.WriteString("\nRespond with EXACTLY ONE JSON object (no markdown fences, no extra text):\n")

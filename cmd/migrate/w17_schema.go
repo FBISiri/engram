@@ -57,7 +57,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	if err := store.EnsureCollection(ctx); err != nil {

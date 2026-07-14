@@ -177,7 +177,7 @@ func checkPIDLock(path string) (bool, string) {
 
 	// Stale check: if file older than pidStaleTimeout, auto-remove.
 	if time.Since(info.ModTime()) > pidStaleTimeout {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return true, ""
 	}
 
@@ -188,17 +188,17 @@ func checkPIDLock(path string) (bool, string) {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		os.Remove(path) // corrupt
+		_ = os.Remove(path) // corrupt
 		return true, ""
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return true, ""
 	}
 	// Signal 0 checks existence without killing.
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		os.Remove(path) // process dead
+		_ = os.Remove(path) // process dead
 		return true, ""
 	}
 
@@ -220,7 +220,7 @@ func ReleasePIDLock() {
 	if err != nil {
 		return
 	}
-	os.Remove(filepath.Join(dir, pidFile))
+	_ = os.Remove(filepath.Join(dir, pidFile))
 }
 
 // UpdateRunTimestamp writes the current time to the last-run file.

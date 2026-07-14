@@ -132,7 +132,7 @@ func callHaiku(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("haiku request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("haiku returned status %d", resp.StatusCode)

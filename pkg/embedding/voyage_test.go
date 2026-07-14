@@ -86,7 +86,7 @@ func TestVoyage_EmbedBatch_Success(t *testing.T) {
 			Model: "voyage-3",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -109,7 +109,7 @@ func TestVoyage_EmbedBatch_Success(t *testing.T) {
 func TestVoyage_EmbedBatch_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(voyageError{Detail: "Invalid API key"})
+		_ = json.NewEncoder(w).Encode(voyageError{Detail: "Invalid API key"})
 	}))
 	defer server.Close()
 
@@ -136,7 +136,7 @@ func TestVoyage_Embed_Single(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 

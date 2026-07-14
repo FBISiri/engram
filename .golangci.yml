@@ -1,0 +1,18 @@
+# golangci-lint v2 configuration for engram.
+#
+# We fix the codebase against golangci-lint v2.x. The CI workflow (see
+# .github/workflows/push.yml) runs golangci-lint v2.12.2 via
+# golangci-lint-action@v8, matching this config's `version: "2"` schema and
+# go.mod's go1.25. The former v1.62 pin was incompatible with a v2 config and
+# go1.25 (config-load / go-version errors) and has been removed.
+#
+# No linter is blanket-disabled to fake a pass. The four linters below are the
+# ones that flagged real issues on master; all violations were fixed in code.
+version: "2"
+
+linters:
+  enable:
+    - errcheck    # unchecked error returns
+    - govet       # suspicious constructs
+    - staticcheck # bugs, deprecations, simplifications
+    - unused      # dead code

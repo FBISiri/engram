@@ -486,20 +486,20 @@ func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory
 
 	// Build compact event summaries for the prompt.
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(
+	fmt.Fprintf(&sb,
 		"You are a memory consolidation AI. Below are %d related memory events tagged %q, "+
 			"recorded over the past 7 days. Synthesize them into a single concise insight (2-4 sentences). "+
 			"Focus on patterns, trends, or key conclusions — not just summarizing individual events. "+
 			"Write in English, third-person style (e.g. \"Siri has been...\", \"Frank tends to...\").\n\n",
 		len(group), tag,
-	))
+	)
 	sb.WriteString("Events:\n")
 	for i, m := range group {
 		content := m.Content
 		if len(content) > 200 {
 			content = content[:200] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, time.Unix(int64(m.CreatedAt), 0).Format("2006-01-02"), content))
+		fmt.Fprintf(&sb, "%d. [%s] %s\n", i+1, time.Unix(int64(m.CreatedAt), 0).Format("2006-01-02"), content)
 	}
 	sb.WriteString("\nInsight:")
 
@@ -768,7 +768,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 
 		// Build Haiku prompt.
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb,
 			"You are a skill improvement analyst for an AI agent named Siri. "+
 				"Below is the current SKILL.md for '%s' and a list of recent insights/directives.\n\n"+
 				"Task: generate a structured diff proposal for this skill file.\n"+
@@ -779,13 +779,13 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 				"**Reasoning:** <1-2 sentences>\n\n"+
 				"Only propose changes clearly supported by the insights. If no changes are needed, write \"No changes needed.\"\n\n",
 			c.name, c.name,
-		))
+		)
 
 		skillMDSnippet := c.skillMD
 		if len(skillMDSnippet) > 1500 {
 			skillMDSnippet = skillMDSnippet[:1500] + "\n...[truncated]"
 		}
-		sb.WriteString(fmt.Sprintf("### Current SKILL.md:\n```\n%s\n```\n\n", skillMDSnippet))
+		fmt.Fprintf(&sb, "### Current SKILL.md:\n```\n%s\n```\n\n", skillMDSnippet)
 
 		sb.WriteString("### Recent Insights & Directives:\n")
 		limit := 8
@@ -797,7 +797,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 			if len(content) > 200 {
 				content = content[:200] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, m.Type, content))
+			fmt.Fprintf(&sb, "%d. [%s] %s\n", i+1, m.Type, content)
 		}
 		sb.WriteString("\nDiff proposal:")
 

@@ -26,7 +26,7 @@ func NewBoltCommitLog(path string) (CommitLog, error) {
 		_, err := tx.CreateBucketIfNotExists(bucketName)
 		return err
 	}); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("create bucket: %w", err)
 	}
 	return &boltCommitLog{db: db}, nil

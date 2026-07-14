@@ -52,7 +52,7 @@ func buildPrompt(memories []memory.Memory) string {
 func buildPromptAt(memories []memory.Memory, now time.Time) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf(
+	fmt.Fprintf(&sb, 
 		"You are a reflection engine for an AI agent named Siri. "+
 			"Below are %d recent memories that have not yet been reflected upon.\n\n"+
 			"Your task: synthesize these memories into 1-3 high-level insights about "+
@@ -71,7 +71,7 @@ func buildPromptAt(memories []memory.Memory, now time.Time) string {
 			"If no meaningful pattern can be identified, output a single insight with IMPORTANCE: 3.\n\n"+
 			"Recent memories:\n",
 		len(memories),
-	))
+	)
 
 	for i, m := range memories {
 		content := m.Content
@@ -83,10 +83,10 @@ func buildPromptAt(memories []memory.Memory, now time.Time) string {
 			idShort = idShort[:8]
 		}
 		age := humanAge(m.CreatedAt, now)
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb, 
 			"%d. [id=%s type=%s importance=%.0f age=%s] %s\n",
 			i+1, idShort, m.Type, m.Importance, age, content,
-		))
+		)
 	}
 
 	sb.WriteString("\nGenerate insights now:\n")

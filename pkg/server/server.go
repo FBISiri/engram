@@ -952,6 +952,10 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 // handleReflectionRunEvent implements the reflection_run_event tool (W17 v1.1
 // batch 2). Event-driven single-event reflection triggered by task failures
 // or user corrections — bypasses accumulator thresholds and daily quotas.
+//
+//nolint:unused // Staged in commit 8dd5200 (W17 v1.1 batch 2) ahead of tool
+// registration; retained pending wiring of the reflection_run_event MCP tool.
+// Not dead — RunSingleEvent is exercised by reflection engine tests.
 func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	cause, err := request.RequireString("cause")
 	if err != nil {

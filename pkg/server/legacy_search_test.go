@@ -24,14 +24,14 @@ func TestLegacySearch_DefaultsToUserViaCtx(t *testing.T) {
 	// Seed at least one memory so /search returns something to inspect.
 	createBody := `{"content":"phase3 legacy test seed","type":"event","importance":5}`
 	createResp := doJSON(t, ts.URL, "POST", "/memories", "user", createBody)
-	createResp.Body.Close()
+	_ = createResp.Body.Close()
 	if createResp.StatusCode != http.StatusCreated {
 		t.Fatalf("seed: want 201, got %d", createResp.StatusCode)
 	}
 
 	body := `{"query":"phase3 legacy","limit":5}`
 	resp := doJSON(t, ts.URL, "POST", "/memories/search", "user", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("want 200, got %d body=%s", resp.StatusCode, string(raw))
@@ -56,7 +56,7 @@ func TestLegacySearch_ExplicitCollectionOverridesCtx(t *testing.T) {
 	// Seed something so search returns a hit.
 	createResp := doJSON(t, ts.URL, "POST", "/memories", "user",
 		`{"content":"phase3 explicit override seed","type":"event","importance":5}`)
-	createResp.Body.Close()
+	_ = createResp.Body.Close()
 
 	// Caller header says user, body explicit says engram_reflection.
 	// BMO Q3: explicit wins. (No 403 here — legacy /memories/search is
@@ -65,7 +65,7 @@ func TestLegacySearch_ExplicitCollectionOverridesCtx(t *testing.T) {
 	// at the Store layer.)
 	body := `{"query":"phase3 explicit","collection":"engram_reflection","limit":3}`
 	resp := doJSON(t, ts.URL, "POST", "/memories/search", "user", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("want 200, got %d body=%s", resp.StatusCode, string(raw))
@@ -88,7 +88,7 @@ func TestLegacySearch_UnknownCollection400(t *testing.T) {
 
 	body := `{"query":"x","collection":"engram_does_not_exist"}`
 	resp := doJSON(t, ts.URL, "POST", "/memories/search", "user", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", resp.StatusCode)
 	}
@@ -121,7 +121,7 @@ func TestLegacySearch_NeverRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		t.Fatalf("legacy search must not 30x (BMO Q3); got %d", resp.StatusCode)
 	}
@@ -135,11 +135,11 @@ func TestLegacySearch_AgentSelfCtxResolution(t *testing.T) {
 
 	createResp := doJSON(t, ts.URL, "POST", "/memories", "agent-self",
 		`{"content":"phase3 agent-self seed","type":"event","importance":5}`)
-	createResp.Body.Close()
+	_ = createResp.Body.Close()
 
 	body := `{"query":"phase3 agent-self","limit":3}`
 	resp := doJSON(t, ts.URL, "POST", "/memories/search", "agent-self", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}

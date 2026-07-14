@@ -104,7 +104,7 @@ func TestSearch_ThreadTagFilter(t *testing.T) {
 	}
 
 	var results []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &results)
+	_ = json.Unmarshal([]byte(extractText(result)), &results)
 
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result filtered by thread tag, got %d", len(results))
@@ -132,7 +132,7 @@ func TestSearch_TimeRangeFilter(t *testing.T) {
 	}
 
 	var results []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &results)
+	_ = json.Unmarshal([]byte(extractText(result)), &results)
 
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result in [150,250] window, got %d: %s",
@@ -153,7 +153,7 @@ func TestSearch_TimeStartOnly(t *testing.T) {
 		"time_start": float64(3000),
 	})
 	var results []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &results)
+	_ = json.Unmarshal([]byte(extractText(result)), &results)
 	if len(results) != 1 || results[0]["content"] != "new log" {
 		t.Errorf("expected only 'new log' with time_start=3000, got %v", results)
 	}
@@ -177,7 +177,7 @@ func TestSearch_CombinedTypeAndTag(t *testing.T) {
 		"tags":  []interface{}{"frank"},
 	})
 	var results []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &results)
+	_ = json.Unmarshal([]byte(extractText(result)), &results)
 
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result (type=identity AND tag=frank), got %d", len(results))
@@ -243,7 +243,7 @@ func TestSearch_LimitClampUpper(t *testing.T) {
 	}
 
 	var results []map[string]any
-	json.Unmarshal([]byte(extractText(result)), &results)
+	_ = json.Unmarshal([]byte(extractText(result)), &results)
 	if len(results) > 100 {
 		t.Errorf("limit not clamped: got %d results", len(results))
 	}

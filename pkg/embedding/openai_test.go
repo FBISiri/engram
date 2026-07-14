@@ -88,7 +88,7 @@ func TestOpenAI_EmbedBatch_Success(t *testing.T) {
 			Model: "text-embedding-3-small",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -129,7 +129,7 @@ func TestOpenAI_EmbedBatch_OutOfOrder(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -149,7 +149,7 @@ func TestOpenAI_EmbedBatch_OutOfOrder(t *testing.T) {
 func TestOpenAI_EmbedBatch_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(embeddingError{
+		_ = json.NewEncoder(w).Encode(embeddingError{
 			Error: struct {
 				Message string `json:"message"`
 				Type    string `json:"type"`
@@ -186,7 +186,7 @@ func TestOpenAI_EmbedBatch_MismatchCount(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -210,7 +210,7 @@ func TestOpenAI_Embed_Single(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -240,7 +240,7 @@ func TestOpenAI_EmbedBatch_InvalidIndex(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 

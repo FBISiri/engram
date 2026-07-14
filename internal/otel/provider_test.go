@@ -16,7 +16,7 @@ func TestNewTracerProvider_Disabled(t *testing.T) {
 	}
 	if tp != nil {
 		t.Error("expected nil TracerProvider when disabled")
-		tp.Shutdown(context.Background())
+		_ = tp.Shutdown(context.Background())
 	}
 
 	_, isNoop := otel.GetTracerProvider().(noop.TracerProvider)
@@ -33,7 +33,7 @@ func TestNewTracerProvider_ExporterNone(t *testing.T) {
 	}
 	if tp != nil {
 		t.Error("expected nil TracerProvider for exporter=none")
-		tp.Shutdown(context.Background())
+		_ = tp.Shutdown(context.Background())
 	}
 
 	_, isNoop := otel.GetTracerProvider().(noop.TracerProvider)
@@ -58,7 +58,7 @@ func TestNewTracerProvider_File(t *testing.T) {
 	if tp == nil {
 		t.Fatal("expected non-nil TracerProvider for file exporter")
 	}
-	defer tp.Shutdown(context.Background())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	_, isNoop := otel.GetTracerProvider().(noop.TracerProvider)
 	if isNoop {
