@@ -17,7 +17,7 @@ name: pr-full-ci
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
     types: [ opened, synchronize, reopened ]
 
 concurrency:
