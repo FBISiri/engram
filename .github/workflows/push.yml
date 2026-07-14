@@ -36,9 +36,9 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9   # v9 supports golangci-lint v2.x (v6 only supports v1.x)
         with:
-          version: v2.12.2          # v2 — matches .golangci.yml (version: "2") & go.mod (go1.25)
+          version: v2.12.2          # latest stable; built with Go 1.24+, supports go 1.25 modules
           args: --timeout=2m        # action has its own internal lint cache
 
       - name: Unit tests (short, no external deps)
