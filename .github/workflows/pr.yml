@@ -9,15 +9,11 @@ name: pr-full-ci
 #   job 3 (sequential, needs 1+2): docker build smoke-test (no push)
 #
 # ⚠️ SECRETS REQUIRED — must be provisioned by Siri/BMO before enabling as required check:
-#   ENGRAM_OPENAI_API_KEY   — OpenAI embeddings (text-embedding-3-small, dim 1536)
+#   ENGRAM_VOYAGE_API_KEY   — Voyage embeddings (voyage-3.5, dim 1024)
 #                             pigo CANNOT add this; must be set by Siri/BMO in
 #                             GitHub → Settings → Secrets and variables → Actions
 #   ENGRAM_API_KEY          — bearer token for engram server auth (harness uses this)
 #                             harness has a hardcoded default fallback, but CI should set its own
-#
-# NOTE: eval/harness/harness.py currently defaults to Voyage embedder.
-#   We override to OpenAI via env vars below (deterministic, 1536-dim gate).
-#   ENGRAM_VOYAGE_API_KEY is NOT needed when ENGRAM_EMBEDDER_PROVIDER=openai.
 
 on:
   pull_request:
@@ -49,12 +45,11 @@ jobs:
       # Engram server: connect to service-container Qdrant (no auth needed)
       ENGRAM_QDRANT_URL: localhost:6334
       QDRANT_URL: http://localhost:6333       # harness.py uses this form
-      # Embedder: standardized on OpenAI for determinism
-      ENGRAM_OPENAI_API_KEY: ${{ secrets.ENGRAM_OPENAI_API_KEY }}
-      ENGRAM_OPENAI_BASE_URL: https://api.openai.com/v1
-      ENGRAM_EMBEDDER_PROVIDER: openai
-      ENGRAM_EMBEDDING_MODEL: text-embedding-3-small
-      ENGRAM_EMBEDDING_DIMENSION: "1536"
+      # Embedder: Voyage (matches prod)
+      ENGRAM_VOYAGE_API_KEY: ${{ secrets.ENGRAM_VOYAGE_API_KEY }}
+      ENGRAM_EMBEDDER_PROVIDER: voyage
+      ENGRAM_EMBEDDING_MODEL: voyage-3.5
+      ENGRAM_EMBEDDING_DIMENSION: "1024"
       # Auth: set server + integration client to same token
       ENGRAM_API_KEY: ${{ secrets.ENGRAM_API_KEY }}
 
@@ -87,7 +82,7 @@ jobs:
       - name: Integration tests
         run: ./integration_test.sh
         # integration_test.sh spins up the binary via coproc, runs MCP-over-stdio tests
-        # Hard-fails (exit 1) if ENGRAM_OPENAI_API_KEY is not set
+        # Hard-fails (exit 1) if ENGRAM_VOYAGE_API_KEY is not set
 
   # ── Job 2: Eval gate 26/26 ───────────────────────────────────────────────────
   eval-gate:
@@ -105,12 +100,11 @@ jobs:
     env:
       ENGRAM_QDRANT_URL: localhost:6334
       QDRANT_URL: http://localhost:6333
-      # ⚠️ Override harness default (Voyage) → OpenAI for deterministic gate
-      ENGRAM_OPENAI_API_KEY: ${{ secrets.ENGRAM_OPENAI_API_KEY }}
-      ENGRAM_OPENAI_BASE_URL: https://api.openai.com/v1
-      ENGRAM_EMBEDDER_PROVIDER: openai
-      ENGRAM_EMBEDDING_MODEL: text-embedding-3-small
-      ENGRAM_EMBEDDING_DIMENSION: "1536"
+      # Embedder: Voyage (matches prod)
+      ENGRAM_VOYAGE_API_KEY: ${{ secrets.ENGRAM_VOYAGE_API_KEY }}
+      ENGRAM_EMBEDDER_PROVIDER: voyage
+      ENGRAM_EMBEDDING_MODEL: voyage-3.5
+      ENGRAM_EMBEDDING_DIMENSION: "1024"
       ENGRAM_API_KEY: ${{ secrets.ENGRAM_API_KEY }}
       ENGRAM_URL: http://localhost:8080
 
@@ -212,7 +206,7 @@ jobs:
           cache-to: type=gha,mode=max
 
 # ── Branch protection note (configured by Siri/BMO, not YAML) ─────────────────
-# After ENGRAM_OPENAI_API_KEY is confirmed provisioned (§4.5 verification):
+# After ENGRAM_VOYAGE_API_KEY is confirmed provisioned (§4.5 verification):
 #   Settings → Branches → main → Require status checks:
 #     ✅ "Integration Tests (race + Qdrant)"
 #     ✅ "Eval Gate (26/26)"
@@ -221,5 +215,5 @@ jobs:
 #   ✅ Include administrators
 #   ❌ Allow force pushes
 #
-# ⚠️ DO NOT make checks required before ENGRAM_OPENAI_API_KEY is provisioned —
+# ⚠️ DO NOT make checks required before ENGRAM_VOYAGE_API_KEY is provisioned —
 #    otherwise every PR blocks permanently (integration test exits 1 without key).
