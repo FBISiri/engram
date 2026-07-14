@@ -347,3 +347,379 @@ export ENGRAM_EMBEDDING_DIMENSION=1024
 **MCP 工具与 REST API** → [`docs/api.md`](docs/api.md)（所有参数、错误码、request/response 示例）
 
 **Example configs** → [`examples/`](examples/)（目前 3 个：单 agent 个人记忆、长周期反思密集、多 agent 共享记忆）
+
+---
+
+## 10. Quick Start 详解
+
+> §5 给你 5 分钟的最短路径，这里给你「跑通了之后下一步做什么」。
+
+### 10.1 安装方式
+
+**方式 A — Go install（最快，适合直接用）**
+
+```bash
+go install github.com/FBISiri/engram/cmd/engram@latest
+# 二进制安装到 $GOPATH/bin/engram 或 $GOBIN/engram
+```
+
+**方式 B — Docker Compose（推荐生产，Qdrant + Engram 一起起）**
+
+```bash
+git clone https://github.com/FBISiri/engram.git
+cd engram
+cp .env.example .env  # 填入 API key
+docker-compose up -d
+```
+
+**方式 C — 本地编译（开发 / 修改源码）**
+
+```bash
+git clone https://github.com/FBISiri/engram.git
+cd engram
+go build -o engram ./cmd/engram/
+./engram serve
+```
+
+### 10.2 两种接入方式
+
+**A. MCP client（推荐，适合 LLM agent）**
+
+在 Claude Desktop / Army of the Agent 的 MCP 配置里加：
+
+```json
+{
+  "mcpServers": {
+    "engram": {
+      "command": "/path/to/engram",
+      "args": ["serve"],
+      "env": {
+        "ENGRAM_QDRANT_URL": "localhost:6334",
+        "ENGRAM_OPENAI_API_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+
+**B. HTTP REST API（适合脚本 / 调试 / 多语言 client）**
+
+```bash
+export ENGRAM_TRANSPORT=http
+export ENGRAM_HTTP_PORT=8080
+export ENGRAM_API_KEY=my-secret-key
+./engram serve
+
+# 健康检查（不需要 Bearer）
+curl http://localhost:8080/health
+
+# 搜索（需要 Bearer）
+curl -H "Authorization: Bearer my-secret-key" \
+     -H "Content-Type: application/json" \
+     -d '{"query": "Frank cycling preferences", "limit": 3}' \
+     http://localhost:8080/memories/search
+```
+
+### 10.3 验证安装是否正确
+
+```bash
+# 端到端集成测试（需要设好 API key）
+ENGRAM_OPENAI_API_KEY=sk-... ./integration_test.sh
+```
+
+覆盖所有 MCP 工具 + 去重检测，26 条全过即安装正确。若只想快速 smoke test：
+
+```bash
+./engram serve &
+# 在另一个终端用 MCP client 跑：
+memory_add(content="test", type="event", importance=3)
+memory_search(query="test", limit=1)
+# 有 score 返回即正常
+```
+
+### 10.4 数据迁移（从 chat2mem 迁入）
+
+早期 chat2mem 数据不需要强制迁移，Engram 面向新写入设计。若要迁移历史数据，用 `trajectories/` 目录下的批量导入脚本（逐条 `memory_add`，Engram 会自动去重）。
+
+---
+
+## 11. 配置速查
+
+> 完整版见 [`docs/configuration.md`](docs/configuration.md)。这里是高频场景的最小配置组合。
+
+### 11.1 最小启动（OpenAI embedder）
+
+```bash
+export ENGRAM_QDRANT_URL=localhost:6334        # Qdrant gRPC（默认值，按需修改）
+export ENGRAM_OPENAI_API_KEY=sk-...            # 必填
+./engram serve
+```
+
+### 11.2 切换 Voyage AI embedder（当前生产配置）
+
+```bash
+export ENGRAM_EMBEDDER_PROVIDER=voyage
+export ENGRAM_VOYAGE_API_KEY=pa-...
+export ENGRAM_EMBEDDING_MODEL=voyage-3.5
+export ENGRAM_EMBEDDING_DIMENSION=1024
+./engram serve
+```
+
+> ⚠️ 更换 embedding 模型会导致维度不匹配。已有 Qdrant collection 必须删除并重建（`DELETE /collections/{name}` + 重新写入）。
+
+### 11.3 完整配置项一览
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| **存储** | | |
+| `ENGRAM_QDRANT_URL` | `localhost:6334` | Qdrant gRPC 地址（用 6334，不是 6333） |
+| `ENGRAM_QDRANT_API_KEY` | 空 | Qdrant API Key（无认证时留空） |
+| `ENGRAM_QDRANT_USE_TLS` | `false` | 连 Qdrant Cloud 时设 `true` |
+| **Embedding** | | |
+| `ENGRAM_EMBEDDER_PROVIDER` | `openai` | `openai` / `voyage` |
+| `ENGRAM_EMBEDDING_MODEL` | `text-embedding-3-small` | 模型名，需与 provider 匹配 |
+| `ENGRAM_EMBEDDING_DIMENSION` | `1536` | 向量维度，需与模型匹配 |
+| `ENGRAM_OPENAI_API_KEY` | 空 | provider=openai 时必填 |
+| `ENGRAM_OPENAI_BASE_URL` | `https://api.openai.com/v1` | 可替换为 OpenRouter / Azure |
+| `ENGRAM_VOYAGE_API_KEY` | 空 | provider=voyage 时必填 |
+| **检索评分** | | |
+| `ENGRAM_WEIGHT_RELEVANCE` | `1.0` | 相关性权重 |
+| `ENGRAM_WEIGHT_RECENCY` | `0.5` | 时效性权重 |
+| `ENGRAM_WEIGHT_IMPORTANCE` | `0.3` | 重要性权重 |
+| `ENGRAM_MMR_LAMBDA` | `0.5` | MMR 多样性因子（0=最多样，1=最相关） |
+| **去重** | | |
+| `ENGRAM_DEDUP_THRESHOLD` | `0.92` | 服务端自动去重阈值（推荐 0.90–0.95） |
+| **Server / Transport** | | |
+| `ENGRAM_TRANSPORT` | `stdio` | `stdio` / `http` / `both` |
+| `ENGRAM_HTTP_PORT` | `8080` | HTTP 端口（transport=http/both 时生效） |
+| `ENGRAM_API_KEY` | 空 | HTTP Bearer 认证 Key（空则关闭认证） |
+| **Reflection Engine** | | |
+| `ENGRAM_REFLECTION_ENABLED` | `false` | 是否开启自动反思触发 |
+| `ENGRAM_REFLECTION_TRIGGER` | `count` | `count` / `cron` / `manual` |
+| `ENGRAM_REFLECTION_COUNT` | `10` | 触发反思所需的未反思记忆数（count 模式） |
+| `ENGRAM_REFLECTION_MODEL` | `claude-sonnet-4-20250514` | 反思使用的 LLM 模型 |
+| **OTel 可观测性** | | |
+| `ENGRAM_OTEL_ENABLED` | `true` | 是否开启 OpenTelemetry tracing |
+| `ENGRAM_OTEL_EXPORTER` | `file` | `file` / `stdout` / `none` |
+| `ENGRAM_OTEL_FILE_DIR` | `/tmp/siri-state/engram-traces` | trace JSONL 文件目录 |
+| `ENGRAM_OTEL_SAMPLE_RATIO` | `1.0` | 采样比例（0.0–1.0） |
+
+### 11.4 场景配置示例
+
+**纯开发 / 调试**（禁用 tracing，轻量）：
+```bash
+export ENGRAM_OPENAI_API_KEY=sk-...
+export ENGRAM_TRANSPORT=both
+export ENGRAM_HTTP_PORT=8080
+export ENGRAM_OTEL_ENABLED=false
+./engram serve
+```
+
+**多样性优先的检索**（降低 recency 权重 + 加强 MMR 多样性）：
+```bash
+export ENGRAM_WEIGHT_RECENCY=0.1
+export ENGRAM_MMR_LAMBDA=0.3
+```
+
+**开启自动反思**：
+```bash
+export ENGRAM_REFLECTION_ENABLED=true
+export ENGRAM_REFLECTION_TRIGGER=count
+export ENGRAM_REFLECTION_COUNT=15   # 累积 15 条未反思时触发
+```
+
+---
+
+## 12. API 参考
+
+> 完整参数 + 错误码 + request/response 示例见 [`docs/api.md`](docs/api.md)。这里是高频工具的速查。
+
+### 12.1 MCP 工具（stdio transport）
+
+Siri / BMO 通过 MCP stdio 与 Engram 交互，工具名即函数名。
+
+#### `memory_add` — 写入记忆
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `content` | string | ✅ | 记忆内容文本（建议英文，跨 session 检索更稳） |
+| `type` | string | ✅ | `identity` / `event` / `insight` / `directive` |
+| `importance` | number | — | 1–10，默认 5。设准比设高更重要 |
+| `tags` | string[] | — | 分类标签，如 `["frank", "preference", "thread:xxx"]` |
+| `source` | string | — | `user` / `agent` / `system`，默认 `agent` |
+| `valid_until` | number | — | 过期 Unix timestamp（不填则 TTL 矩阵自动算） |
+
+```python
+memory_add(
+  content="Frank prefers concise commit messages, imperative mood, no emoji.",
+  type="identity",
+  importance=8,
+  tags=["frank", "preference"]
+)
+```
+
+服务端内置去重（≥0.92 相似度拒写）。写前建议先 `memory_search` 做语义近似检查（见 §5b）。
+
+#### `memory_search` — 语义检索
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | ✅ | 检索问题（自然语言） |
+| `limit` | number | — | 返回条数，默认 5，最大 100 |
+| `types` | string[] | — | 按类型过滤：`["identity", "directive"]` |
+| `tags` | string[] | — | 按标签过滤（OR 逻辑，任一匹配即包含） |
+| `time_start` | number | — | 过滤 created_at ≥ 此 Unix timestamp |
+| `time_end` | number | — | 过滤 created_at ≤ 此 Unix timestamp |
+| `collections` | string[] | — | 指定检索的 collection（默认 fan-out 全部） |
+
+```python
+memory_search(
+  query="how does Frank like commit messages",
+  limit=3,
+  types=["identity", "directive"],
+  tags=["frank"]
+)
+```
+
+返回的 `score` 是三因子融合分（`1.0×relevance + 0.5×recency + 0.3×importance`），不是裸的 cosine 相似度。
+
+#### `memory_update` — 语义定位 + 替换
+
+```python
+memory_update(
+  old_content="Frank prefers concise commit messages",  # 语义搜索定位旧记忆
+  new_content="Frank prefers concise commit messages (<72 chars), imperative mood, no emoji, no period at end.",
+  importance=8,
+  similarity_threshold=0.92  # 必须 ≥ 0.85（安全约束）
+)
+```
+
+适用场景：同一事实有了新版本，不是增量补充，而是「这个旧记忆换成这个新记忆」。
+
+#### `memory_delete` — 删除
+
+```python
+memory_delete(
+  query="Frank's old email address",
+  similarity_threshold=0.85,  # limit>1 时要求 ≥ 0.85
+  limit=1
+)
+```
+
+> ⚠️ `identity` 和 `directive` 类型有删除保护，误删会 error。确认后需加 `force=true`（见 `docs/api.md`）。
+
+#### `reflection_check` — 检查反思触发条件
+
+```python
+reflection_check()
+# 返回：{triggered: bool, accumulated_importance: float, unreflected_count: int, skip_reason?: string}
+```
+
+#### `reflection_run` — 手动触发反思
+
+```python
+reflection_run(dry_run=False)
+# 返回：{insights_created: int, sources_marked: int, errors: string[]}
+```
+
+节流约束：最小间隔 2h，每日最多 3 次，累计重要度 ≥ 50 才触发（可配置）。
+
+### 12.2 REST API（HTTP transport）
+
+> 仅在 `ENGRAM_TRANSPORT=http` 或 `both` 时可用。全部端点需 `Authorization: Bearer <ENGRAM_API_KEY>`（`/health` 除外）。
+
+#### 健康检查
+
+```
+GET /health
+```
+
+深度 liveness 检查（ping Qdrant）。无需认证，适合 Kubernetes probe。
+
+```json
+{
+  "status": "ok",
+  "qdrant": "connected",
+  "collection": "engram",
+  "points_count": 1234,
+  "version": "v0.2.0"
+}
+```
+
+#### 记忆 CRUD
+
+| Method | 路径 | 说明 |
+|--------|------|------|
+| `POST` | `/memories` | 创建记忆（等价 `memory_add`） |
+| `GET` | `/memories/{id}` | 按 ID 读取单条记忆 |
+| `PATCH` | `/memories/{id}` | 部分更新（content / importance / tags） |
+| `PUT` | `/memories/{id}` | 全量替换 |
+| `DELETE` | `/memories/{id}` | 删除单条记忆（按 ID） |
+| `POST` | `/memories/search` | 语义检索（等价 `memory_search`） |
+| `POST` | `/memories/cross-search` | 跨 collection 检索并 merge |
+
+**POST /memories 示例**：
+
+```bash
+curl -X POST http://localhost:8080/memories \
+  -H "Authorization: Bearer my-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Frank prefers road cycling before 8am.",
+    "type": "identity",
+    "importance": 7,
+    "tags": ["frank", "cycling"]
+  }'
+```
+
+**POST /memories/search 示例**：
+
+```bash
+curl -X POST http://localhost:8080/memories/search \
+  -H "Authorization: Bearer my-key" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Frank cycling habits", "limit": 5}'
+```
+
+#### Collection 管理
+
+| Method | 路径 | 说明 |
+|--------|------|------|
+| `POST` | `/collections` | 创建新 collection |
+| `GET` | `/collections` | 列出所有 collection |
+
+#### Reflection
+
+| Method | 路径 | 说明 |
+|--------|------|------|
+| `POST` | `/reflect` | 触发一轮反思（body: `{"dry_run": true}` 可试跑） |
+| `GET` | `/reflect/check` | 查看是否满足触发条件 |
+
+#### TTL 管理
+
+| Method | 路径 | 说明 |
+|--------|------|------|
+| `GET` | `/memories/expiry-candidates` | 列出即将到期的记忆 |
+| `DELETE` | `/memories/expired` | 清除已过期记忆 |
+
+#### Metrics
+
+```
+GET /metrics
+```
+
+返回 Prometheus 格式的 metrics，包含操作计数、latency histogram、collection size 等（见 §6 OTel 设计）。
+
+### 12.3 错误码
+
+| HTTP 状态 | 含义 |
+|-----------|------|
+| `200` | 成功 |
+| `400` | 请求参数错误（缺字段 / 类型不匹配） |
+| `401` | 未认证（Bearer token 缺失或错误） |
+| `404` | 记忆 ID 不存在 |
+| `409` | 去重拒绝（MCP tool 返回 `dedup_skipped: true`） |
+| `429` | Reflection Engine 节流（未到最小间隔） |
+| `500` | 内部错误（Qdrant 连接失败 / embedding 报错） |
+
+完整错误码 + 错误响应体格式见 [`docs/api.md`](docs/api.md)。
