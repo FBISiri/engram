@@ -346,7 +346,7 @@ export ENGRAM_EMBEDDING_DIMENSION=1024
 
 **MCP 工具与 REST API** → [`docs/api.md`](docs/api.md)（所有参数、错误码、request/response 示例）
 
-**Example configs** → [`examples/`](examples/)（目前 3 个：单 agent 个人记忆、长周期反思密集、多 agent 共享记忆）
+**Example configs** → [`examples/`](examples/)（目前 6 个：单 agent 个人记忆、长周期反思密集、多 agent 共享记忆、Claude Code MCP 集成、聊天机器人会话记忆、Qdrant Cloud 生产部署）
 
 ---
 
