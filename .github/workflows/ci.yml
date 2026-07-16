@@ -1,0 +1,151 @@
+name: ci
+
+# Phase 1 base CI (cicd-design.md). Independent foundation pipeline that runs on
+# every push and pull_request. Three jobs:
+#   1. test  — full unit-test suite (go test ./...)
+#   2. smoke — build the binary, boot the HTTP server against a Qdrant service
+#              container, and poll GET /health until it returns 200
+#   3. lint  — golangci-lint v2.12.2 via golangci-lint-action@v8 (.golangci.yml v2)
+#
+# This complements (does not replace) push.yml (fast per-push tier) and pr.yml
+# (branch-protection full CI). It is deliberately self-contained.
+#
+# ⚠️ Secrets: NONE required. The smoke test needs Qdrant (server boot calls
+#    EnsureCollection and GET /health pings store.Stats), but it does NOT need a
+#    Voyage/OpenAI key: the embedder is constructed lazily (NewVoyage makes no
+#    network call) and /health's 200 path never invokes it — the reflection probe
+#    inside /health is best-effort and its error is ignored. See conclusion below.
+
+on:
+  push:
+    branches-ignore: []       # all branches
+  pull_request:
+    branches: [ master ]
+    types: [ opened, synchronize, reopened ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true    # cancel superseded runs on the same ref
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Job 1: Full unit tests ────────────────────────────────────────────────
+  test:
+    name: Unit Tests (go test ./...)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod   # exact version from go.mod (go 1.25)
+          cache: true               # module + build cache keyed on go.sum
+
+      - name: go test ./...
+        run: go test -count=1 -timeout 8m ./...
+        # Full suite: every _test.go uses fake/mock stores, so no external
+        # services (Qdrant/embedder) are required here.
+
+  # ── Job 2: Embedding smoke test (server boot + /health) ───────────────────
+  smoke:
+    name: Smoke (server boot + /health)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333   # REST (used by the readiness probe below)
+          - 6334:6334   # gRPC (used by engram via ENGRAM_QDRANT_URL)
+
+    env:
+      # Server boot requires a reachable Qdrant (EnsureCollection on 3 collections).
+      ENGRAM_QDRANT_URL: localhost:6334
+      # The CLI does NOT parse flags — transport + port come from env only.
+      # Default transport is "stdio" (pkg/config), which never binds a port;
+      # force "http" so the server listens on ENGRAM_HTTP_PORT and exposes /health.
+      ENGRAM_TRANSPORT: http
+      ENGRAM_HTTP_PORT: "8080"
+      # No ENGRAM_VOYAGE_API_KEY on purpose: /health returns 200 from a Qdrant
+      # Stats() ping and never calls the embedder. If a future health check makes
+      # /health depend on the embedder, add:
+      #   ENGRAM_VOYAGE_API_KEY: ${{ secrets.ENGRAM_VOYAGE_API_KEY }}  # already in repo secrets
+      #   ENGRAM_EMBEDDER_PROVIDER: voyage
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Wait for Qdrant to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:6333/healthz > /dev/null 2>&1; then
+              echo "✅ Qdrant ready after ${i}s"
+              exit 0
+            fi
+            echo "Waiting for Qdrant... (${i}s)"
+            sleep 1
+          done
+          echo "❌ Qdrant did not become ready in 30s"
+          exit 1
+
+      - name: Build engram binary
+        run: make build
+
+      - name: Start engram server (background)
+        run: |
+          # No --port flag exists; ENGRAM_HTTP_PORT (env: block) drives the bind.
+          ./engram serve &
+          echo $! > engram.pid
+
+      - name: Ping /health until 200 (or fail)
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "✅ /health returned 200 after ${i}s"
+              curl -s http://localhost:8080/health
+              exit 0
+            fi
+            echo "Waiting for /health (got HTTP ${code})... (${i}s)"
+            sleep 1
+          done
+          echo "❌ /health never returned 200 within 30s"
+          exit 1
+
+      - name: Stop engram server
+        if: always()
+        run: |
+          if [ -f engram.pid ]; then
+            kill "$(cat engram.pid)" 2>/dev/null || true
+            rm -f engram.pid
+          fi
+
+  # ── Job 3: Lint ───────────────────────────────────────────────────────────
+  lint:
+    name: Lint (golangci-lint v2.12.2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8   # v8 supports golangci-lint v2.x + config schema "version: 2"
+        with:
+          version: v2.12.2                        # matches .golangci.yml (version "2")
+          args: --timeout=3m
