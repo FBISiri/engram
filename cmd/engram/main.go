@@ -127,6 +127,7 @@ func serve(cfg *config.Config) error {
 		storeMap[col] = s
 	}
 	store := qdrant.NewMultiStore(storeMap, collection.CollectionUser)
+	store.SetIsolatedCollections(isolatedCollectionNames()...)
 	defer func() { _ = store.Close() }()
 
 	// Ensure all physical collections exist.
@@ -225,7 +226,22 @@ func newMultiStore(cfg *config.Config) (*qdrant.MultiStore, error) {
 		}
 		storeMap[col] = s
 	}
-	return qdrant.NewMultiStore(storeMap, collection.CollectionUser), nil
+	return qdrant.NewMultiStore(storeMap, collection.CollectionUser).
+		SetIsolatedCollections(isolatedCollectionNames()...), nil
+}
+
+// isolatedCollectionNames derives the physical collection names that must be
+// excluded from the default fan-out — those belonging to isolated caller types
+// (currently just pigo). Derived generically so future isolated principals are
+// covered automatically.
+func isolatedCollectionNames() []string {
+	var names []string
+	for ct := range collection.ValidCallerTypes {
+		if collection.IsIsolatedCallerType(ct) {
+			names = append(names, collection.DefaultRegistry.Resolve(ct))
+		}
+	}
+	return names
 }
 
 func dreamCheck(cfg *config.Config) error {

@@ -496,14 +496,18 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	// underlying Qdrant collection is still single, so all routes return
 	// the same point set. The annotation is here so callers (esp. the
 	// reflection engine) can verify routing without log scraping.
-	resolvedCollection := req.Collection
-	if resolvedCollection == "" {
-		resolvedCollection = CollectionFromContext(r.Context())
-	} else {
-		if _, ok := collection.DefaultRegistry.Get(resolvedCollection); !ok {
+	// resolvedCollection is reported as `resolved_collection` ONLY when the
+	// search is genuinely collection-scoped (a collection filter is applied at
+	// the store layer). For legacy fan-out callers the search is NOT scoped, so
+	// it stays empty and omitempty drops it. An explicit body `collection`
+	// field is still validated (unknown → 400) but does not by itself scope the
+	// fan-out, hence does not populate resolved_collection.
+	var resolvedCollection string
+	if req.Collection != "" {
+		if _, ok := collection.DefaultRegistry.Get(req.Collection); !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error":      "unknown collection: " + resolvedCollection,
-				"collection": resolvedCollection,
+				"error":      "unknown collection: " + req.Collection,
+				"collection": req.Collection,
 			})
 			return
 		}

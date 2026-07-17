@@ -24,12 +24,31 @@ import (
 type MultiStore struct {
 	stores     map[string]*Store
 	defaultCol string // used when mem.Collection is empty or unknown
+	// isolated holds physical collection NAMES that must be EXCLUDED from the
+	// default fan-out (no explicit collection filter). Such collections are
+	// only ever searched/scrolled when a caller EXPLICITLY targets them via a
+	// collection filter. Populated at construction; empty by default.
+	isolated map[string]struct{}
 }
 
 // NewMultiStore creates a MultiStore backed by the provided store map.
 // defaultCol is the fallback collection for writes with an unset Collection field.
 func NewMultiStore(stores map[string]*Store, defaultCol string) *MultiStore {
 	return &MultiStore{stores: stores, defaultCol: defaultCol}
+}
+
+// SetIsolatedCollections registers physical collection names that must be
+// excluded from the default (unfiltered) fan-out. Returns the receiver for
+// chaining. Explicit collection filters naming an isolated collection are
+// unaffected — the isolation only applies to the no-filter default path.
+func (m *MultiStore) SetIsolatedCollections(names ...string) *MultiStore {
+	if m.isolated == nil {
+		m.isolated = make(map[string]struct{}, len(names))
+	}
+	for _, n := range names {
+		m.isolated[n] = struct{}{}
+	}
+	return m
 }
 
 // Close closes all backing stores.
@@ -148,8 +167,8 @@ func (m *MultiStore) searchTargets(filters []memory.Filter) []*Store {
 			}
 		}
 	}
-	// No collection filter → fan-out to all stores.
-	return m.allStores()
+	// No collection filter → fan-out to all non-isolated stores.
+	return m.defaultTargets()
 }
 
 // Scroll returns memories from the targeted stores.
@@ -168,8 +187,8 @@ func (m *MultiStore) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]m
 		return s.Scroll(ctx, opts)
 	}
 
-	// Fan-out: paginate through every store completely.
-	targets := m.allStores()
+	// Fan-out: paginate through every non-isolated store completely.
+	targets := m.defaultTargets()
 	var all []memory.Memory
 	for _, s := range targets {
 		pageOpts := opts
@@ -337,6 +356,28 @@ func (m *MultiStore) PerCollectionStats(ctx context.Context) map[string]uint64 {
 		result[name] = stats.PointCount
 	}
 	return result
+}
+
+// defaultTargets returns allStores() minus any isolated collections. This is
+// the target set for the default (unfiltered) fan-out: isolated collections
+// are only reachable via an explicit collection filter naming them.
+func (m *MultiStore) defaultTargets() []*Store {
+	if len(m.isolated) == 0 {
+		return m.allStores()
+	}
+	names := make([]string, 0, len(m.stores))
+	for name := range m.stores {
+		if _, iso := m.isolated[name]; iso {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	stores := make([]*Store, 0, len(names))
+	for _, name := range names {
+		stores = append(stores, m.stores[name])
+	}
+	return stores
 }
 
 // allStores returns all store instances in a consistent (name-sorted) order.

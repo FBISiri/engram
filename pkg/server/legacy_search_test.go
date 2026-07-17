@@ -5,8 +5,9 @@
 //   - explicit `collection` field in body wins over X-Caller-Type
 //   - missing `collection` falls back to ctx-resolution (X-Caller-Type)
 //   - unknown collection name → 400
-//   - response carries `resolved_collection` annotation per hit (back-compat:
-//     legacy callers parsing the array shape still work, just gain a field)
+//   - response carries `resolved_collection` ONLY when the search is genuinely
+//     collection-scoped (isolated caller). Legacy fan-out callers get NO
+//     resolved_collection (the fan-out is not scoped to any single collection).
 //   - never 30x — old callers must keep working unchanged
 package server
 
@@ -44,9 +45,9 @@ func TestLegacySearch_DefaultsToUserViaCtx(t *testing.T) {
 	if len(hits) == 0 {
 		t.Fatalf("expected at least one hit")
 	}
-	// Default ctx-resolution → engram_user.
-	if got, _ := hits[0]["resolved_collection"].(string); got != "engram_user" {
-		t.Fatalf("default ctx resolution: want engram_user, got %q", got)
+	// Legacy fan-out is NOT collection-scoped → no resolved_collection.
+	if got, ok := hits[0]["resolved_collection"]; ok && got != "" {
+		t.Fatalf("legacy fan-out must not report resolved_collection, got %v", got)
 	}
 }
 
@@ -78,8 +79,10 @@ func TestLegacySearch_ExplicitCollectionOverridesCtx(t *testing.T) {
 	if len(hits) == 0 {
 		t.Fatalf("expected at least one hit")
 	}
-	if got, _ := hits[0]["resolved_collection"].(string); got != "engram_reflection" {
-		t.Fatalf("explicit override: want engram_reflection, got %q", got)
+	// Explicit collection is validated (200, not 400) but does NOT scope the
+	// legacy fan-out, so it does not populate resolved_collection.
+	if got, ok := hits[0]["resolved_collection"]; ok && got != "" {
+		t.Fatalf("legacy explicit collection must not report resolved_collection, got %v", got)
 	}
 }
 
@@ -150,7 +153,7 @@ func TestLegacySearch_AgentSelfCtxResolution(t *testing.T) {
 	if len(hits) == 0 {
 		t.Fatalf("expected at least one hit")
 	}
-	if got, _ := hits[0]["resolved_collection"].(string); got != "engram_agent_self" {
-		t.Fatalf("agent-self ctx resolution: want engram_agent_self, got %q", got)
+	if got, ok := hits[0]["resolved_collection"]; ok && got != "" {
+		t.Fatalf("agent-self fan-out must not report resolved_collection, got %v", got)
 	}
 }
