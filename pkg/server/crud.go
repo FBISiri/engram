@@ -82,6 +82,12 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		opts = append(opts, memory.WithValidUntil(computedValidUntil))
 	}
 	mem := memory.New(body.Content, opts...)
+	// Route the write to the caller's resolved collection (e.g. a pigo
+	// principal key → engram_pigo). Mirrors the MCP add path in server.go;
+	// without this stamp MultiStore.Insert falls back to the default store
+	// (engram_user) and physical isolation is lost. Defaults to engram_user
+	// for header-less legacy callers.
+	mem.Collection = CollectionFromContext(r.Context())
 	if body.Metadata != nil {
 		mem.Metadata = body.Metadata
 	}
@@ -517,6 +523,18 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	}
 	if len(req.Tags) > 0 {
 		filters = append(filters, memory.Filter{Field: "tags", Op: memory.OpIn, Value: req.Tags})
+	}
+
+	// READ ISOLATION: an isolated caller-type (e.g. pigo, authenticated via its
+	// principal key) may ONLY read its own store — never fan out across all
+	// collections. Force the collection filter to the caller's own collection,
+	// ignoring any self-declared `collection` body field. Legacy
+	// user/reflection/agent-self callers are untouched → they keep the
+	// cross-store fan-out that Siri/BMO rely on.
+	if ct := CallerTypeFromContext(r.Context()); collection.IsIsolatedCallerType(ct) {
+		own := collection.DefaultRegistry.Resolve(ct)
+		resolvedCollection = own
+		filters = append(filters, memory.Filter{Field: "collection", Op: memory.OpIn, Value: []string{own}})
 	}
 
 	embedStart := time.Now()

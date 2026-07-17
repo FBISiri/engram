@@ -88,6 +88,8 @@ func (r *Registry) Resolve(callerType string) string {
 		return CollectionAgentSelf
 	case "reflection":
 		return CollectionReflection
+	case "pigo":
+		return CollectionPigo
 	default:
 		return CollectionUser
 	}
@@ -98,13 +100,44 @@ const (
 	CollectionUser       = "engram_user"
 	CollectionAgentSelf  = "engram_agent_self"
 	CollectionReflection = "engram_reflection"
+	CollectionPigo       = "engram_pigo"
 )
 
-// Init registers the three baseline collections. Idempotent: re-registration
+// ValidCallerTypes is the canonical set of accepted X-Caller-Type / principal
+// caller-type values (single source of truth, shared by the server middleware
+// and config validation).
+var ValidCallerTypes = map[string]struct{}{
+	"user":       {},
+	"agent-self": {},
+	"reflection": {},
+	"pigo":       {},
+}
+
+// IsValidCallerType reports whether ct is a recognized caller type.
+func IsValidCallerType(ct string) bool {
+	_, ok := ValidCallerTypes[ct]
+	return ok
+}
+
+// isolatedCallerTypes are caller types whose READS must be physically scoped
+// to their own collection (no cross-store fan-out). Only "pigo" today; add
+// future identity-isolated principals here.
+var isolatedCallerTypes = map[string]struct{}{
+	"pigo": {},
+}
+
+// IsIsolatedCallerType reports whether reads for this caller type must be
+// scoped to its own collection instead of fanning out across all stores.
+func IsIsolatedCallerType(ct string) bool {
+	_, ok := isolatedCallerTypes[ct]
+	return ok
+}
+
+// Init registers the four baseline collections. Idempotent: re-registration
 // errors are swallowed (process restart is the normal path that re-invokes
 // Init on an empty registry; explicit re-init via tests is also fine).
 func (r *Registry) Init() {
-	for _, name := range []string{CollectionUser, CollectionAgentSelf, CollectionReflection} {
+	for _, name := range []string{CollectionUser, CollectionAgentSelf, CollectionReflection, CollectionPigo} {
 		_ = r.Register(name, nil) // ignore "already registered" — idempotent
 	}
 }

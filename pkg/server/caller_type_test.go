@@ -20,6 +20,7 @@ func TestCallerTypeMiddleware(t *testing.T) {
 		{"user", "user", collection.CollectionUser},
 		{"agent-self", "agent-self", collection.CollectionAgentSelf},
 		{"reflection", "reflection", collection.CollectionReflection},
+		{"pigo", "pigo", collection.CollectionPigo},
 		{"", "user", collection.CollectionUser},
 		{"bogus", "user", collection.CollectionUser},
 	}
@@ -49,5 +50,15 @@ func TestCallerTypeMiddleware(t *testing.T) {
 func TestCallerTypeFromContext_Default(t *testing.T) {
 	if got := CallerTypeFromContext(context.Background()); got != "user" {
 		t.Errorf("default got %q, want user", got)
+	}
+}
+
+func TestWithCallerType_Override(t *testing.T) {
+	ctx := WithCallerType(context.Background(), "pigo")
+	if got := CallerTypeFromContext(ctx); got != "pigo" {
+		t.Errorf("got %q, want pigo", got)
+	}
+	if got := CollectionFromContext(ctx); got != collection.CollectionPigo {
+		t.Errorf("got %q, want %q", got, collection.CollectionPigo)
 	}
 }

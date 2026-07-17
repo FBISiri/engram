@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/collection"
@@ -55,6 +56,10 @@ type HTTPServer struct {
 	srv       *Server
 	port      int
 	apiKey    string
+	// principalKeys maps caller type → dedicated API key. A request that
+	// authenticates with one of these keys gets its caller type from the
+	// key (header ignored). See config.PrincipalKeys.
+	principalKeys map[string]string
 	mux       *http.ServeMux
 	httpSrv   *http.Server
 	startTime time.Time
@@ -85,6 +90,12 @@ func NewHTTPServer(s *Server, port int, apiKey string) *HTTPServer {
 
 	h.registerRoutes()
 	return h
+}
+
+// SetPrincipalKeys installs per-principal API keys (caller type → key).
+// Call before Start(). A nil/empty map disables principal-key auth.
+func (h *HTTPServer) SetPrincipalKeys(keys map[string]string) {
+	h.principalKeys = keys
 }
 
 // registerRoutes wires all HTTP handlers.
@@ -169,19 +180,37 @@ func (h *HTTPServer) ListenAndServe(ctx context.Context) error {
 // ─────────────────────────────────────────────────────────────
 
 // withAuth wraps a handler with optional Bearer-token authentication.
+//
+// Two kinds of credentials are accepted:
+//   - the legacy shared apiKey — caller type stays whatever
+//     CallerTypeMiddleware derived from the X-Caller-Type header;
+//   - a per-principal key (SetPrincipalKeys) — the caller type is forced
+//     to the principal that owns the key, ignoring the header. This is
+//     what makes collection ownership enforceable rather than self-declared.
 func (h *HTTPServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.apiKey != "" {
-			auth := r.Header.Get("Authorization")
-			expected := "Bearer " + h.apiKey
-			if auth != expected {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{
-					"error": "unauthorized",
-				})
+		if h.apiKey == "" && len(h.principalKeys) == 0 {
+			next(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		token, isBearer := strings.CutPrefix(auth, "Bearer ")
+		if isBearer {
+			// Principal keys win: identity derived from the key itself.
+			for ct, key := range h.principalKeys {
+				if key != "" && token == key {
+					next(w, r.WithContext(WithCallerType(r.Context(), ct)))
+					return
+				}
+			}
+			if h.apiKey != "" && token == h.apiKey {
+				next(w, r)
 				return
 			}
 		}
-		next(w, r)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "unauthorized",
+		})
 	}
 }
 

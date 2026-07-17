@@ -2,9 +2,12 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
@@ -33,6 +36,13 @@ type Config struct {
 	Transport string // "stdio", "http", "both"
 	HTTPPort  int
 	APIKey    string
+	// PrincipalKeys maps a caller type ("user", "agent-self", "reflection",
+	// "pigo") to a dedicated API key. A request authenticating with a
+	// principal key has its caller type derived from the key — the
+	// self-declared X-Caller-Type header is ignored. Parsed from
+	// ENGRAM_PRINCIPAL_KEYS="pigo:key1,reflection:key2". Optional; the
+	// legacy shared APIKey keeps working alongside.
+	PrincipalKeys map[string]string
 
 	// Reflection
 	ReflectionEnabled  bool
@@ -71,6 +81,7 @@ func Load() *Config {
 		Transport: envStr("ENGRAM_TRANSPORT", "stdio"),
 		HTTPPort:  envInt("ENGRAM_HTTP_PORT", 8080),
 		APIKey:    envStr("ENGRAM_API_KEY", ""),
+		PrincipalKeys: parsePrincipalKeys(envStr("ENGRAM_PRINCIPAL_KEYS", "")),
 
 		// Reflection
 		ReflectionEnabled: envBool("ENGRAM_REFLECTION_ENABLED", false),
@@ -85,6 +96,38 @@ func envStr(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// parsePrincipalKeys parses "callerType:key,callerType:key" into a map.
+// Malformed entries (missing colon, empty type or key) are skipped. Entries
+// whose caller-type is not a known/valid type are skipped + logged, so a typo
+// like "reflectionn:key" cannot silently default to engram_user (Frank's
+// collection).
+func parsePrincipalKeys(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		ct, key, ok := strings.Cut(pair, ":")
+		ct, key = strings.TrimSpace(ct), strings.TrimSpace(key)
+		if !ok || ct == "" || key == "" {
+			continue
+		}
+		if !collection.IsValidCallerType(ct) {
+			log.Printf("WARN config: ENGRAM_PRINCIPAL_KEYS skipping unknown caller-type %q", ct)
+			continue
+		}
+		out[ct] = key
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func envInt(key string, defaultVal int) int {

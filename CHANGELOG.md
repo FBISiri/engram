@@ -7,7 +7,31 @@ releases begin.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+- **`pigo` caller-type + `engram_pigo` baseline collection** — pigo is now a
+  first-class caller type (`X-Caller-Type: pigo`) that owns its own physically
+  isolated collection `engram_pigo`, registered as a baseline store alongside
+  `engram_user`, `engram_agent_self`, and `engram_reflection`. Writes routed to
+  the pigo caller land in the dedicated `engram_pigo` Qdrant store.
+- **`ENGRAM_PRINCIPAL_KEYS` per-principal API keys** — optional env var
+  (`ENGRAM_PRINCIPAL_KEYS="pigo:key1,reflection:key2"`) mapping a caller type to
+  a dedicated Bearer key. A request authenticated with a principal key has its
+  caller type derived from the key itself (the `X-Caller-Type` header is
+  ignored), making collection ownership enforceable rather than self-declared.
+  Entries with an unknown/typo caller-type are skipped + logged (never default
+  to `engram_user`). The legacy shared `ENGRAM_API_KEY` continues to work with
+  the `X-Caller-Type` header.
+- **Read isolation for isolated caller-types** — an isolated principal (today:
+  `pigo`) may only READ its own store: `POST /memories/search` (and the
+  per-collection search route) is force-scoped to the caller's own collection
+  filter, so it can never fan out to other collections. Legacy
+  `user`/`agent-self`/`reflection` callers keep cross-store fan-out search
+  unchanged (Siri/BMO rely on it).
+- **Security note — legacy `ENGRAM_API_KEY` is admin/master-scoped:** it can
+  self-declare ANY `X-Caller-Type` (including `pigo`) and thus read/write any
+  collection. This is intentional and unchanged for backward compat. Only
+  per-principal keys are identity-bound and enforced; treat the shared legacy
+  key as an admin credential.
 
 ## [0.2.0] — 2026-04-19 (Docker images: 2026-06-02)
 

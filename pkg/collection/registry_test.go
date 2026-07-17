@@ -25,6 +25,7 @@ func TestRegistry_Resolve(t *testing.T) {
 		"user":       CollectionUser,
 		"agent-self": CollectionAgentSelf,
 		"reflection": CollectionReflection,
+		"pigo":       CollectionPigo,
 		"":           CollectionUser, // default
 		"unknown":    CollectionUser, // safe fallback
 	}
@@ -47,9 +48,12 @@ func TestRegistry_Init(t *testing.T) {
 	if _, ok := r.Get(CollectionReflection); !ok {
 		t.Errorf("Init missing %s", CollectionReflection)
 	}
+	if _, ok := r.Get(CollectionPigo); !ok {
+		t.Errorf("Init missing %s", CollectionPigo)
+	}
 	// idempotent
 	r.Init()
-	if len(r.List()) != 3 {
+	if len(r.List()) != 4 {
 		t.Errorf("Init not idempotent: got %d entries", len(r.List()))
 	}
 }

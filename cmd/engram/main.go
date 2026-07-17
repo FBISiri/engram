@@ -116,7 +116,7 @@ func serve(cfg *config.Config) error {
 		UseTLS:    cfg.QdrantUseTLS,
 		Dimension: uint64(cfg.EmbeddingDimension),
 	}
-	collectionNames := []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection}
+	collectionNames := []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection, collection.CollectionPigo}
 	storeMap := make(map[string]*qdrant.Store, len(collectionNames))
 	for _, col := range collectionNames {
 		storeCfg.CollectionName = col
@@ -189,11 +189,13 @@ func serve(cfg *config.Config) error {
 	case "http":
 		fmt.Fprintf(os.Stderr, "  Transport:  http (port %d)\n", cfg.HTTPPort)
 		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
+		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
 		return httpSrv.ListenAndServe(serverCtx)
 	case "both":
 		// Start HTTP in background; MCP stdio in foreground.
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio + http (port %d)\n", cfg.HTTPPort)
 		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
+		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
 		go func() {
 			if err := httpSrv.ListenAndServe(serverCtx); err != nil {
 				fmt.Fprintf(os.Stderr, "http server error: %v\n", err)
@@ -213,7 +215,7 @@ func newMultiStore(cfg *config.Config) (*qdrant.MultiStore, error) {
 		UseTLS:    cfg.QdrantUseTLS,
 		Dimension: uint64(cfg.EmbeddingDimension),
 	}
-	collectionNames := []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection}
+	collectionNames := []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection, collection.CollectionPigo}
 	storeMap := make(map[string]*qdrant.Store, len(collectionNames))
 	for _, col := range collectionNames {
 		baseCfg.CollectionName = col
@@ -603,7 +605,7 @@ func migrateCollections(cfg *config.Config) error {
 
 	// Target stores — one per new collection.
 	targetStoreMap := map[string]*qdrant.Store{}
-	for _, col := range []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection} {
+	for _, col := range []string{collection.CollectionUser, collection.CollectionAgentSelf, collection.CollectionReflection, collection.CollectionPigo} {
 		baseCfg.CollectionName = col
 		s, err := qdrant.New(baseCfg)
 		if err != nil {
