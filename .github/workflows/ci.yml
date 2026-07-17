@@ -149,3 +149,59 @@ jobs:
         with:
           version: v2.12.2                        # matches .golangci.yml (version "2")
           args: --timeout=3m
+
+  # ── Job 4: Docker build + GHCR push (Phase 2) ─────────────────────────────
+  # Builds the container image from the repo Dockerfile and, on a push to
+  # master, publishes it to GitHub Container Registry (GHCR). Pull requests
+  # only *build* the image (a compile-safety gate) and never push.
+  #
+  # Secrets: NONE beyond the automatic GITHUB_TOKEN. Auth to ghcr.io uses
+  #   github.actor + secrets.GITHUB_TOKEN, which is why this job (below) grants
+  #   `packages: write` on the token — that grant IS the required secrets config.
+  docker:
+    name: Docker (build + GHCR push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [ test, smoke ]        # only build once the test jobs are green
+    permissions:
+      contents: read
+      packages: write             # allow GITHUB_TOKEN to push to GHCR
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Auth is only needed when we actually push (skip on PRs / forks).
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # metadata-action lowercases the image name automatically, so the
+          # repo "FBISiri/engram" becomes ghcr.io/fbisiri/engram (GHCR requires
+          # a lowercase path).
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}   # :latest only on master
+            type=sha,format=short                                 # :sha-<short> on every build
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # PRs build-only (no push); real push happens only on push to master.
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
