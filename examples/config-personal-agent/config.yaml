@@ -1,0 +1,33 @@
+# =============================================================================
+# Engram Config Example — Scenario 1: Personal AI Agent Memory
+# Shape: high-value, low-volume single-agent memory — recall of a rare-but-
+#        critical fact matters more than raw precision.
+# Apply via: memory_apply_config (see README.md for the exact snippet).
+# =============================================================================
+
+retrieve_config:
+  relevance_weight: 1.0        # semantic match is primary
+  recency_weight: 0.20         # mild recency; old identity facts must not sink
+  importance_weight: 0.35      # lean on importance to keep rare high-value memories surfaced
+  limit: 6                     # small focused context, avoid diluting the agent
+  min_score: 0.55              # permissive floor — better to recall a weak-but-relevant fact
+  rerank_enabled: false        # low volume, first-pass fusion is enough
+
+update_config:
+  dedupe_threshold: 0.92       # only block near-exact; keep distinct nuances
+  default_importance: 6
+  per_type_dedupe:             # proposed: stricter dedup for high-stakes types
+    identity: 0.95             # almost never merge a self/owner fact — update deliberately
+    directive: 0.90            # avoid sycophancy-flywheel fragmentation of "user prefers X"
+    insight: 0.92
+    event: 0.92
+  per_type_min_importance:     # proposed admission gate
+    identity: 7
+    directive: 6
+    insight: 5
+    event: 3
+  ttl:
+    event: 90d                 # events auto-expire; incidents can override
+    insight: 90d
+    identity: never
+    directive: never

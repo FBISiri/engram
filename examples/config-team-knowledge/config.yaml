@@ -1,0 +1,28 @@
+# =============================================================================
+# Engram Config Example — Scenario 2: Team Knowledge Management
+# Shape: shared knowledge base, many contributors, higher write volume — dedup
+#        and provenance matter more than exhaustive recall (precision > recall).
+# Apply via: memory_apply_config (see README.md for the exact snippet).
+# =============================================================================
+
+retrieve_config:
+  relevance_weight: 1.0
+  recency_weight: 0.35         # newer team knowledge usually supersedes older
+  importance_weight: 0.25      # importance is noisier across many contributors, trust it less
+  limit: 10                    # broader recall for a shared base
+  min_score: 0.65              # tighter floor — precision over recall
+  rerank_enabled: true         # second-pass rerank to fight near-duplicate clutter
+  dedupe_on_read: true         # proposed: collapse near-identical hits in result set
+
+update_config:
+  dedupe_threshold: 0.85       # aggressive: merge near-duplicates from different authors
+  default_importance: 5
+  merge_strategy: append_provenance  # proposed: on merge, keep both source refs, don't drop
+  require_source: true         # proposed: reject writes with no [source:] / contributor tag
+  per_type_dedupe:
+    directive: 0.85            # team policies must not fork into contradictory variants
+    insight: 0.85
+    event: 0.90
+  ttl:
+    event: 180d                # team events live longer than a single agent's
+    insight: never             # curated knowledge doesn't auto-expire

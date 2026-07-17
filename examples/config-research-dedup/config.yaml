@@ -1,0 +1,25 @@
+# =============================================================================
+# Engram Config Example — Scenario 3: Research Note Deduplication
+# Shape: dense technical notes, very high semantic overlap — the most aggressive
+#        dedup profile, tuned to force consolidation over fragment pile-up.
+# Apply via: memory_apply_config (see README.md for the exact snippet).
+# =============================================================================
+
+retrieve_config:
+  relevance_weight: 1.0
+  recency_weight: 0.30         # latest version of a note should rank first
+  importance_weight: 0.20      # in a dense corpus, relevance+recency dominate
+  limit: 8
+  min_score: 0.70             # high floor — only tightly-relevant notes
+  rerank_enabled: true         # rerank to surface the canonical note over its fragments
+  supersedes_aware: true       # proposed: prefer the memory tagged supersedes:<old_id>
+
+update_config:
+  dedupe_threshold: 0.80       # most aggressive: fold near-dup notes into an update
+  default_importance: 5
+  merge_strategy: replace_or_supersede  # proposed: new note supersedes old, chain the ref
+  consolidation_pass: enabled           # proposed: periodic offline merge of fragments
+  per_type_dedupe:
+    insight: 0.80             # research notes are almost all 'insight' type
+  ttl:
+    insight: never            # research is cumulative; don't time-expire, dedup instead
