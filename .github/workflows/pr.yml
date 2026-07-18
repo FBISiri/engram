@@ -107,6 +107,11 @@ jobs:
       ENGRAM_EMBEDDING_DIMENSION: "1024"
       ENGRAM_API_KEY: ${{ secrets.ENGRAM_API_KEY }}
       ENGRAM_URL: http://localhost:8080
+      # Transport MUST be http so the server binds ENGRAM_HTTP_PORT and exposes /health.
+      # Default transport is stdio (pkg/config: ENGRAM_TRANSPORT default "stdio"); without
+      # this override the server never listens on 8080 and the harness cannot reach it.
+      ENGRAM_TRANSPORT: http
+      ENGRAM_HTTP_PORT: "8080"
 
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +144,8 @@ jobs:
 
       - name: Start engram server (background)
         run: |
-          ./engram serve --port 8080 &
+          # No --port flag exists; port comes from ENGRAM_HTTP_PORT (set in env: block).
+          ./engram serve &
           echo $! > engram.pid
           # Wait for server to accept connections
           for i in $(seq 1 20); do
@@ -207,7 +213,7 @@ jobs:
 
 # ── Branch protection note (configured by Siri/BMO, not YAML) ─────────────────
 # After ENGRAM_VOYAGE_API_KEY is confirmed provisioned (§4.5 verification):
-#   Settings → Branches → main → Require status checks:
+#   Settings → Branches → master → Require status checks:
 #     ✅ "Integration Tests (race + Qdrant)"
 #     ✅ "Eval Gate (26/26)"
 #     ✅ "Docker Build (smoke test, no push)"   [optional but recommended]
