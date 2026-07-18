@@ -33,7 +33,7 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats: [ tar.gz ]        # v2.6+ renamed `format` → `formats` (list); `format` is deprecated
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
