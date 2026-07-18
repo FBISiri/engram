@@ -17,7 +17,7 @@ func clearEngramEnv(t *testing.T) {
 		key := kv[:strings.IndexByte(kv, '=')]
 		if strings.HasPrefix(key, "ENGRAM_") {
 			t.Setenv(key, "")
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 		}
 	}
 }
@@ -131,7 +131,7 @@ func TestEnvStr(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			const key = "ENGRAM_TEST_STR"
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 			if tt.set {
 				t.Setenv(key, tt.val)
 			}
@@ -161,7 +161,7 @@ func TestEnvInt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			const key = "ENGRAM_TEST_INT"
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 			if tt.set {
 				t.Setenv(key, tt.val)
 			}
@@ -191,7 +191,7 @@ func TestEnvFloat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			const key = "ENGRAM_TEST_FLOAT"
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 			if tt.set {
 				t.Setenv(key, tt.val)
 			}
@@ -224,7 +224,7 @@ func TestEnvBool(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			const key = "ENGRAM_TEST_BOOL"
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 			if tt.set {
 				t.Setenv(key, tt.val)
 			}
