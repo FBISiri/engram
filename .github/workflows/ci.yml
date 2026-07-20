@@ -145,7 +145,7 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8   # v8 supports golangci-lint v2.x + config schema "version: 2"
+        uses: golangci/golangci-lint-action@v9   # v8 supports golangci-lint v2.x + config schema "version: 2"
         with:
           version: v2.12.2                        # matches .golangci.yml (version "2")
           args: --timeout=3m
