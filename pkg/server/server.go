@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -119,6 +120,7 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("time_start", mcp.Description("Filter memories created after this Unix timestamp.")),
 		mcp.WithNumber("time_end", mcp.Description("Filter memories created before this Unix timestamp.")),
 		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: searches all collections (fan-out)."), mcp.WithStringItems()),
+		mcp.WithArray("source_type", mcp.Description("Filter by provenance source_type (tool_output, reflection, web_search, user_input, calendar, document). Memories must match at least one."), mcp.WithStringItems()),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
@@ -130,6 +132,7 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("importance", mcp.Description("Importance score from 1-10. Default: 5.")),
 		mcp.WithArray("tags", mcp.Description("Tags for classification."), mcp.WithStringItems()),
 		mcp.WithString("source", mcp.Description("Source of the memory: user, agent, or system. Default: agent.")),
+		mcp.WithString("source_type", mcp.Description("Fine-grained provenance of the memory. Stored in metadata.source_type."), mcp.Enum("tool_output", "reflection", "web_search", "user_input", "calendar", "document")),
 		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = never expires.")),
 	)
 	s.mcpServer.AddTool(addTool, s.handleAdd)
@@ -143,6 +146,7 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("importance", mcp.Description("Importance score for the new memory (1-10). Default: 5.")),
 		mcp.WithArray("tags", mcp.Description("Tags for the new memory."), mcp.WithStringItems()),
 		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum cosine similarity for deletion. Must be >= 0.85. Default: 0.7 (rejected — use 0.92 for single targeted replacement).")),
+		mcp.WithString("source_type", mcp.Description("Fine-grained provenance for the new memory. Stored in metadata.source_type."), mcp.Enum("tool_output", "reflection", "web_search", "user_input", "calendar", "document")),
 		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = inherit from old memory.")),
 		mcp.WithBoolean("dry_run", mcp.Description("If true, preview which memories would be deleted/added without making changes. Default: false.")),
 	)
@@ -192,6 +196,18 @@ action=restore   Delete all current memories and restore from snapshot_id (re-em
 // =============================================================================
 // Tool Handlers
 // =============================================================================
+
+// isolatedCaller reports whether the caller in ctx is identity-isolated and,
+// if so, returns its own collection name. Isolated callers (e.g. pigo) may only
+// read/write their own collection and are barred from global-scope actions.
+// Non-isolated callers get ("", false) and retain today's fan-out behaviour.
+func isolatedCaller(ctx context.Context) (own string, isolated bool) {
+	ct := CallerTypeFromContext(ctx)
+	if collection.IsIsolatedCallerType(ct) {
+		return collection.DefaultRegistry.Resolve(ct), true
+	}
+	return "", false
+}
 
 // handleSearch implements the memory.search tool.
 func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -255,8 +271,25 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		})
 	}
 
+	// C1 provenance filter: match memories whose metadata.source_type is in the set.
+	if sourceTypes := getStringSlice(request, "source_type"); len(sourceTypes) > 0 {
+		filters = append(filters, memory.Filter{
+			Field: "metadata.source_type",
+			Op:    memory.OpIn,
+			Value: sourceTypes,
+		})
+	}
+
 	// Collections filter: validate names and filter by stored collection field.
-	if cols := getStringSlice(request, "collections"); len(cols) > 0 {
+	// ISOLATION: an isolated caller (e.g. pigo) may ONLY read its own
+	// collection; a self-declared collections arg can never widen scope.
+	if own, isolated := isolatedCaller(ctx); isolated {
+		filters = append(filters, memory.Filter{
+			Field: "collection",
+			Op:    memory.OpIn,
+			Value: []string{own},
+		})
+	} else if cols := getStringSlice(request, "collections"); len(cols) > 0 {
 		for _, col := range cols {
 			if _, ok := collection.DefaultRegistry.Get(col); !ok {
 				return mcp.NewToolResultError(fmt.Sprintf("unknown collection: %s", col)), nil
@@ -486,6 +519,21 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	mem := memory.New(content, opts...)
 	mem.Collection = CollectionFromContext(ctx)
 
+	// C1 provenance: soft-require source_type. If provided, validate and store
+	// in metadata.source_type; if omitted, log a debug warning but proceed.
+	sourceType := request.GetString("source_type", "")
+	if sourceType != "" {
+		if err := memory.ValidateSourceType(sourceType); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if mem.Metadata == nil {
+			mem.Metadata = map[string]any{}
+		}
+		mem.Metadata["source_type"] = sourceType
+	} else {
+		log.Printf("engram memory_add: source_type not provided (soft-require); memory %s stored without provenance", mem.ID)
+	}
+
 	// Embed content
 	embedStart := time.Now()
 	vec, err := s.embedder.Embed(ctx, content)
@@ -679,8 +727,16 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	}
 	oldVec, newVec := vecs[0], vecs[1]
 
+	// ISOLATION: scope the candidate search to the isolated caller's own
+	// collection so cross-collection targets are invisible (mirrors REST 403).
+	var updFilters []memory.Filter
+	if own, isolated := isolatedCaller(ctx); isolated {
+		updFilters = append(updFilters, memory.Filter{Field: "collection", Op: memory.OpIn, Value: []string{own}})
+	}
+
 	searchResults, err := s.store.Search(ctx, oldVec, memory.SearchOptions{
-		Limit: 20,
+		Limit:   20,
+		Filters: updFilters,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
@@ -759,6 +815,17 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	mem := memory.New(newContent, opts...)
 	mem.Collection = CollectionFromContext(ctx)
 
+	// C1 provenance: if source_type provided, validate and store in metadata.
+	if sourceType := request.GetString("source_type", ""); sourceType != "" {
+		if err := memory.ValidateSourceType(sourceType); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if mem.Metadata == nil {
+			mem.Metadata = map[string]any{}
+		}
+		mem.Metadata["source_type"] = sourceType
+	}
+
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
 	}
@@ -818,9 +885,16 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("embedding error: %v", err)), nil
 	}
 
-	// Search for matching memories
+	// Search for matching memories.
+	// ISOLATION: scope the candidate search to the isolated caller's own
+	// collection so cross-collection targets cannot be deleted (mirrors REST 403).
+	var delFilters []memory.Filter
+	if own, isolated := isolatedCaller(ctx); isolated {
+		delFilters = append(delFilters, memory.Filter{Field: "collection", Op: memory.OpIn, Value: []string{own}})
+	}
 	results, err := s.store.Search(ctx, vec, memory.SearchOptions{
-		Limit: limit,
+		Limit:   limit,
+		Filters: delFilters,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("search error: %v", err)), nil
@@ -906,6 +980,9 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 // handleReflectionCheck implements the reflection_check tool.
 // It evaluates whether the Reflection Engine should run now without executing it.
 func (s *Server) handleReflectionCheck(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if _, isolated := isolatedCaller(ctx); isolated {
+		return mcp.NewToolResultError("reflection_check is a global-scope action not permitted for isolated callers"), nil
+	}
 	eng := reflection.NewEngine(s.store, s.embedder, reflection.DefaultConfig())
 	result, err := eng.Check(ctx)
 	if err != nil {
@@ -921,6 +998,9 @@ func (s *Server) handleReflectionCheck(ctx context.Context, _ mcp.CallToolReques
 // handleReflectionRun implements the reflection_run tool.
 // It executes one reflection cycle, respecting rate limits and dry_run mode.
 func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if _, isolated := isolatedCaller(ctx); isolated {
+		return mcp.NewToolResultError("reflection_run is a global-scope action not permitted for isolated callers"), nil
+	}
 	dryRun := false
 	if args := request.GetArguments(); args != nil {
 		if v, ok := args["dry_run"]; ok {
@@ -957,6 +1037,9 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 // registration; retained pending wiring of the reflection_run_event MCP tool.
 // Not dead — RunSingleEvent is exercised by reflection engine tests.
 func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if _, isolated := isolatedCaller(ctx); isolated {
+		return mcp.NewToolResultError("reflection_run_event is a global-scope action not permitted for isolated callers"), nil
+	}
 	cause, err := request.RequireString("cause")
 	if err != nil {
 		return mcp.NewToolResultError("cause is required"), nil

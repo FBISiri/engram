@@ -153,6 +153,7 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 		{fieldLifecycleStatus, qdrant.FieldType_FieldTypeKeyword},    // v0.2: FSM state filter
 		{fieldLastAccessedSource, qdrant.FieldType_FieldTypeKeyword}, // v0.2: caller-type tracking
 		{fieldCollection, qdrant.FieldType_FieldTypeKeyword},
+		{fieldMetadata + ".source_type", qdrant.FieldType_FieldTypeKeyword}, // C1: provenance source_type filter
 	}
 
 	for _, idx := range indexes {

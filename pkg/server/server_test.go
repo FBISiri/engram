@@ -319,6 +319,21 @@ func matchFilters(mem memory.Memory, filters []memory.Filter) bool {
 					return false
 				}
 			}
+		case "metadata.source_type":
+			if f.Op == memory.OpIn {
+				want := f.Value.([]string)
+				got, _ := mem.Metadata["source_type"].(string)
+				found := false
+				for _, v := range want {
+					if got == v {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
 		}
 	}
 	return true
@@ -1458,5 +1473,184 @@ func TestSearchCollectionsParam_FilterIsolation(t *testing.T) {
 	_ = json.Unmarshal([]byte(extractText(result)), &hitsReflection)
 	if len(hitsReflection) != 0 {
 		t.Errorf("expected no results when filtering by a different collection, got %d", len(hitsReflection))
+	}
+}
+
+// =============================================================================
+// C1: source_type provenance metadata
+// =============================================================================
+
+// parseAddMemory unmarshals a memory_add response and returns the memory.
+func parseAddMemory(t *testing.T, result *mcp.CallToolResult) memory.Memory {
+	t.Helper()
+	var resp struct {
+		Status string        `json:"status"`
+		Memory memory.Memory `json:"memory"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &resp); err != nil {
+		t.Fatalf("failed to parse add response: %v", err)
+	}
+	return resp.Memory
+}
+
+func TestAddMemoryWithSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "The weather API returned 25C",
+		"source_type": "tool_output",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("tool returned error: %s", extractText(result))
+	}
+
+	mem := parseAddMemory(t, result)
+	if got, _ := mem.Metadata["source_type"].(string); got != "tool_output" {
+		t.Errorf("expected metadata.source_type=tool_output, got %v", mem.Metadata["source_type"])
+	}
+}
+
+func TestAddMemoryInvalidSourceType(t *testing.T) {
+	srv, store := newTestServer()
+
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "Something",
+		"source_type": "not_a_real_type",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for invalid source_type, got: %s", extractText(result))
+	}
+	if store.count() != 0 {
+		t.Errorf("expected 0 memories stored on invalid source_type, got %d", store.count())
+	}
+}
+
+func TestAddMemoryNoSourceType(t *testing.T) {
+	srv, store := newTestServer()
+
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content": "No provenance here",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("soft-require violated: got error %s", extractText(result))
+	}
+	if store.count() != 1 {
+		t.Errorf("expected 1 memory stored (soft-require), got %d", store.count())
+	}
+	mem := parseAddMemory(t, result)
+	if _, ok := mem.Metadata["source_type"]; ok {
+		t.Errorf("expected no source_type in metadata, got %v", mem.Metadata["source_type"])
+	}
+}
+
+func TestSearchWithSourceTypeFilter(t *testing.T) {
+	srv, _ := newTestServer()
+
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "Paris is the capital of France",
+		"source_type": "web_search",
+	}); err != nil {
+		t.Fatalf("add web_search failed: %v", err)
+	}
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "Paris is a lovely place to visit",
+		"source_type": "user_input",
+	}); err != nil {
+		t.Fatalf("add user_input failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query":       "Paris",
+		"limit":       float64(10),
+		"source_type": []interface{}{"web_search"},
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("search returned error: %s", extractText(result))
+	}
+
+	var hits []struct {
+		Content  string         `json:"content"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &hits); err != nil {
+		t.Fatalf("failed to parse search results: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 web_search hit, got %d", len(hits))
+	}
+	if got, _ := hits[0].Metadata["source_type"].(string); got != "web_search" {
+		t.Errorf("expected hit with source_type=web_search, got %v", hits[0].Metadata["source_type"])
+	}
+}
+
+func TestUpdateMemoryWithSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": "User uses vim",
+		"type":    "identity",
+	}); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_update", map[string]any{
+		"old_content":          "User uses vim",
+		"new_content":          "User uses neovim",
+		"type":                 "identity",
+		"similarity_threshold": float64(0.92),
+		"source_type":          "user_input",
+	})
+	if err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("update returned error: %s", extractText(result))
+	}
+
+	var resp struct {
+		NewMemory memory.Memory `json:"new_memory"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &resp); err != nil {
+		t.Fatalf("failed to parse update response: %v", err)
+	}
+	if got, _ := resp.NewMemory.Metadata["source_type"].(string); got != "user_input" {
+		t.Errorf("expected new memory source_type=user_input, got %v", resp.NewMemory.Metadata["source_type"])
+	}
+}
+
+func TestUpdateMemoryInvalidSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": "User uses tabs",
+		"type":    "identity",
+	}); err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_update", map[string]any{
+		"old_content":          "User uses tabs",
+		"new_content":          "User uses spaces",
+		"type":                 "identity",
+		"similarity_threshold": float64(0.92),
+		"source_type":          "bogus",
+	})
+	if err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error for invalid source_type on update, got: %s", extractText(result))
 	}
 }

@@ -92,6 +92,15 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		mem.Metadata = body.Metadata
 	}
 
+	// C1 provenance: if source_type is present in metadata, validate against the enum.
+	if st, ok := mem.Metadata["source_type"]; ok {
+		stStr, isStr := st.(string)
+		if !isStr || memory.ValidateSourceType(stStr) != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
+			return
+		}
+	}
+
 	embedStart := time.Now()
 	vec, err := h.srv.embedder.Embed(r.Context(), body.Content)
 	if h.srv.metrics != nil {

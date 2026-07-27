@@ -57,7 +57,7 @@ func retrieveEvidence(ctx context.Context, question string, store memory.Store, 
 
 	if cfg.RequireProvenance && len(cfg.AllowedProvenances) > 0 {
 		filters = append(filters, memory.Filter{
-			Field: "provenance", Op: memory.OpIn, Value: cfg.AllowedProvenances,
+			Field: "metadata.source_type", Op: memory.OpIn, Value: cfg.AllowedProvenances,
 		})
 	}
 
