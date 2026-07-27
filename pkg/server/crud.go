@@ -485,6 +485,7 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 		IncludeArchived bool     `json:"include_archived"`
 		Types           []string `json:"types"`
 		Tags            []string `json:"tags"`
+		SourceType      []string `json:"source_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
@@ -536,6 +537,15 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	}
 	if len(req.Tags) > 0 {
 		filters = append(filters, memory.Filter{Field: "tags", Op: memory.OpIn, Value: req.Tags})
+	}
+	if len(req.SourceType) > 0 {
+		for _, v := range req.SourceType {
+			if err := memory.ValidateSourceType(v); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		filters = append(filters, memory.Filter{Field: "metadata.source_type", Op: memory.OpIn, Value: req.SourceType})
 	}
 
 	// READ ISOLATION: an isolated caller-type (e.g. pigo, authenticated via its

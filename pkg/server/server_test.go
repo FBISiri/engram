@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -1652,5 +1655,78 @@ func TestUpdateMemoryInvalidSourceType(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatalf("expected error for invalid source_type on update, got: %s", extractText(result))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────
+// REST /memories/search source_type[] filter (parity with MCP)
+// ─────────────────────────────────────────────────────────────
+
+func TestRESTSearchSourceTypeFilter(t *testing.T) {
+	srv, _ := newTestServer()
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+
+	// Seed two memories with distinct source_types (same store as REST server).
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "Paris is the capital of France",
+		"source_type": "web_search",
+	}); err != nil {
+		t.Fatalf("add web_search failed: %v", err)
+	}
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "Paris is a lovely place to visit",
+		"source_type": "user_input",
+	}); err != nil {
+		t.Fatalf("add user_input failed: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"query":       "Paris",
+		"limit":       10,
+		"source_type": []string{"web_search"},
+	})
+	resp, err := http.Post(ts.URL+"/memories/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /memories/search: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+
+	var hits []struct {
+		Content  string         `json:"content"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&hits); err != nil {
+		t.Fatalf("decode search results: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 web_search hit, got %d", len(hits))
+	}
+	if got, _ := hits[0].Metadata["source_type"].(string); got != "web_search" {
+		t.Errorf("expected hit with source_type=web_search, got %v", hits[0].Metadata["source_type"])
+	}
+}
+
+func TestRESTSearchSourceTypeInvalid(t *testing.T) {
+	srv, _ := newTestServer()
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]any{
+		"query":       "anything",
+		"source_type": []string{"not_a_real_type"},
+	})
+	resp, err := http.Post(ts.URL+"/memories/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /memories/search: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for invalid source_type, got %d", resp.StatusCode)
 	}
 }
