@@ -279,6 +279,74 @@ rate and recall weight.
 
 ---
 
+<!-- ============================== SOURCE TYPE ============================== -->
+
+## Source Type (Provenance Metadata)
+
+`source_type` is a fine-grained **provenance classifier**: it records *where a
+memory came from*. It's stored per entry in `Metadata["source_type"]` and
+complements the coarse `source` field (`user` / `agent` / `system`) with the
+specific channel that produced the information. This is the provenance signal
+that underpins **EU AI Act compliance** (obligations landing **2026-08-02**):
+being able to show, per memory, whether a fact came from the user, a web search,
+a tool, or the agent's own reflection.
+
+### Valid values
+
+| `source_type` | Meaning |
+|---|---|
+| `reflection` | Agent's own thinking / synthesis (e.g. output of the Reflection Engine) |
+| `user_input` | Direct user instructions, preferences, or feedback |
+| `web_search` | Web search results |
+| `tool_output` | Non-search tool / function-call output |
+| `calendar` | Calendar event context |
+| `document` | File / document extraction |
+
+> Source of truth: `pkg/memory/source_type.go` (`IsValidSourceType` /
+> `ValidateSourceType`). Qdrant keeps a keyword index on `metadata.source_type`
+> so filtering by provenance is fast.
+
+### Optional, but soft-required
+
+`source_type` is **optional but soft-required**: if you provide it, it's
+validated against the six values above (an invalid value is rejected); if you
+omit it, the write still succeeds but a warning is logged. Set it whenever you
+know the provenance — it's cheap to add and it's what makes the compliance story
+work.
+
+### MCP usage
+
+`memory_add` and `memory_update` accept an optional `source_type` string;
+`memory_search` accepts a `source_type` string array to filter by provenance
+(`OpIn` — matches any listed value).
+
+```python
+# write a memory tagged with its provenance
+memory_add(content="Frank prefers road cycling before 8am.",
+           type="identity", importance=7, tags=["frank", "cycling"],
+           source_type="user_input")
+
+# retrieve only memories that came from the user or a web search
+memory_search(query="Frank cycling habits", limit=5,
+              source_type=["user_input", "web_search"])
+```
+
+### REST usage
+
+The REST transport carries `source_type` too: `POST /memories` and
+`PUT`/`PATCH /memories/{id}` validate `source_type` inside `metadata`, and
+`POST /memories/search` takes a `source_type` string array to filter results.
+
+```bash
+# search, restricted to user- and web-sourced memories
+curl -X POST http://localhost:8080/memories/search \
+  -H "Authorization: Bearer my-key" -H "Content-Type: application/json" \
+  -d '{"query": "Frank cycling habits", "limit": 5,
+       "source_type": ["user_input", "web_search"]}'
+```
+
+---
+
 <!-- ============================== EXAMPLES ============================== -->
 
 ## Examples
