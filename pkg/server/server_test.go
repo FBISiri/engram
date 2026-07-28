@@ -1730,3 +1730,115 @@ func TestRESTSearchSourceTypeInvalid(t *testing.T) {
 		t.Fatalf("want 400 for invalid source_type, got %d", resp.StatusCode)
 	}
 }
+
+func seedMemoryForREST(t *testing.T, srv *Server) string {
+	t.Helper()
+	res, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "Seed content for REST update",
+		"source_type": "user_input",
+	})
+	if err != nil {
+		t.Fatalf("seed add failed: %v", err)
+	}
+	return parseAddMemory(t, res).ID
+}
+
+func TestRESTPutInvalidSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+	id := seedMemoryForREST(t, srv)
+
+	body, _ := json.Marshal(map[string]any{
+		"content":  "Replacement content",
+		"metadata": map[string]any{"source_type": "not_a_real_type"},
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/memories/"+id, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for invalid source_type, got %d", resp.StatusCode)
+	}
+}
+
+func TestRESTPutValidSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+	id := seedMemoryForREST(t, srv)
+
+	body, _ := json.Marshal(map[string]any{
+		"content":  "Replacement content",
+		"metadata": map[string]any{"source_type": "web_search"},
+	})
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/memories/"+id, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200 for valid source_type, got %d", resp.StatusCode)
+	}
+}
+
+func TestRESTPatchInvalidSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+	id := seedMemoryForREST(t, srv)
+
+	body, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{"source_type": "not_a_real_type"},
+	})
+	req, _ := http.NewRequest(http.MethodPatch, ts.URL+"/memories/"+id, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for invalid source_type, got %d", resp.StatusCode)
+	}
+}
+
+func TestRESTPatchValidSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	defer ts.Close()
+	id := seedMemoryForREST(t, srv)
+
+	body, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{"source_type": "document"},
+	})
+	req, _ := http.NewRequest(http.MethodPatch, ts.URL+"/memories/"+id, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200 for valid source_type, got %d", resp.StatusCode)
+	}
+}
+
+func TestMCPSearchInvalidSourceType(t *testing.T) {
+	srv, _ := newTestServer()
+	result, err := callTool(srv, "memory_search", map[string]any{
+		"query":       "anything",
+		"source_type": []interface{}{"not_a_real_type"},
+	})
+	if err != nil {
+		t.Fatalf("memory_search: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result for invalid source_type, got: %s", extractText(result))
+	}
+}

@@ -33,6 +33,7 @@
   - [GET /collections](#get-collections)
   - [Collection-scoped CRUD](#collection-scoped-crud)
   - [GET /metrics](#get-metrics)
+- [CLI (`engram-cli`)](cli.md) — thin shell wrapper over these REST routes
 - [Data Types](#data-types)
   - [Memory Object](#memory-object)
   - [Memory Types](#memory-types)

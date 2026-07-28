@@ -138,6 +138,9 @@ func (h *HTTPServer) registerRoutes() {
 
 	// P5-A1: embed cache metrics — no auth required (safe to scrape from monitoring).
 	h.mux.HandleFunc("GET /metrics", h.handleMetrics)
+
+	// MCP streamable-HTTP transport at /mcp (principal-key auth only).
+	h.registerMCPRoute()
 }
 
 // Handler returns the underlying http.Handler for use with httptest.Server or

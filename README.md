@@ -318,6 +318,26 @@ export ENGRAM_OPENAI_API_KEY=sk-...
 > Cheat sheet for the hot-path tools. Full params + error codes + request/response bodies:
 > [`docs/api.md`](docs/api.md).
 
+### CLI (`engram-cli`)
+
+Use memory from a shell / scripts without MCP — a thin stdlib-Python wrapper
+over the REST API. Full reference: [`docs/cli.md`](docs/cli.md).
+
+```bash
+chmod +x scripts/engram_cli.py
+sudo ./scripts/install-cli.sh          # symlink → /usr/local/bin/engram-cli (idempotent)
+
+export ENGRAM_URL=http://localhost:8080
+export ENGRAM_API_KEY=your-token       # if the server was started with an API key
+
+engram-cli add "Frank prefers road cycling before 8am" --type identity --importance 7 --tags frank cycling
+engram-cli search "what does Frank prefer" --limit 5 --pretty
+engram-cli health
+```
+
+Raw JSON to stdout by default (`--pretty` for human-readable); non-zero exit on
+HTTP error with the body on stderr.
+
 ### MCP tools (stdio transport)
 
 Tool name = function name. Siri / BMO talk to Engram over MCP stdio.

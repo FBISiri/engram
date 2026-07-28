@@ -273,6 +273,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// C1 provenance filter: match memories whose metadata.source_type is in the set.
 	if sourceTypes := getStringSlice(request, "source_type"); len(sourceTypes) > 0 {
+		for _, v := range sourceTypes {
+			if memory.ValidateSourceType(v) != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid source_type: %s", v)), nil
+			}
+		}
 		filters = append(filters, memory.Filter{
 			Field: "metadata.source_type",
 			Op:    memory.OpIn,

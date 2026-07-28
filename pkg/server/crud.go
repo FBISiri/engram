@@ -237,6 +237,13 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 	if rawMeta, ok := raw["metadata"]; ok {
 		var meta map[string]any
 		if err := json.Unmarshal(rawMeta, &meta); err == nil {
+			if st, ok := meta["source_type"]; ok {
+				stStr, isStr := st.(string)
+				if !isStr || memory.ValidateSourceType(stStr) != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
+					return
+				}
+			}
 			updates["metadata"] = meta
 		}
 	}
@@ -350,6 +357,15 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	if mem.LifecycleStatus == "" {
 		mem.LifecycleStatus = memory.LifecycleActive
+	}
+
+	// C1 provenance: if source_type is present in metadata, validate against the enum.
+	if st, ok := mem.Metadata["source_type"]; ok {
+		stStr, isStr := st.(string)
+		if !isStr || memory.ValidateSourceType(stStr) != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
+			return
+		}
 	}
 
 	embedStart := time.Now()

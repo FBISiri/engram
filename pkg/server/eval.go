@@ -78,6 +78,9 @@ func (o *runtimeOverrides) getDedupThreshold(def float64) float64 {
 // =============================================================================
 
 func (s *Server) handleApplyConfig(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if _, isolated := isolatedCaller(ctx); isolated {
+		return mcp.NewToolResultError("memory_apply_config is a global-scope action not permitted for isolated callers"), nil
+	}
 	configJSON, err := request.RequireString("config")
 	if err != nil {
 		return mcp.NewToolResultError("config is required (JSON string)"), nil
@@ -130,6 +133,9 @@ func snapshotDir() string {
 }
 
 func (s *Server) handleReset(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if _, isolated := isolatedCaller(ctx); isolated {
+		return mcp.NewToolResultError("memory_reset is a global-scope action not permitted for isolated callers"), nil
+	}
 	action := request.GetString("action", "snapshot")
 
 	switch action {
