@@ -434,6 +434,34 @@
         "description": "STUB: thread tag recall practice insight should be retrievable"
       },
       "metric": "precision_at_5"
+    },
+    {
+      "id": "ST-01",
+      "category": "retrieve_precision",
+      "description": "source_type filter: web_search-provenance memory retrievable under source_type=[web_search] filter",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "Qdrant sparse-dense 混合检索 关键词语义融合召回", "limit": 5, "source_type": ["web_search"]}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-st01-target"],
+        "rank_constraints": [{"eval_id": "mem-st01-target", "max_rank": 3}]
+      },
+      "metric": "precision_at_5"
+    },
+    {
+      "id": "ST-02",
+      "category": "retrieve_precision",
+      "description": "backward-compat: memory WITHOUT source_type metadata is still searchable",
+      "action": {
+        "tool": "memory_search",
+        "args": {"query": "没有 source_type 字段的遗留记忆 是否仍然可以被检索 向后兼容", "limit": 5}
+      },
+      "expect": {
+        "must_contain_eval_ids": ["mem-st02-target"],
+        "rank_constraints": [{"eval_id": "mem-st02-target", "max_rank": 3}]
+      },
+      "metric": "precision_at_5"
     }
   ],
   "gate": {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"time"
@@ -99,6 +100,12 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
 			return
 		}
+	} else {
+		if mem.Metadata == nil {
+			mem.Metadata = map[string]any{}
+		}
+		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
+		log.Printf("[WARN] engram REST POST /memories: source_type not provided, defaulting to 'reflection' (memory %s)", mem.ID)
 	}
 
 	embedStart := time.Now()
@@ -248,6 +255,39 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// C1 provenance (R4): PATCH is a partial update. Only warn when, after the
+	// patch is applied, the memory still has no source_type. If metadata is being
+	// replaced, the presence is determined by the new map; otherwise it depends
+	// on the current stored memory.
+	hasSourceType := false
+	if _, ok := raw["metadata"]; ok {
+		if metaAny, ok := updates["metadata"].(map[string]any); ok {
+			if _, has := metaAny["source_type"]; has {
+				hasSourceType = true
+			}
+		}
+	} else if current.Metadata != nil {
+		if _, has := current.Metadata["source_type"]; has {
+			hasSourceType = true
+		}
+	}
+	if !hasSourceType {
+		// Inject the default so the memory is not stored without provenance.
+		if metaAny, ok := updates["metadata"].(map[string]any); ok {
+			metaAny["source_type"] = string(memory.DefaultSourceType)
+		} else {
+			newMeta := map[string]any{}
+			if current.Metadata != nil {
+				for k, v := range current.Metadata {
+					newMeta[k] = v
+				}
+			}
+			newMeta["source_type"] = string(memory.DefaultSourceType)
+			updates["metadata"] = newMeta
+		}
+		log.Printf("[WARN] engram REST PATCH /memories/%s: source_type not provided, defaulting to 'reflection'", id)
+	}
+
 	if err := h.srv.store.Update(r.Context(), id, updates); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update error: %v", err)})
 		return
@@ -366,6 +406,12 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
 			return
 		}
+	} else {
+		if mem.Metadata == nil {
+			mem.Metadata = map[string]any{}
+		}
+		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
+		log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, defaulting to 'reflection'", id)
 	}
 
 	embedStart := time.Now()

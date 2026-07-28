@@ -1,0 +1,134 @@
+name: deploy-production
+
+# Tier 4: production deployment.
+#
+# Fires automatically AFTER "Docker Publish" finishes successfully for a STABLE
+# v*.*.* tag, then deploys the freshly-published multi-arch image onto the prod
+# host over SSH: docker pull → docker compose up → /health probe → auto-rollback
+# on failure.
+#
+# Why workflow_run (not `needs:`): docker-publish.yml and this file are separate
+# workflows, so a job-level `needs:` gate is impossible across them. workflow_run
+# lets us start only once Docker Publish has actually pushed the image, so the
+# tag we pull is guaranteed to exist.
+#
+# ⚠️ SECRETS REQUIRED — provisioned by Siri/BMO (pigo CANNOT set these):
+#   DEPLOY_HOST     — prod host name or IP
+#   DEPLOY_USER     — SSH login user on the prod host
+#   DEPLOY_SSH_KEY  — private SSH key (PEM) authorized for DEPLOY_USER
+#
+# PROD HOST PREREQUISITES (see /Engram/cicd-design.md → Deployment):
+#   1. Docker + docker compose v2 installed and DEPLOY_USER in the docker group.
+#   2. A compose project at $ENGRAM_DEPLOY_DIR (default /opt/engram) whose engram
+#      service reads the image tag from ${ENGRAM_VERSION}, e.g.:
+#         services:
+#           engram:
+#             image: imsiri/engram:${ENGRAM_VERSION:-latest}
+#             environment:
+#               - ENGRAM_TRANSPORT=http   # REQUIRED so /health is exposed on 8080
+#   3. The engram service must run with ENGRAM_TRANSPORT=http (or both) — the
+#      default stdio transport exposes no HTTP /health and the probe would fail.
+
+on:
+  workflow_run:
+    workflows: [ "Docker Publish" ]
+    types: [ completed ]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # never interrupt an in-flight production deploy
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Gate: deploy only when Docker Publish SUCCEEDED, was triggered by a tag
+    # (head_branch == tag name for tag pushes), and the tag is a STABLE semver
+    # (no '-' → skip -rc / -beta / -alpha prereleases; those never auto-deploy).
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v') &&
+      !contains(github.event.workflow_run.head_branch, '-')
+    environment:
+      name: production            # attach GitHub Environment protection / required reviewers here
+      url: https://${{ secrets.DEPLOY_HOST }}
+
+    steps:
+      - name: Resolve version from triggering tag
+        id: ver
+        run: |
+          TAG="${{ github.event.workflow_run.head_branch }}"
+          echo "tag=${TAG}"          >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}"    >> "$GITHUB_OUTPUT"
+          echo "Deploying engram ${TAG}  (image imsiri/engram:${TAG#v})"
+
+      - name: Deploy over SSH (pull → compose up → health check → rollback)
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          command_timeout: 12m
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            NEW_VERSION="${{ steps.ver.outputs.version }}"
+            NEW_IMAGE="imsiri/engram:${NEW_VERSION}"
+            APP_DIR="${ENGRAM_DEPLOY_DIR:-/opt/engram}"
+            HEALTH_URL="${ENGRAM_HEALTH_URL:-http://localhost:8080/health}"
+
+            cd "$APP_DIR"
+
+            # ── Record the currently-running version for rollback ──────────────
+            PREV_VERSION="$(cat .engram_version 2>/dev/null || echo '')"
+            echo "Current version: ${PREV_VERSION:-<none>}   →   new: ${NEW_VERSION}"
+
+            # ── Pull the new image up-front (fail fast before touching prod) ───
+            echo "Pulling ${NEW_IMAGE} ..."
+            docker pull "$NEW_IMAGE"
+
+            deploy() {   # $1 = version tag to run
+              echo "Bringing up engram ${1} ..."
+              ENGRAM_VERSION="${1}" docker compose up -d --remove-orphans
+            }
+
+            health() {   # retry /health for up to ~40s
+              for i in $(seq 1 20); do
+                if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+                  echo "✅ Health OK after $((i*2))s"
+                  return 0
+                fi
+                sleep 2
+              done
+              return 1
+            }
+
+            # ── Deploy new version ─────────────────────────────────────────────
+            echo "$NEW_VERSION" > .engram_version
+            deploy "$NEW_VERSION"
+
+            if health; then
+              echo "[OK] Deployed engram ${NEW_VERSION} successfully"
+              exit 0
+            fi
+
+            # ── Auto-rollback ──────────────────────────────────────────────────
+            echo "❌ Health check FAILED for ${NEW_VERSION} — rolling back"
+            if [ -z "$PREV_VERSION" ]; then
+              echo "[FATAL] No previous version recorded — cannot auto-rollback. Manual intervention required."
+              exit 1
+            fi
+
+            echo "$PREV_VERSION" > .engram_version
+            deploy "$PREV_VERSION"
+            if health; then
+              echo "↩️  Rolled back to ${PREV_VERSION} — deploy of ${NEW_VERSION} aborted"
+            else
+              echo "[FATAL] Rollback to ${PREV_VERSION} ALSO failed health check — manual intervention required"
+            fi
+            exit 1

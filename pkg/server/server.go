@@ -536,7 +536,11 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		}
 		mem.Metadata["source_type"] = sourceType
 	} else {
-		log.Printf("engram memory_add: source_type not provided (soft-require); memory %s stored without provenance", mem.ID)
+		if mem.Metadata == nil {
+			mem.Metadata = map[string]any{}
+		}
+		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
+		log.Printf("[WARN] engram memory_add: source_type not provided, defaulting to 'reflection' (source=%s)", mem.Source)
 	}
 
 	// Embed content
@@ -829,6 +833,12 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 			mem.Metadata = map[string]any{}
 		}
 		mem.Metadata["source_type"] = sourceType
+	} else {
+		if mem.Metadata == nil {
+			mem.Metadata = map[string]any{}
+		}
+		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
+		log.Printf("[WARN] engram memory_update: source_type not provided, defaulting to 'reflection' (source=%s)", mem.Source)
 	}
 
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {

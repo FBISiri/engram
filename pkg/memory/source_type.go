@@ -23,6 +23,11 @@ const (
 	SourceTypeDocument SourceType = "document"
 )
 
+// DefaultSourceType is the source_type assigned when a caller omits it. The
+// server soft-requires source_type: rather than reject, it warns and defaults
+// to "reflection" for backward compatibility.
+const DefaultSourceType SourceType = SourceTypeReflection
+
 // ValidSourceTypes is the set of all valid source types.
 var ValidSourceTypes = map[SourceType]bool{
 	SourceTypeToolOutput: true,

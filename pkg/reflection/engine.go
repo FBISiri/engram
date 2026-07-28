@@ -91,19 +91,25 @@ type Config struct {
 
 	// DebugEvidence enables per-question evidence retrieval diagnostics in RunResult.
 	DebugEvidence bool
+
+	// MaxInsightImportance caps the importance of reflection-generated insights.
+	// Any DialecticInsight with a higher importance is clamped to this value
+	// before write-back. Default: 8.
+	MaxInsightImportance int
 }
 
 // DefaultConfig returns the default Reflection Engine configuration.
 func DefaultConfig() Config {
 	return Config{
-		Threshold:        40.0,
-		MaxInputSize:     20,
-		MinIntervalH:     2.0,
-		DryRun:           false,
-		Mode:             "v1",   // V1 by default; V2 requires explicit opt-in
-		FocalInputSize:   50,
-		FocalQuestions:   3,
-		EvidencePerFocal: 10,
+		Threshold:            40.0,
+		MaxInputSize:         20,
+		MinIntervalH:         2.0,
+		DryRun:               false,
+		Mode:                 "v1", // V1 by default; V2 requires explicit opt-in
+		FocalInputSize:       50,
+		FocalQuestions:       3,
+		EvidencePerFocal:     10,
+		MaxInsightImportance: 8,
 	}
 }
 

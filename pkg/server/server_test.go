@@ -255,6 +255,17 @@ func (s *mockStore) count() int {
 	return len(s.memories)
 }
 
+// all returns a snapshot of all stored memories.
+func (s *mockStore) all() []memory.Memory {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]memory.Memory, 0, len(s.memories))
+	for _, sp := range s.memories {
+		out = append(out, sp.mem)
+	}
+	return out
+}
+
 // matchFilters checks if a memory matches all filters.
 func matchFilters(mem memory.Memory, filters []memory.Filter) bool {
 	for _, f := range filters {
@@ -1550,8 +1561,8 @@ func TestAddMemoryNoSourceType(t *testing.T) {
 		t.Errorf("expected 1 memory stored (soft-require), got %d", store.count())
 	}
 	mem := parseAddMemory(t, result)
-	if _, ok := mem.Metadata["source_type"]; ok {
-		t.Errorf("expected no source_type in metadata, got %v", mem.Metadata["source_type"])
+	if got, _ := mem.Metadata["source_type"].(string); got != string(memory.DefaultSourceType) {
+		t.Errorf("expected defaulted source_type=%q in metadata, got %v", memory.DefaultSourceType, mem.Metadata["source_type"])
 	}
 }
 

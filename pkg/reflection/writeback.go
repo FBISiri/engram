@@ -74,6 +74,16 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 
 		tags := ensureSourceReflectionTag(di.Tags)
 
+		// C1: cap insight importance so reflection-generated memories never
+		// dominate the store. Clamp to MaxInsightImportance (default 8).
+		maxImp := cfg.MaxInsightImportance
+		if maxImp == 0 {
+			maxImp = 8 // fallback default
+		}
+		if di.Importance > maxImp {
+			di.Importance = maxImp
+		}
+
 		tensionsVal := di.Tensions
 		if tensionsVal == nil {
 			tensionsVal = []string{}
@@ -104,6 +114,9 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 				// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
 				"caller_type":       "reflection",
 				"target_collection": "engram_reflection",
+				// C1: EU AI Act provenance — every reflection insight is
+				// self-labelled so provenance filters can include/exclude it.
+				"source_type": "reflection",
 			}),
 		)
 		insightMem.Collection = "engram_reflection"
