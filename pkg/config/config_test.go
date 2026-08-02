@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/reflection"
 )
 
 // clearEngramEnv removes every ENGRAM_* variable for the duration of the test so
@@ -52,6 +53,7 @@ func TestLoad_Defaults(t *testing.T) {
 		{"ReflectionTrigger", c.ReflectionTrigger, "count"},
 		{"ReflectionCount", c.ReflectionCount, 10},
 		{"ReflectionModel", c.ReflectionModel, "claude-sonnet-4-20250514"},
+		{"ProvenanceMode", c.ProvenanceMode, "warn"},
 	}
 	for _, ck := range checks {
 		if ck.got != ck.want {
@@ -61,6 +63,12 @@ func TestLoad_Defaults(t *testing.T) {
 	// Decay must equal the memory package default.
 	if c.Decay != memory.DefaultDecayConfig() {
 		t.Errorf("Decay default = %+v, want %+v", c.Decay, memory.DefaultDecayConfig())
+	}
+	if c.RequireProvenance {
+		t.Error("RequireProvenance default should be false")
+	}
+	if len(c.AllowedProvenances) != 0 {
+		t.Errorf("AllowedProvenances default = %v, want empty", c.AllowedProvenances)
 	}
 }
 
@@ -77,6 +85,9 @@ func TestLoad_EnvOverride(t *testing.T) {
 		"ENGRAM_HTTP_PORT":           "9090",
 		"ENGRAM_REFLECTION_ENABLED":  "1",
 		"ENGRAM_REFLECTION_COUNT":    "25",
+		"ENGRAM_REQUIRE_PROVENANCE":  "true",
+		"ENGRAM_ALLOWED_PROVENANCES": "user_input,web_search,document",
+		"ENGRAM_PROVENANCE_MODE":     "strict",
 	}
 	for k, v := range env {
 		t.Setenv(k, v)
@@ -112,6 +123,21 @@ func TestLoad_EnvOverride(t *testing.T) {
 	}
 	if c.ReflectionCount != 25 {
 		t.Errorf("ReflectionCount = %d", c.ReflectionCount)
+	}
+	if !c.RequireProvenance {
+		t.Error("RequireProvenance should be true")
+	}
+	if c.ProvenanceMode != "strict" {
+		t.Errorf("ProvenanceMode = %q, want strict", c.ProvenanceMode)
+	}
+	wantProv := []string{"user_input", "web_search", "document"}
+	if len(c.AllowedProvenances) != len(wantProv) {
+		t.Fatalf("AllowedProvenances = %v, want %v", c.AllowedProvenances, wantProv)
+	}
+	for i, v := range wantProv {
+		if c.AllowedProvenances[i] != v {
+			t.Errorf("AllowedProvenances[%d] = %q, want %q", i, c.AllowedProvenances[i], v)
+		}
 	}
 }
 
@@ -262,5 +288,101 @@ func TestParsePrincipalKeys(t *testing.T) {
 				t.Errorf("parsePrincipalKeys(%q)[%s] = %q, want %q", tc.in, k, got[k], v)
 			}
 		}
+	}
+}
+
+// =============================================================================
+// Gap coverage: focused ENGRAM_PROVENANCE_MODE / ENGRAM_REQUIRE_PROVENANCE
+// loading. TestLoad_Defaults / TestLoad_EnvOverride spot-check these broadly;
+// these add single-purpose cases, notably the invalid-mode fallback which no
+// existing test exercises.
+// =============================================================================
+
+func TestConfig_ProvenanceModeDefault(t *testing.T) {
+	clearEngramEnv(t)
+	if got := Load().ProvenanceMode; got != "warn" {
+		t.Errorf("ProvenanceMode default = %q, want warn", got)
+	}
+}
+
+func TestConfig_ProvenanceModeStrict(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_PROVENANCE_MODE", "strict")
+	if got := Load().ProvenanceMode; got != "strict" {
+		t.Errorf("ProvenanceMode = %q, want strict", got)
+	}
+}
+
+// R1: "default" is a valid ENGRAM_PROVENANCE_MODE and passes through unchanged.
+func TestProvenanceModeDefaultPassesThrough(t *testing.T) {
+	if got := provenanceMode("default"); got != "default" {
+		t.Errorf("provenanceMode(\"default\") = %q, want default", got)
+	}
+}
+
+func TestConfig_ProvenanceModeDefaultEnv(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_PROVENANCE_MODE", "default")
+	if got := Load().ProvenanceMode; got != "default" {
+		t.Errorf("ProvenanceMode = %q, want default", got)
+	}
+}
+
+// R3: Config.ProvenanceFilterConfig() maps the flat fields to a
+// reflection.ProvenanceFilterConfig, including the mode string translation.
+func TestConfig_ProvenanceFilterConfig(t *testing.T) {
+	cases := []struct {
+		mode     string
+		wantMode reflection.ProvenanceFilterMode
+	}{
+		{"warn", reflection.ProvenanceModeWarn},
+		{"strict", reflection.ProvenanceModeBlock},
+		{"default", reflection.ProvenanceModeDefault},
+		{"bogus", reflection.ProvenanceModeDefault},
+	}
+	for _, tc := range cases {
+		c := &Config{
+			RequireProvenance:  true,
+			AllowedProvenances: []string{"user_input", "web_search"},
+			ProvenanceMode:     tc.mode,
+		}
+		pf := c.ProvenanceFilterConfig()
+		if !pf.Enabled {
+			t.Errorf("mode %q: Enabled = false, want true", tc.mode)
+		}
+		if pf.Mode != tc.wantMode {
+			t.Errorf("mode %q: Mode = %q, want %q", tc.mode, pf.Mode, tc.wantMode)
+		}
+		if len(pf.AllowedProvenances) != 2 {
+			t.Errorf("mode %q: AllowedProvenances = %v, want 2 entries", tc.mode, pf.AllowedProvenances)
+		}
+	}
+
+	// RequireProvenance=false → Enabled=false.
+	if (&Config{RequireProvenance: false, ProvenanceMode: "default"}).ProvenanceFilterConfig().Enabled {
+		t.Error("Enabled should be false when RequireProvenance is false")
+	}
+}
+
+func TestConfig_ProvenanceModeInvalid(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_PROVENANCE_MODE", "loose")
+	if got := Load().ProvenanceMode; got != "warn" {
+		t.Errorf("invalid ProvenanceMode should fall back to warn, got %q", got)
+	}
+}
+
+func TestConfig_RequireProvenanceDefault(t *testing.T) {
+	clearEngramEnv(t)
+	if Load().RequireProvenance {
+		t.Error("RequireProvenance default should be false")
+	}
+}
+
+func TestConfig_RequireProvenanceTrue(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_REQUIRE_PROVENANCE", "true")
+	if !Load().RequireProvenance {
+		t.Error("RequireProvenance should be true when ENGRAM_REQUIRE_PROVENANCE=true")
 	}
 }

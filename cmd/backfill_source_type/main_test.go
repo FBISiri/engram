@@ -82,6 +82,43 @@ func (f *fakeStore) Update(_ context.Context, id string, fields map[string]any) 
 
 // ── mapping logic ────────────────────────────────────────────────────────────
 
+func TestClassifySourceType(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		source  string
+		tags    []string
+		want    string
+	}{
+		// Content prefixes (agent-recorded Frank directives -> user_input).
+		{"content_directive", "Frank directive: always run tests", "agent", nil, string(memory.SourceTypeUserInput)},
+		{"content_instructed", "Frank instructed me to be terse", "agent", nil, string(memory.SourceTypeUserInput)},
+		{"content_feedback", "Frank feedback on the PR", "agent", nil, string(memory.SourceTypeUserInput)},
+		{"content_lowercase", "frank told me to stop", "agent", nil, string(memory.SourceTypeUserInput)},
+		{"content_cjk_zhishi", "Frank 指示：优先简洁", "agent", nil, string(memory.SourceTypeUserInput)},
+		{"content_cjk_yaoqiu", "Frank 要求每次都测试", "system", nil, string(memory.SourceTypeUserInput)},
+		{"content_prefers", "Frank prefers small diffs", "agent", nil, string(memory.SourceTypeUserInput)},
+		// Tag-based.
+		{"tag_frank_feedback", "some note", "agent", []string{"frank-feedback"}, string(memory.SourceTypeUserInput)},
+		{"tag_frank_and_directive", "some note", "agent", []string{"frank", "directive"}, string(memory.SourceTypeUserInput)},
+		// No false positives.
+		{"normal_agent", "Learned that the cache TTL is 5 minutes", "agent", nil, string(memory.SourceTypeReflection)},
+		{"mentions_frank_midtext", "The team including Frank agreed", "agent", nil, string(memory.SourceTypeReflection)},
+		{"tag_frank_only", "some note", "agent", []string{"frank"}, string(memory.SourceTypeReflection)},
+		{"tag_directive_only", "some note", "agent", []string{"directive"}, string(memory.SourceTypeReflection)},
+		// Existing behaviour preserved.
+		{"user_source", "my preference", "user", nil, string(memory.SourceTypeUserInput)},
+		{"user_source_with_directive_content", "Frank directive: x", "user", nil, string(memory.SourceTypeUserInput)},
+		{"system_source", "system event", "system", nil, string(memory.SourceTypeReflection)},
+	}
+	for _, c := range cases {
+		m := memory.Memory{Content: c.content, Source: c.source, Tags: c.tags}
+		if got := classifySourceType(m); got != c.want {
+			t.Errorf("%s: classifySourceType = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestSourceTypeForSource(t *testing.T) {
 	cases := map[string]string{
 		"user":    string(memory.SourceTypeUserInput),

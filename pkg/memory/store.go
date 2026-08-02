@@ -60,6 +60,7 @@ const (
 	OpLte   FilterOp = "lte"
 	OpRange   FilterOp = "range"
 	OpIsEmpty FilterOp = "is_empty"
+	OpIsNull  FilterOp = "is_null"
 )
 
 // Filter is a single field filter for search.

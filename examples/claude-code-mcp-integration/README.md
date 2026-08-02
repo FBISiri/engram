@@ -133,12 +133,12 @@ memory_search(query="<task or domain>", limit=5)
 Always do this before writing any code.
 
 **During work (when you learn something durable):**
-memory_add(type="insight", content="...", importance=6-7, tags=["<domain>"])
+memory_add(type="insight", content="...", importance=6-7, tags=["<domain>"], source_type="reflection")
 → capture architectural decisions, gotchas, patterns worth remembering.
 
 **After completing a task:**
 memory_add(type="event", content="<what was done, key decisions, PR number>",
-           importance=5, tags=["<domain>", "completed"])
+           importance=5, tags=["<domain>", "completed"], source_type="reflection")
 
 **Do NOT store:**
 - Transient scratchpad / intermediate reasoning

@@ -7,14 +7,14 @@ import (
 )
 
 func TestIsValidSourceType(t *testing.T) {
-	valid := []string{"tool_output", "reflection", "web_search", "user_input", "calendar", "document"}
+	valid := []string{"tool_output", "reflection", "web_search", "user_input", "calendar", "document", "unknown"}
 	for _, s := range valid {
 		if !IsValidSourceType(s) {
 			t.Errorf("IsValidSourceType(%q) = false, want true", s)
 		}
 	}
 
-	invalid := []string{"", "tool", "TOOL_OUTPUT", "web", "unknown", "user"}
+	invalid := []string{"", "tool", "TOOL_OUTPUT", "web", "user"}
 	for _, s := range invalid {
 		if IsValidSourceType(s) {
 			t.Errorf("IsValidSourceType(%q) = true, want false", s)
@@ -38,8 +38,25 @@ func TestValidateSourceType(t *testing.T) {
 
 func TestValidSourceTypesComplete(t *testing.T) {
 	// Guard against accidental enum drift.
-	if len(ValidSourceTypes) != 6 {
-		t.Errorf("expected 6 valid source types, got %d", len(ValidSourceTypes))
+	if len(ValidSourceTypes) != 7 {
+		t.Errorf("expected 7 valid source types, got %d", len(ValidSourceTypes))
+	}
+}
+
+// R2: SourceTypeUnknown is the 7th enum value and is valid.
+func TestSourceTypeUnknownValid(t *testing.T) {
+	if !IsValidSourceType(string(SourceTypeUnknown)) {
+		t.Errorf("IsValidSourceType(%q) = false, want true", SourceTypeUnknown)
+	}
+	if SourceTypeUnknown != "unknown" {
+		t.Errorf("SourceTypeUnknown = %q, want unknown", SourceTypeUnknown)
+	}
+}
+
+// R2: legacy memories without source_type now default to "unknown".
+func TestDefaultSourceTypeIsUnknown(t *testing.T) {
+	if DefaultSourceType != SourceTypeUnknown {
+		t.Errorf("DefaultSourceType = %q, want %q", DefaultSourceType, SourceTypeUnknown)
 	}
 }
 
@@ -54,7 +71,7 @@ func TestValidateSourceTypeErrorMessage(t *testing.T) {
 	if !strings.Contains(msg, `"bogus"`) {
 		t.Errorf("error should quote the offending value, got: %q", msg)
 	}
-	for _, valid := range []string{"tool_output", "reflection", "web_search", "user_input", "calendar", "document"} {
+	for _, valid := range []string{"tool_output", "reflection", "web_search", "user_input", "calendar", "document", "unknown"} {
 		if !strings.Contains(msg, valid) {
 			t.Errorf("error should list valid type %q, got: %q", valid, msg)
 		}

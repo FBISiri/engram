@@ -654,6 +654,15 @@ func filterToCondition(f memory.Filter) *qdrant.Condition {
 
 	case memory.OpIsEmpty:
 		return qdrant.NewIsEmpty(f.Field)
+
+	case memory.OpIsNull:
+		// Provenance block mode uses OpIsNull to EXCLUDE records lacking the
+		// field. buildFilter places all conditions in Must, so wrap the IsNull
+		// check in a negated sub-filter ("must NOT be null"); otherwise Must(OpIn)
+		// AND Must(IsNull) is contradictory and matches nothing.
+		return qdrant.NewFilterAsCondition(&qdrant.Filter{
+			MustNot: []*qdrant.Condition{qdrant.NewIsNull(f.Field)},
+		})
 	}
 
 	return nil

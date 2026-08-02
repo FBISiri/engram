@@ -53,7 +53,7 @@ func TestCompat_SearchReturnsNoSourceTypeMemories(t *testing.T) {
 	}
 }
 
-// --- Update: legacy memory updated WITHOUT source_type defaults to reflection -
+// --- Update: legacy memory updated WITHOUT source_type defaults to unknown ---
 
 func TestCompat_UpdateNoSourceTypeDefaultsReflection(t *testing.T) {
 	srv, st := newTestServer()
@@ -82,8 +82,8 @@ func TestCompat_UpdateNoSourceTypeDefaultsReflection(t *testing.T) {
 	if resp.DeletedCount != 1 {
 		t.Errorf("expected old memory deleted, deleted_count=%d", resp.DeletedCount)
 	}
-	if got, _ := resp.NewMemory.Metadata["source_type"].(string); got != "reflection" {
-		t.Errorf("expected source_type defaulted to reflection after plain update, got %v", resp.NewMemory.Metadata["source_type"])
+	if got, _ := resp.NewMemory.Metadata["source_type"].(string); got != "unknown" {
+		t.Errorf("expected source_type defaulted to unknown after plain update, got %v", resp.NewMemory.Metadata["source_type"])
 	}
 }
 

@@ -37,6 +37,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -201,12 +202,12 @@ func (h *HTTPServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if isBearer {
 			// Principal keys win: identity derived from the key itself.
 			for ct, key := range h.principalKeys {
-				if key != "" && token == key {
+				if key != "" && subtle.ConstantTimeCompare([]byte(token), []byte(key)) == 1 {
 					next(w, r.WithContext(WithCallerType(r.Context(), ct)))
 					return
 				}
 			}
-			if h.apiKey != "" && token == h.apiKey {
+			if h.apiKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(h.apiKey)) == 1 {
 				next(w, r)
 				return
 			}

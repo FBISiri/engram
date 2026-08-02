@@ -67,11 +67,22 @@ type Config struct {
 
 	// AllowedProvenances is a whitelist of provenance values for evidence filtering.
 	// Only used when RequireProvenance is true.
+	//
+	// Deprecated: use ProvenanceFilter. Retained for backward compatibility;
+	// migrated into ProvenanceFilter via resolveProvenanceFilter() when
+	// ProvenanceFilter is not explicitly enabled.
 	AllowedProvenances []string
 
 	// RequireProvenance enables provenance-based filtering in evidence retrieval.
 	// Default: false (provenance P0 not yet landed).
+	//
+	// Deprecated: use ProvenanceFilter. See AllowedProvenances.
 	RequireProvenance bool
+
+	// ProvenanceFilter configures provenance-based evidence filtering and
+	// write-back enforcement (Phase 2 §4.1). When Enabled is false the legacy
+	// RequireProvenance/AllowedProvenances fields are migrated in.
+	ProvenanceFilter ProvenanceFilterConfig
 
 	// EvidenceSearchTimeout is the per-question store.Search timeout. Default: 3s, hard max: 10s.
 	EvidenceSearchTimeout time.Duration
@@ -110,7 +121,29 @@ func DefaultConfig() Config {
 		FocalQuestions:       3,
 		EvidencePerFocal:     10,
 		MaxInsightImportance: 8,
+		ProvenanceFilter:     ProvenanceFilterConfig{Enabled: false},
 	}
+}
+
+// resolveProvenanceFilter returns the effective ProvenanceFilterConfig,
+// migrating the legacy RequireProvenance/AllowedProvenances fields when the
+// richer ProvenanceFilter is not explicitly enabled (Phase 2 §4.4).
+func (c Config) resolveProvenanceFilter() ProvenanceFilterConfig {
+	if c.ProvenanceFilter.Enabled {
+		pf := c.ProvenanceFilter
+		if pf.Mode == "" {
+			pf.Mode = ProvenanceModeDefault
+		}
+		return pf
+	}
+	if c.RequireProvenance && len(c.AllowedProvenances) > 0 {
+		return ProvenanceFilterConfig{
+			Enabled:            true,
+			Mode:               ProvenanceModeDefault,
+			AllowedProvenances: c.AllowedProvenances,
+		}
+	}
+	return ProvenanceFilterConfig{Enabled: false}
 }
 
 // RunResult holds the output of a single reflection run.
@@ -310,7 +343,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 
 			// W17 v1.1: low-confidence insights are diverted to Obsidian drafts
 			// instead of polluting Engram.
-			if ins.Confidence > 0 && ins.Confidence < 0.6 {
+			if ins.Confidence < 0.6 {
 				if werr := writeReflectionDraft(ins, tags, sourceIDs); werr != nil {
 					result.Errors = append(result.Errors,
 						fmt.Sprintf("write draft failed: %v", werr))
@@ -340,6 +373,7 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 					// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
 					"caller_type":                  "reflection",
 					"target_collection":            "engram_reflection",
+					"source_type":                 "reflection",
 					// §1.1 v0.3: run-level confidence counters written to engram_reflection.
 					"haiku_conf_default_count":     result.HaikuConfDefaultCount,
 					"haiku_conf_parse_fail_count":  result.HaikuConfParseFailCount,
@@ -843,7 +877,7 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 		}
 
 		// Low-confidence diversion preserved.
-		if ins.Confidence > 0 && ins.Confidence < 0.6 {
+		if ins.Confidence < 0.6 {
 			if werr := writeReflectionDraft(ins, tags, in.EvidenceIDs); werr != nil {
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("write draft failed: %v", werr))
@@ -872,6 +906,7 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 				"reflection_summary":    in.Summary,
 				// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
 				"caller_type":           "reflection",
+				"source_type":           "reflection",
 				"target_collection":     "engram_reflection",
 			}),
 		)

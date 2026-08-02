@@ -55,11 +55,7 @@ func retrieveEvidence(ctx context.Context, question string, store memory.Store, 
 	// is treated as 1.0 for backward compatibility.
 	var filters []memory.Filter
 
-	if cfg.RequireProvenance && len(cfg.AllowedProvenances) > 0 {
-		filters = append(filters, memory.Filter{
-			Field: "metadata.source_type", Op: memory.OpIn, Value: cfg.AllowedProvenances,
-		})
-	}
+	filters = append(filters, BuildEvidenceFilters(cfg.resolveProvenanceFilter())...)
 
 	scored, err := store.Search(ctx, vec, memory.SearchOptions{
 		Limit:   topK,

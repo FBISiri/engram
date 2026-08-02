@@ -380,6 +380,7 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 			memory.WithSource("agent"),
 			memory.WithImportance(avgImportance),
 			memory.WithTags(allTags...),
+			memory.WithMetadata(map[string]any{"source_type": "reflection"}),
 		)
 
 		// Embed and store the new insight.

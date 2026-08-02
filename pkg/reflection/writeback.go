@@ -99,6 +99,26 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 			tensionsAny[j] = t
 		}
 
+		md := map[string]any{
+			"tensions":       tensionsAny,
+			"source_ids":     sourceIDsAny,
+			"focal_question": di.Question,
+			"provenance":     provenanceV2,
+			// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
+			"caller_type":       "reflection",
+			"target_collection": "engram_reflection",
+			// C1: EU AI Act provenance — every reflection insight is
+			// self-labelled so provenance filters can include/exclude it.
+			"source_type": "reflection",
+		}
+
+		// Phase 2 §4.3: enforce provenance on write-back before insert.
+		if perr := EnforceWriteBackProvenance(cfg.resolveProvenanceFilter(), md); perr != nil {
+			stats.Failed++
+			stats.Errors = append(stats.Errors, fmt.Sprintf("provenance enforcement failed: %v", perr))
+			continue
+		}
+
 		insightMem := memory.New(di.Content,
 			memory.WithType(memory.TypeInsight),
 			memory.WithSource("system"),
@@ -106,18 +126,7 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 			memory.WithTags(tags...),
 			memory.WithConfidence(di.Confidence),
 			memory.WithValidUntil(reflectionValidUntil),
-			memory.WithMetadata(map[string]any{
-				"tensions":       tensionsAny,
-				"source_ids":     sourceIDsAny,
-				"focal_question": di.Question,
-				"provenance":     provenanceV2,
-				// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
-				"caller_type":       "reflection",
-				"target_collection": "engram_reflection",
-				// C1: EU AI Act provenance — every reflection insight is
-				// self-labelled so provenance filters can include/exclude it.
-				"source_type": "reflection",
-			}),
+			memory.WithMetadata(md),
 		)
 		insightMem.Collection = "engram_reflection"
 

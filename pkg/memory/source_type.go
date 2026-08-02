@@ -21,12 +21,16 @@ const (
 	SourceTypeCalendar SourceType = "calendar"
 	// SourceTypeDocument is a memory derived from a document.
 	SourceTypeDocument SourceType = "document"
+	// SourceTypeUnknown is a memory whose provenance is unknown (e.g. legacy
+	// memories written before source_type was required).
+	SourceTypeUnknown SourceType = "unknown"
 )
 
 // DefaultSourceType is the source_type assigned when a caller omits it. The
 // server soft-requires source_type: rather than reject, it warns and defaults
-// to "reflection" for backward compatibility.
-const DefaultSourceType SourceType = SourceTypeReflection
+// to "unknown" for backward compatibility (legacy memories without an explicit
+// source_type).
+const DefaultSourceType SourceType = SourceTypeUnknown
 
 // ValidSourceTypes is the set of all valid source types.
 var ValidSourceTypes = map[SourceType]bool{
@@ -36,6 +40,7 @@ var ValidSourceTypes = map[SourceType]bool{
 	SourceTypeUserInput:  true,
 	SourceTypeCalendar:   true,
 	SourceTypeDocument:   true,
+	SourceTypeUnknown:    true,
 }
 
 // IsValidSourceType reports whether s is a recognized source type.
@@ -48,7 +53,7 @@ func IsValidSourceType(s string) bool {
 // should check for emptiness before calling this.
 func ValidateSourceType(s string) error {
 	if !IsValidSourceType(s) {
-		return fmt.Errorf("invalid source_type: %q (valid: tool_output, reflection, web_search, user_input, calendar, document)", s)
+		return fmt.Errorf("invalid source_type: %q (valid: tool_output, reflection, web_search, user_input, calendar, document, unknown)", s)
 	}
 	return nil
 }

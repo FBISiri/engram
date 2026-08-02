@@ -9,6 +9,7 @@ import (
 
 	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/reflection"
 )
 
 // Config holds all Engram configuration.
@@ -27,8 +28,8 @@ type Config struct {
 	VoyageAPIKey       string
 
 	// Scoring
-	Weights memory.ScoringWeights
-	Decay   memory.DecayConfig
+	Weights        memory.ScoringWeights
+	Decay          memory.DecayConfig
 	MMRLambda      float64
 	DedupThreshold float64
 
@@ -49,6 +50,32 @@ type Config struct {
 	ReflectionTrigger  string // "count", "cron", "manual"
 	ReflectionCount    int
 	ReflectionModel    string
+	RequireProvenance  bool     // ENGRAM_REQUIRE_PROVENANCE
+	AllowedProvenances []string // ENGRAM_ALLOWED_PROVENANCES (comma-separated)
+	ProvenanceMode     string   // ENGRAM_PROVENANCE_MODE: "warn" (default) | "strict" | "default"
+}
+
+// ProvenanceFilterConfig builds a reflection.ProvenanceFilterConfig from the
+// flat config fields, making the mapping from the env-loaded fields to the
+// reflection filter shape explicit. The ProvenanceMode string is mapped to the
+// reflection ProvenanceFilterMode: "warn"→warn, "strict"→block, "default"→default
+// (any other value falls back to default, consistent with
+// reflection.BuildEvidenceFilters).
+func (c *Config) ProvenanceFilterConfig() reflection.ProvenanceFilterConfig {
+	var mode reflection.ProvenanceFilterMode
+	switch c.ProvenanceMode {
+	case "warn":
+		mode = reflection.ProvenanceModeWarn
+	case "strict":
+		mode = reflection.ProvenanceModeBlock
+	default: // "default" and unknown values
+		mode = reflection.ProvenanceModeDefault
+	}
+	return reflection.ProvenanceFilterConfig{
+		Enabled:            c.RequireProvenance,
+		Mode:               mode,
+		AllowedProvenances: c.AllowedProvenances,
+	}
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -78,17 +105,48 @@ func Load() *Config {
 		DedupThreshold: envFloat("ENGRAM_DEDUP_THRESHOLD", 0.92),
 
 		// Server
-		Transport: envStr("ENGRAM_TRANSPORT", "stdio"),
-		HTTPPort:  envInt("ENGRAM_HTTP_PORT", 8080),
-		APIKey:    envStr("ENGRAM_API_KEY", ""),
+		Transport:     envStr("ENGRAM_TRANSPORT", "stdio"),
+		HTTPPort:      envInt("ENGRAM_HTTP_PORT", 8080),
+		APIKey:        envStr("ENGRAM_API_KEY", ""),
 		PrincipalKeys: parsePrincipalKeys(envStr("ENGRAM_PRINCIPAL_KEYS", "")),
 
 		// Reflection
-		ReflectionEnabled: envBool("ENGRAM_REFLECTION_ENABLED", false),
-		ReflectionTrigger: envStr("ENGRAM_REFLECTION_TRIGGER", "count"),
-		ReflectionCount:   envInt("ENGRAM_REFLECTION_COUNT", 10),
-		ReflectionModel:   envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
+		ReflectionEnabled:  envBool("ENGRAM_REFLECTION_ENABLED", false),
+		ReflectionTrigger:  envStr("ENGRAM_REFLECTION_TRIGGER", "count"),
+		ReflectionCount:    envInt("ENGRAM_REFLECTION_COUNT", 10),
+		ReflectionModel:    envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
+		RequireProvenance:  envBool("ENGRAM_REQUIRE_PROVENANCE", false),
+		AllowedProvenances: parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
+		ProvenanceMode:     provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),
 	}
+}
+
+// provenanceMode validates the ENGRAM_PROVENANCE_MODE value. Valid values are
+// "warn", "strict" and "default"; any other value logs a warning and falls
+// back to "warn".
+func provenanceMode(raw string) string {
+	switch raw {
+	case "warn", "strict", "default":
+		return raw
+	default:
+		log.Printf("WARN config: ENGRAM_PROVENANCE_MODE=%q is invalid, falling back to \"warn\"", raw)
+		return "warn"
+	}
+}
+
+// parseCommaList splits a comma-separated string into trimmed, non-empty
+// elements. Returns nil for an empty/whitespace-only input.
+func parseCommaList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func envStr(key, defaultVal string) string {

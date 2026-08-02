@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/config"
@@ -75,6 +76,59 @@ type runResult struct {
 	BySourceType   map[string]int `json:"by_source_type"`
 	Patched        int            `json:"patched"`
 	Errors         []string       `json:"errors,omitempty"`
+}
+
+// frankDirectivePrefixes are case-insensitive content prefixes that indicate a
+// memory records a directive/feedback from Frank (the user). When Siri records
+// such a directive, Memory.Source is "agent" but the information provenance is
+// the user, so the source_type should be user_input, not reflection.
+var frankDirectivePrefixes = []string{
+	"frank directive",
+	"frank instructed",
+	"frank feedback",
+	"frank 指示",
+	"frank 要求",
+	"frank 明确",
+	"frank prefers",
+	"frank said",
+	"frank wants",
+	"frank asked",
+	"frank told",
+}
+
+// isFrankDirective applies content- and tag-aware heuristics to detect a memory
+// that records a directive/feedback originating from Frank (the user).
+func isFrankDirective(m memory.Memory) bool {
+	lower := strings.ToLower(strings.TrimSpace(m.Content))
+	for _, p := range frankDirectivePrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+
+	var hasFrank, hasDirective bool
+	for _, t := range m.Tags {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "frank-feedback":
+			return true
+		case "frank":
+			hasFrank = true
+		case "directive":
+			hasDirective = true
+		}
+	}
+	return hasFrank && hasDirective
+}
+
+// classifySourceType assigns a fine-grained source_type to a memory. It first
+// applies content-aware heuristics (Frank directive detection) that override the
+// coarse mapping, then falls back to sourceTypeForSource(m.Source). A memory
+// whose Source is already "user" is left to the coarse mapping (user_input).
+func classifySourceType(m memory.Memory) string {
+	if m.Source != "user" && isFrankDirective(m) {
+		return string(memory.SourceTypeUserInput)
+	}
+	return sourceTypeForSource(m.Source)
 }
 
 // sourceTypeForSource maps a coarse Memory.Source to the default fine-grained
@@ -244,7 +298,7 @@ func scan(ctx context.Context, store backfillStore) ([]candidate, int, int, erro
 			candidates = append(candidates, candidate{
 				ID:         m.ID,
 				Source:     m.Source,
-				SourceType: sourceTypeForSource(m.Source),
+				SourceType: classifySourceType(m),
 				OldMeta:    m.Metadata,
 			})
 		}

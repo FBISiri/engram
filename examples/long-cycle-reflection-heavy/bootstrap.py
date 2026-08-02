@@ -196,6 +196,7 @@ def build_payloads() -> list[dict[str, Any]]:
                 "importance": mem["importance"],
                 "tags": mem["tags"],
                 "source": "bootstrap_example",
+                "source_type": "document",
             }
         )
     return payloads

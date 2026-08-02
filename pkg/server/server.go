@@ -26,6 +26,10 @@ import (
 
 var tracer = otel.Tracer("engram.memory")
 
+// strictProvenanceMsg is returned when a write omits source_type while
+// ENGRAM_PROVENANCE_MODE=strict.
+const strictProvenanceMsg = "source_type is required (ENGRAM_PROVENANCE_MODE=strict). Valid values: tool_output, reflection, web_search, user_input, calendar, document, unknown"
+
 // Server wraps the MCP server with Engram's memory operations.
 type Server struct {
 	store          memory.Store
@@ -35,10 +39,11 @@ type Server struct {
 	mmrLambda      float64
 	dedupThreshold float64
 	mcpServer      *mcpserver.MCPServer
-	embedCache     memory.EmbedCache       // optional; set via SetEmbedCache
-	metrics        *engrammetrics.Metrics  // optional; set via SetMetrics
-	traj           *trajectory.Logger      // optional; set via SetTrajectoryLogger
-	overrides      runtimeOverrides        // hot-reloadable config
+	embedCache     memory.EmbedCache      // optional; set via SetEmbedCache
+	metrics        *engrammetrics.Metrics // optional; set via SetMetrics
+	traj           *trajectory.Logger     // optional; set via SetTrajectoryLogger
+	overrides      runtimeOverrides       // hot-reloadable config
+	cfg            *config.Config         // full loaded config
 }
 
 // SetMetrics registers prometheus metrics so handlers can record latency.
@@ -86,6 +91,7 @@ func NewServer(store memory.Store, embedder embedding.Embedder, cfg *config.Conf
 		decay:          cfg.Decay,
 		mmrLambda:      cfg.MMRLambda,
 		dedupThreshold: cfg.DedupThreshold,
+		cfg:            cfg,
 	}
 
 	s.mcpServer = mcpserver.NewMCPServer(
@@ -424,6 +430,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		LastAccessedAt   float64        `json:"last_accessed_at,omitempty"`
 		Metadata         map[string]any `json:"metadata,omitempty"`
 		SourceCollection string         `json:"source_collection"`
+		SourceType       string         `json:"source_type,omitempty"`
 	}
 
 	output := make([]searchResult, len(results))
@@ -443,6 +450,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			LastAccessedAt:   r.LastAccessedAt,
 			Metadata:         r.Metadata,
 			SourceCollection: collectionOrFallback(r.Collection, collection.CollectionUser),
+			SourceType:       sourceTypeFromMetadata(r.Metadata),
 		}
 	}
 
@@ -536,6 +544,10 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		}
 		mem.Metadata["source_type"] = sourceType
 	} else {
+		if s.cfg != nil && s.cfg.ProvenanceMode == "strict" {
+			log.Printf("[WARN] engram memory_add: source_type not provided, rejecting (strict mode)")
+			return mcp.NewToolResultError(strictProvenanceMsg), nil
+		}
 		if mem.Metadata == nil {
 			mem.Metadata = map[string]any{}
 		}
@@ -781,10 +793,10 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	// dry_run: return preview without making any changes
 	if dryRun {
 		type dryRunResult struct {
-			Status          string        `json:"status"`
-			WouldDeleteCount int          `json:"would_delete_count"`
-			WouldDelete     []deletedItem `json:"would_delete"`
-			NewContent      string        `json:"new_content"`
+			Status           string        `json:"status"`
+			WouldDeleteCount int           `json:"would_delete_count"`
+			WouldDelete      []deletedItem `json:"would_delete"`
+			NewContent       string        `json:"new_content"`
 		}
 		result := dryRunResult{
 			Status:           "dry_run",
@@ -834,6 +846,10 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		}
 		mem.Metadata["source_type"] = sourceType
 	} else {
+		if s.cfg != nil && s.cfg.ProvenanceMode == "strict" {
+			log.Printf("[WARN] engram memory_update: source_type not provided, rejecting (strict mode)")
+			return mcp.NewToolResultError(strictProvenanceMsg), nil
+		}
 		if mem.Metadata == nil {
 			mem.Metadata = map[string]any{}
 		}
@@ -955,9 +971,9 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	// dry_run: return preview without deleting
 	if dryRun {
 		type dryRunResult struct {
-			Status          string        `json:"status"`
-			WouldDeleteCount int          `json:"would_delete_count"`
-			WouldDelete     []deletedItem `json:"would_delete"`
+			Status           string        `json:"status"`
+			WouldDeleteCount int           `json:"would_delete_count"`
+			WouldDelete      []deletedItem `json:"would_delete"`
 		}
 		result := dryRunResult{
 			Status:           "dry_run",
@@ -998,7 +1014,12 @@ func (s *Server) handleReflectionCheck(ctx context.Context, _ mcp.CallToolReques
 	if _, isolated := isolatedCaller(ctx); isolated {
 		return mcp.NewToolResultError("reflection_check is a global-scope action not permitted for isolated callers"), nil
 	}
-	eng := reflection.NewEngine(s.store, s.embedder, reflection.DefaultConfig())
+	eng := reflection.NewEngine(s.store, s.embedder, func() reflection.Config {
+		c := reflection.DefaultConfig()
+		c.RequireProvenance = s.cfg.RequireProvenance
+		c.AllowedProvenances = s.cfg.AllowedProvenances
+		return c
+	}())
 	result, err := eng.Check(ctx)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("reflection check error: %v", err)), nil
@@ -1027,6 +1048,8 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 
 	cfg := reflection.DefaultConfig()
 	cfg.DryRun = dryRun
+	cfg.RequireProvenance = s.cfg.RequireProvenance
+	cfg.AllowedProvenances = s.cfg.AllowedProvenances
 
 	eng := reflection.NewEngine(s.store, s.embedder, cfg)
 	result, err := eng.Run(ctx)
@@ -1048,9 +1071,10 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 // batch 2). Event-driven single-event reflection triggered by task failures
 // or user corrections — bypasses accumulator thresholds and daily quotas.
 //
-//nolint:unused // Staged in commit 8dd5200 (W17 v1.1 batch 2) ahead of tool
 // registration; retained pending wiring of the reflection_run_event MCP tool.
 // Not dead — RunSingleEvent is exercised by reflection engine tests.
+//
+//nolint:unused // Staged in commit 8dd5200 (W17 v1.1 batch 2) ahead of tool
 func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if _, isolated := isolatedCaller(ctx); isolated {
 		return mcp.NewToolResultError("reflection_run_event is a global-scope action not permitted for isolated callers"), nil
@@ -1100,6 +1124,8 @@ func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallT
 
 	cfg := reflection.DefaultConfig()
 	cfg.DryRun = dryRun
+	cfg.RequireProvenance = s.cfg.RequireProvenance
+	cfg.AllowedProvenances = s.cfg.AllowedProvenances
 
 	eng := reflection.NewEngine(s.store, s.embedder, cfg)
 	result, err := eng.RunSingleEvent(ctx, reflection.SingleEventInput{
@@ -1127,6 +1153,18 @@ func collectionOrFallback(col, fallback string) string {
 		return col
 	}
 	return fallback
+}
+
+// sourceTypeFromMetadata extracts source_type from a metadata map, returning ""
+// if absent or not a string.
+func sourceTypeFromMetadata(md map[string]any) string {
+	if md == nil {
+		return ""
+	}
+	if st, ok := md["source_type"].(string); ok {
+		return st
+	}
+	return ""
 }
 
 // getStringSlice extracts a []string from the request arguments.

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -32,7 +33,13 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		ValidUntil float64        `json:"valid_until"`
 		Metadata   map[string]any `json:"metadata"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
 		return
 	}
@@ -101,6 +108,11 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else {
+		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
+			log.Printf("[WARN] engram REST POST /memories: source_type not provided, rejecting (strict mode)")
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceMsg})
+			return
+		}
 		if mem.Metadata == nil {
 			mem.Metadata = map[string]any{}
 		}
@@ -150,7 +162,14 @@ func (h *HTTPServer) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, mems[0])
+	type memoryWithSourceType struct {
+		memory.Memory
+		SourceType string `json:"source_type,omitempty"`
+	}
+	writeJSON(w, http.StatusOK, memoryWithSourceType{
+		Memory:     mems[0],
+		SourceType: sourceTypeFromMetadata(mems[0].Metadata),
+	})
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -170,7 +189,13 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 
 	// Decode into a raw map to detect forbidden fields.
 	var raw map[string]json.RawMessage
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
 		return
 	}
@@ -272,6 +297,11 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !hasSourceType {
+		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
+			log.Printf("[WARN] engram REST PATCH /memories/%s: source_type not provided, rejecting (strict mode)", id)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceMsg})
+			return
+		}
 		// Inject the default so the memory is not stored without provenance.
 		if metaAny, ok := updates["metadata"].(map[string]any); ok {
 			metaAny["source_type"] = string(memory.DefaultSourceType)
@@ -338,7 +368,13 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 		ValidUntil float64        `json:"valid_until"`
 		Metadata   map[string]any `json:"metadata"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
 		return
 	}
@@ -407,6 +443,11 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
+			log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, rejecting (strict mode)", id)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceMsg})
+			return
+		}
 		if mem.Metadata == nil {
 			mem.Metadata = map[string]any{}
 		}
@@ -549,7 +590,13 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 		Tags            []string `json:"tags"`
 		SourceType      []string `json:"source_type"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
 		return
 	}
@@ -668,7 +715,7 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	}
 
 	// Update access_count and last_accessed_source asynchronously.
-	callerType := r.Header.Get("X-Caller-Type")
+	callerType := CallerTypeFromContext(r.Context())
 	if len(results) > 0 {
 		toUpdate := make([]string, len(results))
 		accessCounts := make([]int64, len(results))
@@ -700,10 +747,11 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 		memory.Memory
 		Score              float64 `json:"score"`
 		ResolvedCollection string  `json:"resolved_collection,omitempty"`
+		SourceType         string  `json:"source_type,omitempty"`
 	}
 	output := make([]result, len(results))
 	for i, r := range results {
-		output[i] = result{Memory: r.Memory, Score: r.Score, ResolvedCollection: resolvedCollection}
+		output[i] = result{Memory: r.Memory, Score: r.Score, ResolvedCollection: resolvedCollection, SourceType: sourceTypeFromMetadata(r.Metadata)}
 	}
 
 	writeJSON(w, http.StatusOK, output)
@@ -727,4 +775,3 @@ func isValidLifecycleTransition(current, next string) bool {
 	}
 	return false
 }
-
