@@ -30,6 +30,11 @@ var tracer = otel.Tracer("engram.memory")
 // ENGRAM_PROVENANCE_MODE=strict.
 const strictProvenanceMsg = "source_type is required (ENGRAM_PROVENANCE_MODE=strict). Valid values: tool_output, reflection, web_search, user_input, calendar, document, unknown"
 
+// strictProvenanceRejectMsg is returned when a write supplies an explicit
+// source_type that is not permitted under ENGRAM_PROVENANCE_MODE=strict (the
+// "unknown" sentinel, or a value outside ENGRAM_ALLOWED_PROVENANCES).
+const strictProvenanceRejectMsg = "source_type not permitted (ENGRAM_PROVENANCE_MODE=strict): \"unknown\" and values outside ENGRAM_ALLOWED_PROVENANCES are rejected"
+
 // Server wraps the MCP server with Engram's memory operations.
 type Server struct {
 	store          memory.Store
@@ -539,6 +544,10 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		if err := memory.ValidateSourceType(sourceType); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		if s.strictProvenanceRejects(sourceType) {
+			log.Printf("[WARN] engram memory_add: source_type %q not permitted, rejecting (strict mode)", sourceType)
+			return mcp.NewToolResultError(strictProvenanceRejectMsg), nil
+		}
 		if mem.Metadata == nil {
 			mem.Metadata = map[string]any{}
 		}
@@ -552,7 +561,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 			mem.Metadata = map[string]any{}
 		}
 		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram memory_add: source_type not provided, defaulting to 'reflection' (source=%s)", mem.Source)
+		log.Printf("[WARN] engram memory_add: source_type not provided, defaulting to 'unknown' (source=%s)", mem.Source)
 	}
 
 	// Embed content
@@ -841,6 +850,10 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		if err := memory.ValidateSourceType(sourceType); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		if s.strictProvenanceRejects(sourceType) {
+			log.Printf("[WARN] engram memory_update: source_type %q not permitted, rejecting (strict mode)", sourceType)
+			return mcp.NewToolResultError(strictProvenanceRejectMsg), nil
+		}
 		if mem.Metadata == nil {
 			mem.Metadata = map[string]any{}
 		}
@@ -854,7 +867,7 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 			mem.Metadata = map[string]any{}
 		}
 		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram memory_update: source_type not provided, defaulting to 'reflection' (source=%s)", mem.Source)
+		log.Printf("[WARN] engram memory_update: source_type not provided, defaulting to 'unknown' (source=%s)", mem.Source)
 	}
 
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
@@ -1014,12 +1027,7 @@ func (s *Server) handleReflectionCheck(ctx context.Context, _ mcp.CallToolReques
 	if _, isolated := isolatedCaller(ctx); isolated {
 		return mcp.NewToolResultError("reflection_check is a global-scope action not permitted for isolated callers"), nil
 	}
-	eng := reflection.NewEngine(s.store, s.embedder, func() reflection.Config {
-		c := reflection.DefaultConfig()
-		c.RequireProvenance = s.cfg.RequireProvenance
-		c.AllowedProvenances = s.cfg.AllowedProvenances
-		return c
-	}())
+	eng := reflection.NewEngine(s.store, s.embedder, s.reflectionConfig())
 	result, err := eng.Check(ctx)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("reflection check error: %v", err)), nil
@@ -1046,10 +1054,8 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 		}
 	}
 
-	cfg := reflection.DefaultConfig()
+	cfg := s.reflectionConfig()
 	cfg.DryRun = dryRun
-	cfg.RequireProvenance = s.cfg.RequireProvenance
-	cfg.AllowedProvenances = s.cfg.AllowedProvenances
 
 	eng := reflection.NewEngine(s.store, s.embedder, cfg)
 	result, err := eng.Run(ctx)
@@ -1122,10 +1128,8 @@ func (s *Server) handleReflectionRunEvent(ctx context.Context, request mcp.CallT
 		}
 	}
 
-	cfg := reflection.DefaultConfig()
+	cfg := s.reflectionConfig()
 	cfg.DryRun = dryRun
-	cfg.RequireProvenance = s.cfg.RequireProvenance
-	cfg.AllowedProvenances = s.cfg.AllowedProvenances
 
 	eng := reflection.NewEngine(s.store, s.embedder, cfg)
 	result, err := eng.RunSingleEvent(ctx, reflection.SingleEventInput{
@@ -1153,6 +1157,46 @@ func collectionOrFallback(col, fallback string) string {
 		return col
 	}
 	return fallback
+}
+
+// reflectionConfig builds the reflection engine config from the loaded server
+// config, wiring provenance (ENGRAM_PROVENANCE_MODE) into ProvenanceFilter so
+// that strict mode reaches evidence filtering and write-back enforcement,
+// instead of silently downgrading to default via the legacy fields.
+func (s *Server) reflectionConfig() reflection.Config {
+	c := reflection.DefaultConfig()
+	if s.cfg != nil {
+		c.RequireProvenance = s.cfg.RequireProvenance
+		c.AllowedProvenances = s.cfg.AllowedProvenances
+		c.ProvenanceFilter = s.cfg.ProvenanceFilterConfig()
+	}
+	return c
+}
+
+// strictProvenanceRejects reports whether an explicit source_type must be
+// rejected under ENGRAM_PROVENANCE_MODE=strict: the "unknown" sentinel is never
+// acceptable, and any value outside a configured non-empty allow-list is
+// rejected (so it cannot be persisted and silently filtered at read time).
+func (s *Server) strictProvenanceRejects(sourceType string) bool {
+	if s.cfg == nil || s.cfg.ProvenanceMode != "strict" {
+		return false
+	}
+	if sourceType == string(memory.DefaultSourceType) {
+		return true
+	}
+	if len(s.cfg.AllowedProvenances) > 0 && !containsString(s.cfg.AllowedProvenances, sourceType) {
+		return true
+	}
+	return false
+}
+
+func containsString(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 // sourceTypeFromMetadata extracts source_type from a metadata map, returning ""

@@ -362,7 +362,7 @@ func (h *HTTPServer) handleReflect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cfg := reflection.DefaultConfig()
+	cfg := h.srv.reflectionConfig()
 	cfg.DryRun = req.DryRun
 
 	eng := reflection.NewEngine(h.srv.store, h.srv.embedder, cfg)
@@ -388,7 +388,7 @@ func (h *HTTPServer) handleReflectCheck(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	eng := reflection.NewEngine(h.srv.store, h.srv.embedder, reflection.DefaultConfig())
+	eng := reflection.NewEngine(h.srv.store, h.srv.embedder, h.srv.reflectionConfig())
 	result, err := eng.Check(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{

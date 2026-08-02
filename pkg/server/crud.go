@@ -107,6 +107,11 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
 			return
 		}
+		if h.srv.strictProvenanceRejects(stStr) {
+			log.Printf("[WARN] engram REST POST /memories: source_type %q not permitted, rejecting (strict mode)", stStr)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceRejectMsg})
+			return
+		}
 	} else {
 		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
 			log.Printf("[WARN] engram REST POST /memories: source_type not provided, rejecting (strict mode)")
@@ -117,7 +122,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 			mem.Metadata = map[string]any{}
 		}
 		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram REST POST /memories: source_type not provided, defaulting to 'reflection' (memory %s)", mem.ID)
+		log.Printf("[WARN] engram REST POST /memories: source_type not provided, defaulting to 'unknown' (memory %s)", mem.ID)
 	}
 
 	embedStart := time.Now()
@@ -275,6 +280,11 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 					writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
 					return
 				}
+				if h.srv.strictProvenanceRejects(stStr) {
+					log.Printf("[WARN] engram REST PATCH /memories/%s: source_type %q not permitted, rejecting (strict mode)", id, stStr)
+					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceRejectMsg})
+					return
+				}
 			}
 			updates["metadata"] = meta
 		}
@@ -315,7 +325,7 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 			newMeta["source_type"] = string(memory.DefaultSourceType)
 			updates["metadata"] = newMeta
 		}
-		log.Printf("[WARN] engram REST PATCH /memories/%s: source_type not provided, defaulting to 'reflection'", id)
+		log.Printf("[WARN] engram REST PATCH /memories/%s: source_type not provided, defaulting to 'unknown'", id)
 	}
 
 	if err := h.srv.store.Update(r.Context(), id, updates); err != nil {
@@ -442,6 +452,11 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
 			return
 		}
+		if h.srv.strictProvenanceRejects(stStr) {
+			log.Printf("[WARN] engram REST PUT /memories/%s: source_type %q not permitted, rejecting (strict mode)", id, stStr)
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceRejectMsg})
+			return
+		}
 	} else {
 		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
 			log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, rejecting (strict mode)", id)
@@ -452,7 +467,7 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 			mem.Metadata = map[string]any{}
 		}
 		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, defaulting to 'reflection'", id)
+		log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, defaulting to 'unknown'", id)
 	}
 
 	embedStart := time.Now()

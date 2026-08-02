@@ -48,7 +48,7 @@ func TestWarn_AddWithoutSourceTypeLogsWarn(t *testing.T) {
 	if !strings.Contains(out, "[WARN]") {
 		t.Fatalf("expected a [WARN] audit log for add without source_type, got: %q", out)
 	}
-	if !strings.Contains(out, "defaulting to 'reflection'") {
+	if !strings.Contains(out, "defaulting to 'unknown'") {
 		t.Errorf("expected defaulting message in warn log, got: %q", out)
 	}
 }
