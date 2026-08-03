@@ -419,11 +419,13 @@ Tool name = function name. Siri / BMO talk to Engram over MCP stdio.
 | `importance` | number | — | 1–10, default 5. Accurate > high |
 | `tags` | string[] | — | e.g. `["frank", "preference", "thread:xxx"]` |
 | `source` | string | — | `user` / `agent` / `system`, default `agent` |
+| `source_type` | string | — | provenance tag: `reflection` / `user_input` / `web_search` / `tool_output` / `calendar` / `document`. See [Source Type](#source-type-provenance-metadata) |
 | `valid_until` | number | — | expiry Unix ts (auto-computed from TTL matrix if omitted) |
 
 ```python
 memory_add(content="Frank prefers road cycling before 8am.",
-           type="identity", importance=7, tags=["frank", "cycling"])
+           type="identity", importance=7, tags=["frank", "cycling"],
+           source_type="user_input")
 ```
 
 Server auto-dedups at ≥0.92; run `memory_search` first for the 0.70–0.92 band (see Write gate).
@@ -436,6 +438,7 @@ Server auto-dedups at ≥0.92; run `memory_search` first for the 0.70–0.92 ban
 | `limit` | number | — | default 5, max 100 |
 | `types` | string[] | — | filter by type, e.g. `["identity","directive"]` |
 | `tags` | string[] | — | filter by tag (OR logic) |
+| `source_type` | string[] | — | filter by provenance, e.g. `["user_input", "web_search"]`. See [Source Type](#source-type-provenance-metadata) |
 | `time_start` / `time_end` | number | — | filter by created_at Unix ts |
 | `collections` | string[] | — | which collections to search (default: fan-out all) |
 
