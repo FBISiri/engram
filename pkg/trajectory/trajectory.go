@@ -34,6 +34,10 @@ type Record struct {
 	// common
 	LatencyMs int64  `json:"latency_ms"`
 	Caller    string `json:"caller,omitempty"`
+
+	// Phase 2 additions (backward-compatible; omitempty keeps old JSONL parseable).
+	TaskID     string `json:"task_id,omitempty"`     // event-loop task identifier
+	TaskResult string `json:"task_result,omitempty"` // success|error|skip
 }
 
 // Logger writes trajectory records to per-day JSONL files under Dir.

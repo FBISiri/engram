@@ -2,6 +2,7 @@ package trajectory
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -212,4 +213,56 @@ func TestLogger_MkdirIfMissing(t *testing.T) {
 	l.Log(Record{Timestamp: "2026-07-17T10:00:00Z", Operation: "update", Content: "hi"})
 	l.Close()
 	waitForFile(t, filepath.Join(dir, "2026-07-17.jsonl"))
+}
+
+// TestRecord_Phase2Fields_RoundTrip verifies the Phase 2 task_id / task_result
+// fields marshal and unmarshal round-trip.
+func TestRecord_Phase2Fields_RoundTrip(t *testing.T) {
+	in := Record{
+		Timestamp:  "2026-08-02T10:00:00Z",
+		Operation:  "retrieve",
+		Query:      "q",
+		LatencyMs:  5,
+		TaskID:     "task-123",
+		TaskResult: "success",
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Record
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.TaskID != "task-123" || out.TaskResult != "success" {
+		t.Errorf("phase2 fields lost: %+v", out)
+	}
+}
+
+// TestRecord_OldJSON_BackwardCompatible verifies an OLD trajectory line without
+// the Phase 2 fields still unmarshals, leaving them empty.
+func TestRecord_OldJSON_BackwardCompatible(t *testing.T) {
+	old := `{"timestamp":"2026-08-02T10:00:00Z","operation":"retrieve","query":"q","latency_ms":5,"caller":"user"}`
+	var r Record
+	if err := json.Unmarshal([]byte(old), &r); err != nil {
+		t.Fatalf("unmarshal old JSON: %v", err)
+	}
+	if r.TaskID != "" || r.TaskResult != "" {
+		t.Errorf("expected empty phase2 fields, got %+v", r)
+	}
+	if r.Operation != "retrieve" || r.Query != "q" {
+		t.Errorf("old fields wrong: %+v", r)
+	}
+}
+
+// TestRecord_Phase2Fields_OmitEmpty verifies omitempty drops the new fields
+// from output when unset (keeps existing JSONL byte-compatible).
+func TestRecord_Phase2Fields_OmitEmpty(t *testing.T) {
+	data, err := json.Marshal(Record{Timestamp: "2026-08-02T10:00:00Z", Operation: "update"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(data, []byte("task_id")) || bytes.Contains(data, []byte("task_result")) {
+		t.Errorf("omitempty failed, task fields present: %s", data)
+	}
 }
