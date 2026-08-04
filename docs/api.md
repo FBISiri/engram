@@ -29,6 +29,7 @@
   - [POST /memories/{id}/reset](#post-memoriesid-reset)
   - [POST /memories/search](#post-memoriessearch)
   - [POST /memories/cross-search](#post-memoriescross-search)
+  - [Provenance / EU AI Act Compliance](#provenance--eu-ai-act-compliance)
   - [POST /collections](#post-collections)
   - [GET /collections](#get-collections)
   - [Collection-scoped CRUD](#collection-scoped-crud)
@@ -535,7 +536,7 @@ Create a new memory (REST equivalent of `memory_add`).
   "importance": 6,
   "tags": ["siri", "metrics"],
   "valid_until": 0,
-  "metadata": { "sprint": "W23" }
+  "metadata": { "sprint": "W23", "source_type": "tool_output" }
 }
 ```
 
@@ -548,8 +549,9 @@ Create a new memory (REST equivalent of `memory_add`).
 | `tags` | string[] | — | `[]` | Classification tags. |
 | `valid_until` | number | — | auto | Unix timestamp. 0 = auto via TTL matrix. |
 | `metadata` | object | — | `{}` | Arbitrary key-value pairs. |
+| `metadata.source_type` | string | — | `"unknown"` | Fine-grained provenance tag. Stored in `metadata.source_type`. Enum: `reflection`, `user_input`, `web_search`, `tool_output`, `calendar`, `document`. Invalid value → `400`. Behaviour when omitted depends on `ENGRAM_PROVENANCE_MODE` (see [Provenance](#provenance--eu-ai-act-compliance)). |
 
-**Response:** `201 Created` with the full [Memory object](#memory-object).
+**Response:** `201 Created` with the full [Memory object](#memory-object). Provenance is returned nested as `metadata.source_type` (there is no top-level `source_type` field on the POST 201 body).
 
 ---
 
@@ -557,7 +559,7 @@ Create a new memory (REST equivalent of `memory_add`).
 
 Retrieve a single memory by ID.
 
-**Response (200):** Full [Memory object](#memory-object).
+**Response (200):** Full [Memory object](#memory-object). Provenance is carried in `metadata.source_type` and mirrored as a top-level `source_type` field.
 
 **Response (404):**
 
@@ -590,7 +592,7 @@ Supports FSM lifecycle transitions via `lifecycle_status`.
 | `tags` | string[] | Replace tags. |
 | `importance` | number | Update importance. |
 | `source` | string | Update source. |
-| `metadata` | object | Replace metadata. |
+| `metadata` | object | Replace metadata. May include `source_type` (validated against the enum; invalid → `400`). |
 | `lifecycle_status` | string | Transition lifecycle state (see [FSM](#lifecycle-fsm)). |
 
 **Lifecycle transitions allowed via PATCH:**
@@ -637,9 +639,11 @@ Full replacement. Content is allowed and will be **re-embedded**. Preserves life
 | `importance` | number | — | inherits | Defaults to previous importance. |
 | `tags` | string[] | — | inherits | Defaults to previous tags. |
 | `valid_until` | number | — | — | Explicit TTL override. |
-| `metadata` | object | — | — | Replaces metadata (not merged). |
+| `metadata` | object | — | — | Replaces metadata (not merged). May include `source_type` (validated against the enum; invalid → `400`). |
 
 **Response (200):** Updated [Memory object](#memory-object).
+
+> `source_type` provenance semantics on PATCH/PUT match POST /memories — invalid enum → `400`, and omission is governed by `ENGRAM_PROVENANCE_MODE` (see [Provenance](#provenance--eu-ai-act-compliance)).
 
 ---
 
@@ -690,7 +694,8 @@ Vector search with lifecycle filtering (REST equivalent of MCP `memory_search`).
   "limit": 10,
   "include_archived": false,
   "types": ["identity", "directive"],
-  "tags": ["siri"]
+  "tags": ["siri"],
+  "source_type": ["user_input"]
 }
 ```
 
@@ -702,8 +707,9 @@ Vector search with lifecycle filtering (REST equivalent of MCP `memory_search`).
 | `include_archived` | bool | — | `false` | Include archived memories in results. |
 | `types` | string[] | — | all | Filter by memory type. |
 | `tags` | string[] | — | — | Filter by tags (any match). |
+| `source_type` | string[] | — | — | Filter by provenance. Each value validated against the enum; invalid → `400`. |
 
-**Response (200):** Array of memory objects with `score` and `resolved_collection` fields.
+**Response (200):** Array of memory objects with `score`, `resolved_collection`, and `source_type` fields.
 
 ---
 
@@ -722,7 +728,8 @@ Each collection is searched independently against its physical Qdrant collection
   "limit": 5,
   "include_archived": false,
   "types": ["insight"],
-  "tags": []
+  "tags": [],
+  "source_type": ["reflection"]
 }
 ```
 
@@ -734,8 +741,55 @@ Each collection is searched independently against its physical Qdrant collection
 | `include_archived` | bool | — | `false` | Include archived memories. |
 | `types` | string[] | — | all | Filter by memory type. |
 | `tags` | string[] | — | — | Filter by tags. |
+| `source_type` | string[] | — | — | Filter by provenance. Each value validated against the enum; invalid → `400`. |
 
-**Response (200):** Array of objects with `score` and `collection` fields.
+**Response (200):** Array of objects with `score`, `collection`, and `source_type` fields.
+
+---
+
+## Provenance / EU AI Act Compliance
+
+Every memory carries a fine-grained provenance classifier in `metadata.source_type`.
+This complements the coarse `source` field (`user`/`agent`/`system`) and provides an
+auditable record of *what kind of input* produced each memory — required for EU AI Act
+traceability of AI-generated vs. human-sourced content.
+
+### source_type values
+
+| Value | Use case |
+|-------|----------|
+| `user_input` | Content that came directly from user input (chat, dictation, forms). |
+| `web_search` | Content derived from a web search result. |
+| `tool_output` | Content derived from a tool/function-call result. |
+| `reflection` | Insight synthesized by the Reflection Engine. |
+| `calendar` | Content derived from calendar data. |
+| `document` | Content extracted from an ingested document. |
+| `unknown` | Sentinel for legacy memories / omitted provenance (see modes below). Not a value a caller should send in strict mode. |
+
+Any value outside this enum is rejected with `400` on every write path
+(`POST /memories`, `PUT`/`PATCH /memories/{id}`, and the MCP `memory_add`/`memory_update` tools).
+
+### Enforcement modes
+
+Provenance enforcement at write time is controlled by the `ENGRAM_PROVENANCE_MODE`
+environment variable. Invalid values fall back to `warn`.
+
+| `ENGRAM_PROVENANCE_MODE` | Behaviour when `source_type` is **omitted** | Behaviour when `source_type` is **present** |
+|--------------------------|---------------------------------------------|---------------------------------------------|
+| `warn` (default) | Accepted; `metadata.source_type` defaults to `"unknown"` and a warning is logged. | Accepted if in the enum; otherwise `400`. |
+| `default` | Same as `warn` at write time (defaults to `"unknown"`, logs a warning). | Accepted if in the enum; otherwise `400`. |
+| `strict` | **Rejected** with `422 Unprocessable Entity`. | `400` if not in the enum; `422` if the value is `"unknown"` or (when `ENGRAM_ALLOWED_PROVENANCES` is set) not in that allow-list; otherwise accepted. |
+
+> Note: `warn` and `default` behave identically on the write gate. The distinction
+> only matters for the Reflection Engine's evidence filter (see below).
+
+### Related environment variables
+
+| Variable | Type | Default | Effect |
+|----------|------|---------|--------|
+| `ENGRAM_PROVENANCE_MODE` | `warn` \| `strict` \| `default` | `warn` | Write-time enforcement (table above). |
+| `ENGRAM_ALLOWED_PROVENANCES` | comma-separated list | empty | In `strict` mode, an explicit `source_type` outside this list is rejected with `422`. Empty = any enum value except `unknown` is accepted. |
+| `ENGRAM_REQUIRE_PROVENANCE` | bool | `false` | Legacy flag. Enables the **Reflection Engine** provenance evidence filter (restricting which memories the reflector may cite). It does **not** by itself gate the REST/MCP write path — write rejection is governed solely by `ENGRAM_PROVENANCE_MODE=strict`. |
 
 ---
 
@@ -823,7 +877,7 @@ Exposes:
   "tags": ["tag1", "tag2"],
   "created_at": 1717200000.0,
   "updated_at": 1717200000.0,
-  "metadata": {},
+  "metadata": { "source_type": "user_input" },
   "valid_until": 0,
   "superseded_by": "",
   "access_count": 0,

@@ -33,12 +33,14 @@ type crossSearchRequest struct {
 	IncludeArchived bool     `json:"include_archived"`
 	Types           []string `json:"types"`
 	Tags            []string `json:"tags"`
+	SourceType      []string `json:"source_type,omitempty"`
 }
 
 type crossSearchHit struct {
 	memory.Memory
 	Score      float64 `json:"score"`
 	Collection string  `json:"collection"`
+	SourceType string  `json:"source_type,omitempty"`
 }
 
 func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +95,15 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 	if len(req.Tags) > 0 {
 		filters = append(filters, memory.Filter{Field: "tags", Op: memory.OpIn, Value: req.Tags})
 	}
+	if len(req.SourceType) > 0 {
+		for _, v := range req.SourceType {
+			if err := memory.ValidateSourceType(v); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+		filters = append(filters, memory.Filter{Field: "metadata.source_type", Op: memory.OpIn, Value: req.SourceType})
+	}
 
 	embedStart := time.Now()
 	vec, err := h.srv.embedder.Embed(r.Context(), req.Query)
@@ -135,6 +146,7 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 				Memory:     results[i].Memory,
 				Score:      results[i].Score,
 				Collection: colName,
+				SourceType: sourceTypeFromMetadata(results[i].Memory.Metadata),
 			})
 		}
 	}
