@@ -146,7 +146,7 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 				Memory:     results[i].Memory,
 				Score:      results[i].Score,
 				Collection: colName,
-				SourceType: sourceTypeFromMetadata(results[i].Memory.Metadata),
+				SourceType: sourceTypeFromMetadata(results[i].Metadata),
 			})
 		}
 	}

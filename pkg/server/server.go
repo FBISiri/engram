@@ -132,6 +132,7 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("time_end", mcp.Description("Filter memories created before this Unix timestamp.")),
 		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: searches all collections (fan-out)."), mcp.WithStringItems()),
 		mcp.WithArray("source_type", mcp.Description("Filter by provenance source_type (tool_output, reflection, web_search, user_input, calendar, document). Memories must match at least one."), mcp.WithStringItems()),
+		mcp.WithString("task_id", mcp.Description("Optional event-loop task identifier. Recorded in the trajectory log to join retrievals to task outcomes (Memory Worth analysis).")),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
@@ -242,6 +243,8 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	if limit > 100 {
 		limit = 100
 	}
+
+	taskID := request.GetString("task_id", "")
 
 	// Build filters
 	var filters []memory.Filter
@@ -478,6 +481,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			Strategy:  "semantic_search",
 			LatencyMs: time.Since(start).Milliseconds(),
 			Caller:    CallerTypeFromContext(ctx),
+			TaskID:    taskID,
 		})
 	}
 
@@ -1166,8 +1170,8 @@ func collectionOrFallback(col, fallback string) string {
 func (s *Server) reflectionConfig() reflection.Config {
 	c := reflection.DefaultConfig()
 	if s.cfg != nil {
-		c.RequireProvenance = s.cfg.RequireProvenance
-		c.AllowedProvenances = s.cfg.AllowedProvenances
+		c.RequireProvenance = s.cfg.RequireProvenance   //nolint:staticcheck // backward compat: migration to ProvenanceFilter tracked separately
+		c.AllowedProvenances = s.cfg.AllowedProvenances //nolint:staticcheck // backward compat: migration to ProvenanceFilter tracked separately
 		c.ProvenanceFilter = s.cfg.ProvenanceFilterConfig()
 	}
 	return c

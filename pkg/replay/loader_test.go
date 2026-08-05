@@ -8,6 +8,9 @@ import (
 
 func TestLoadTrace_RealTrajectory(t *testing.T) {
 	path := filepath.Join("..", "..", "trajectories", "2026-08-02.jsonl")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Skip("trajectory fixture not in repo")
+	}
 	cases, err := LoadTrace(path)
 	if err != nil {
 		t.Fatalf("LoadTrace: %v", err)
