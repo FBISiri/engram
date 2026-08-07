@@ -51,6 +51,52 @@ memory_apply_config(config=json.dumps({
 
 ---
 
+## Startup & Verification
+
+These configs are runtime tuning profiles, not standalone services. To apply:
+
+### Step 1 — Ensure Engram is running
+
+```bash
+# Start Qdrant (if not already running)
+docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
+
+# Start Engram server
+ENGRAM_TRANSPORT=both \
+ENGRAM_HTTP_PORT=8080 \
+ENGRAM_OPENAI_API_KEY=sk-... \
+./engram serve
+```
+
+### Step 2 — Apply config via MCP tool
+
+Call `memory_apply_config` with the JSON from the Usage section above (in your MCP
+client session or via script).
+
+### Step 3 — Verify config was applied
+
+```bash
+# Confirm server is healthy
+curl http://localhost:8080/health
+# → {"status":"ok","qdrant":"ok"}
+
+# Test dedup behavior: try adding two similar research notes
+# In your MCP session:
+# memory_add(type="insight", content="Engram dedup threshold at 0.80 catches most paraphrases", importance=5)
+# memory_add(type="insight", content="Engram dedup at 0.80 blocks most paraphrased duplicates", importance=5)
+# → Second write should be auto-deduped (similarity > 0.80)
+```
+
+### Expected behavior
+
+- `memory_search` returns at most 8 results (per `limit: 8`)
+- Results with score below 0.70 are filtered out (per `min_score: 0.70`)
+- Reranking is active — surfaces the canonical note over its fragments
+- Writes with similarity ≥0.80 to existing memories are merged — the most aggressive dedup profile
+- `insight` memories never auto-expire (research is cumulative)
+
+---
+
 ## ⚠️ Proposed fields
 
 These fields are **not yet wired server-side — roadmap**. They express the intended

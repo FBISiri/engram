@@ -174,6 +174,21 @@ func (s *mockStore) Update(_ context.Context, id string, fields map[string]any) 
 	if content, ok := fields["content"].(string); ok {
 		sp.mem.Content = content
 	}
+	if st, ok := fields["metadata.source_type"].(string); ok {
+		if sp.mem.Metadata == nil {
+			sp.mem.Metadata = map[string]any{}
+		}
+		sp.mem.Metadata["source_type"] = st
+	}
+	if ph, ok := fields["metadata.provenance_history"]; ok {
+		if sp.mem.Metadata == nil {
+			sp.mem.Metadata = map[string]any{}
+		}
+		sp.mem.Metadata["provenance_history"] = ph
+	}
+	if ua, ok := fields["updated_at"].(float64); ok {
+		sp.mem.UpdatedAt = ua
+	}
 	s.memories[id] = sp
 	return nil
 }
@@ -437,10 +452,11 @@ func TestAddMemory(t *testing.T) {
 	srv, store := newTestServer()
 
 	result, err := callTool(srv, "memory_add", map[string]any{
-		"content":    "User's name is Frank",
-		"type":       "identity",
-		"importance": float64(9),
-		"tags":       []interface{}{"name", "personal"},
+		"content":     "User's name is Frank",
+		"type":        "identity",
+		"importance":  float64(9),
+		"tags":        []interface{}{"name", "personal"},
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -453,8 +469,8 @@ func TestAddMemory(t *testing.T) {
 
 	// Parse response
 	var resp struct {
-		Status string         `json:"status"`
-		Memory memory.Memory  `json:"memory"`
+		Status string        `json:"status"`
+		Memory memory.Memory `json:"memory"`
 	}
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
 		t.Fatalf("failed to parse response: %v\nraw: %s", err, text)
@@ -481,7 +497,8 @@ func TestAddMemoryDefaults(t *testing.T) {
 	srv, _ := newTestServer()
 
 	result, err := callTool(srv, "memory_add", map[string]any{
-		"content": "Something happened",
+		"content":     "Something happened",
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -525,7 +542,8 @@ func TestAddMemoryDedup(t *testing.T) {
 
 	// Add first memory
 	_, err := callTool(srv, "memory_add", map[string]any{
-		"content": "User's name is Frank",
+		"content":     "User's name is Frank",
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("first add failed: %v", err)
@@ -533,7 +551,8 @@ func TestAddMemoryDedup(t *testing.T) {
 
 	// Add exact same content — should be detected as duplicate
 	result, err := callTool(srv, "memory_add", map[string]any{
-		"content": "User's name is Frank",
+		"content":     "User's name is Frank",
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("second add failed: %v", err)
@@ -557,9 +576,9 @@ func TestSearchMemory(t *testing.T) {
 
 	// Add some memories
 	memories := []map[string]any{
-		{"content": "User's name is Frank", "type": "identity", "importance": float64(9)},
-		{"content": "User works as a software engineer", "type": "identity", "importance": float64(8)},
-		{"content": "Discussed trip planning to Japan", "type": "event", "importance": float64(5)},
+		{"content": "User's name is Frank", "type": "identity", "importance": float64(9), "source_type": "reflection"},
+		{"content": "User works as a software engineer", "type": "identity", "importance": float64(8), "source_type": "reflection"},
+		{"content": "Discussed trip planning to Japan", "type": "event", "importance": float64(5), "source_type": "reflection"},
 	}
 	for _, m := range memories {
 		_, err := callTool(srv, "memory_add", m)
@@ -610,12 +629,14 @@ func TestSearchWithTypeFilter(t *testing.T) {
 
 	// Add memories of different types
 	_, _ = callTool(srv, "memory_add", map[string]any{
-		"content": "User lives in Shanghai",
-		"type":    "identity",
+		"content":     "User lives in Shanghai",
+		"type":        "identity",
+		"source_type": "reflection",
 	})
 	_, _ = callTool(srv, "memory_add", map[string]any{
-		"content": "Went to Shanghai for a trip",
-		"type":    "event",
+		"content":     "Went to Shanghai for a trip",
+		"type":        "event",
+		"source_type": "reflection",
 	})
 
 	// Search only for identity type
@@ -655,9 +676,10 @@ func TestUpdateMemory(t *testing.T) {
 
 	// Add initial memory
 	_, err := callTool(srv, "memory_add", map[string]any{
-		"content":    "User lives in Beijing",
-		"type":       "identity",
-		"importance": float64(8),
+		"content":     "User lives in Beijing",
+		"type":        "identity",
+		"importance":  float64(8),
+		"source_type": "user_input",
 	})
 	if err != nil {
 		t.Fatalf("add failed: %v", err)
@@ -717,9 +739,10 @@ func TestDeleteMemory(t *testing.T) {
 	// Instead, just add one memory and delete it.
 
 	result1, err := callTool(srv, "memory_add", map[string]any{
-		"content":    "User prefers drinking espresso every morning at 7am",
-		"type":       "identity",
-		"importance": float64(7),
+		"content":     "User prefers drinking espresso every morning at 7am",
+		"type":        "identity",
+		"importance":  float64(7),
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("add failed: %v", err)
@@ -838,8 +861,9 @@ func TestDeleteMemoryDryRun(t *testing.T) {
 	srv, store := newTestServer()
 
 	_, err := callTool(srv, "memory_add", map[string]any{
-		"content": "User prefers tea",
-		"type":    "identity",
+		"content":     "User prefers tea",
+		"type":        "identity",
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("add failed: %v", err)
@@ -887,8 +911,9 @@ func TestInvalidMemoryType(t *testing.T) {
 	srv, _ := newTestServer()
 
 	result, err := callTool(srv, "memory_add", map[string]any{
-		"content": "test",
-		"type":    "invalid_type",
+		"content":     "test",
+		"type":        "invalid_type",
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -907,8 +932,9 @@ func TestImportanceClamping(t *testing.T) {
 
 	// Test importance > 10 gets clamped
 	result, err := callTool(srv, "memory_add", map[string]any{
-		"content":    "test clamping",
-		"importance": float64(15),
+		"content":     "test clamping",
+		"importance":  float64(15),
+		"source_type": "reflection",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1346,8 +1372,8 @@ func callToolWithCallerType(srv *Server, toolName string, args map[string]any, c
 func TestSearchResult_SourceCollectionPresent(t *testing.T) {
 	srv, _ := newTestServerWithCollection("engram_user")
 
-	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user identity fixture", "type": "identity"})
-	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user insight fixture", "type": "insight"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user identity fixture", "type": "identity", "source_type": "reflection"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user insight fixture", "type": "insight", "source_type": "reflection"})
 
 	result, err := callTool(srv, "memory_search", map[string]any{"query": "user fixture", "limit": float64(5)})
 	if err != nil {
@@ -1390,7 +1416,7 @@ func TestSearchResult_SourceCollectionMatchesCallerType(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.callerType, func(t *testing.T) {
 			srv, _ := newTestServerWithCollection(tc.wantCol)
-			_, _ = callToolWithCallerType(srv, "memory_add", map[string]any{"content": "fixture for " + tc.callerType, "type": "insight"}, tc.callerType)
+			_, _ = callToolWithCallerType(srv, "memory_add", map[string]any{"content": "fixture for " + tc.callerType, "type": "insight", "source_type": "reflection"}, tc.callerType)
 
 			result, err := callToolWithCallerType(srv, "memory_search", map[string]any{"query": "fixture", "limit": float64(1)}, tc.callerType)
 			if err != nil {
@@ -1417,7 +1443,7 @@ func TestSearchCollectionsParam_UnknownReturnsError(t *testing.T) {
 	collection.DefaultRegistry.Init() // ensure baseline collections are registered
 
 	srv, _ := newTestServerWithCollection(collection.CollectionUser)
-	_, _ = callTool(srv, "memory_add", map[string]any{"content": "some memory", "type": "event"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "some memory", "type": "event", "source_type": "reflection"})
 
 	result, err := callTool(srv, "memory_search", map[string]any{
 		"query":       "some",
@@ -1437,7 +1463,7 @@ func TestSearchCollectionsParam_KnownIsAccepted(t *testing.T) {
 	collection.DefaultRegistry.Init()
 
 	srv, _ := newTestServerWithCollection(collection.CollectionUser)
-	_, _ = callTool(srv, "memory_add", map[string]any{"content": "engram_user fixture", "type": "identity"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "engram_user fixture", "type": "identity", "source_type": "reflection"})
 
 	result, err := callTool(srv, "memory_search", map[string]any{
 		"query":       "engram_user fixture",
@@ -1459,7 +1485,7 @@ func TestSearchCollectionsParam_FilterIsolation(t *testing.T) {
 
 	// Write a memory to engram_user server
 	srv, _ := newTestServerWithCollection(collection.CollectionUser)
-	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user memory fixture", "type": "identity"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": "user memory fixture", "type": "identity", "source_type": "reflection"})
 
 	// Searching with collections=[engram_user] should find the memory
 	result, err := callTool(srv, "memory_search", map[string]any{
@@ -1575,8 +1601,12 @@ func TestSearchWithSourceTypeFilter(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("add web_search failed: %v", err)
 	}
+	// Distinct content with a different source_type. Kept deliberately short so
+	// it stays below the mock embedder's 0.92 dedup threshold vs. the web_search
+	// memory above (the toy embedder collides most English sentences); otherwise
+	// C2 provenance-merge would promote the web_search memory's source_type.
 	if _, err := callTool(srv, "memory_add", map[string]any{
-		"content":     "Paris is a lovely place to visit",
+		"content":     "Tokyo",
 		"source_type": "user_input",
 	}); err != nil {
 		t.Fatalf("add user_input failed: %v", err)
@@ -1613,8 +1643,9 @@ func TestUpdateMemoryWithSourceType(t *testing.T) {
 	srv, _ := newTestServer()
 
 	if _, err := callTool(srv, "memory_add", map[string]any{
-		"content": "User uses vim",
-		"type":    "identity",
+		"content":     "User uses vim",
+		"type":        "identity",
+		"source_type": "user_input",
 	}); err != nil {
 		t.Fatalf("add failed: %v", err)
 	}
@@ -1648,8 +1679,9 @@ func TestUpdateMemoryInvalidSourceType(t *testing.T) {
 	srv, _ := newTestServer()
 
 	if _, err := callTool(srv, "memory_add", map[string]any{
-		"content": "User uses tabs",
-		"type":    "identity",
+		"content":     "User uses tabs",
+		"type":        "identity",
+		"source_type": "user_input",
 	}); err != nil {
 		t.Fatalf("add failed: %v", err)
 	}
@@ -1686,8 +1718,12 @@ func TestRESTSearchSourceTypeFilter(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("add web_search failed: %v", err)
 	}
+	// Distinct content with a different source_type. Kept deliberately short so
+	// it stays below the mock embedder's 0.92 dedup threshold vs. the web_search
+	// memory above (the toy embedder collides most English sentences); otherwise
+	// C2 provenance-merge would promote the web_search memory's source_type.
 	if _, err := callTool(srv, "memory_add", map[string]any{
-		"content":     "Paris is a lovely place to visit",
+		"content":     "Tokyo",
 		"source_type": "user_input",
 	}); err != nil {
 		t.Fatalf("add user_input failed: %v", err)
@@ -1851,5 +1887,256 @@ func TestMCPSearchInvalidSourceType(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatalf("expected error result for invalid source_type, got: %s", extractText(result))
+	}
+}
+
+// =============================================================================
+// C2: source_type-aware dedup (provenance merge) tests
+// =============================================================================
+
+// parseDedupResponse unmarshals a dedup/merge response.
+type dedupResp struct {
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+	Existing struct {
+		ID                 string  `json:"id"`
+		Content            string  `json:"content"`
+		Score              float64 `json:"score"`
+		SourceType         string  `json:"source_type"`
+		ProvenanceMerged   bool    `json:"provenance_merged"`
+		IncomingSourceType string  `json:"incoming_source_type"`
+	} `json:"existing"`
+}
+
+func parseDedupResp(t *testing.T, result *mcp.CallToolResult) dedupResp {
+	t.Helper()
+	text := extractText(result)
+	var resp dedupResp
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("failed to parse dedup response: %v\nraw: %s", err, text)
+	}
+	return resp
+}
+
+// findStored returns the stored memory whose content matches, or fails.
+func findStored(t *testing.T, store *mockStore, content string) memory.Memory {
+	t.Helper()
+	for _, m := range store.all() {
+		if m.Content == content {
+			return m
+		}
+	}
+	t.Fatalf("memory with content %q not found in store", content)
+	return memory.Memory{}
+}
+
+func storedProvenance(t *testing.T, m memory.Memory) []memory.ProvenanceEntry {
+	t.Helper()
+	raw, ok := m.Metadata["provenance_history"]
+	if !ok || raw == nil {
+		return nil
+	}
+	h, ok := raw.([]memory.ProvenanceEntry)
+	if !ok {
+		t.Fatalf("provenance_history has unexpected type %T", raw)
+	}
+	return h
+}
+
+func TestProvenanceMerge_DifferentSource(t *testing.T) {
+	srv, store := newTestServer()
+	content := "Engram uses Qdrant as its vector store"
+
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": content, "source_type": "user_input",
+	}); err != nil {
+		t.Fatalf("first add failed: %v", err)
+	}
+
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content": content, "source_type": "tool_output",
+	})
+	if err != nil {
+		t.Fatalf("second add failed: %v", err)
+	}
+	resp := parseDedupResp(t, result)
+
+	if resp.Status != "duplicate_provenance_merged" {
+		t.Errorf("expected status 'duplicate_provenance_merged', got %q", resp.Status)
+	}
+	if !resp.Existing.ProvenanceMerged {
+		t.Error("expected provenance_merged=true")
+	}
+	if resp.Existing.IncomingSourceType != "tool_output" {
+		t.Errorf("expected incoming_source_type tool_output, got %q", resp.Existing.IncomingSourceType)
+	}
+	// user_input outranks tool_output → primary stays user_input.
+	if resp.Existing.SourceType != "user_input" {
+		t.Errorf("expected primary source_type user_input, got %q", resp.Existing.SourceType)
+	}
+	if store.count() != 1 {
+		t.Errorf("expected still 1 memory (no new insert), got %d", store.count())
+	}
+	m := findStored(t, store, content)
+	if st, _ := m.Metadata["source_type"].(string); st != "user_input" {
+		t.Errorf("stored primary source_type = %q, want user_input", st)
+	}
+	h := storedProvenance(t, m)
+	if len(h) != 1 || h[0].SourceType != "tool_output" {
+		t.Errorf("expected provenance_history [tool_output], got %+v", h)
+	}
+}
+
+func TestProvenanceMerge_Promotion(t *testing.T) {
+	srv, store := newTestServer()
+	content := "The build uses Go modules"
+
+	// Existing is reflection (low trust); incoming user_input (highest) promotes.
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": content, "source_type": "reflection",
+	}); err != nil {
+		t.Fatalf("first add failed: %v", err)
+	}
+	result, _ := callTool(srv, "memory_add", map[string]any{
+		"content": content, "source_type": "user_input",
+	})
+	resp := parseDedupResp(t, result)
+	if resp.Status != "duplicate_provenance_merged" {
+		t.Fatalf("expected merge, got %q", resp.Status)
+	}
+	if resp.Existing.SourceType != "user_input" {
+		t.Errorf("expected primary promoted to user_input, got %q", resp.Existing.SourceType)
+	}
+	m := findStored(t, store, content)
+	if st, _ := m.Metadata["source_type"].(string); st != "user_input" {
+		t.Errorf("stored primary = %q, want user_input", st)
+	}
+}
+
+func TestProvenanceMerge_SameSource(t *testing.T) {
+	srv, store := newTestServer()
+	content := "Frank prefers concise answers"
+
+	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	resp := parseDedupResp(t, result)
+
+	if resp.Status != "duplicate" {
+		t.Errorf("expected standard 'duplicate', got %q", resp.Status)
+	}
+	if resp.Existing.ProvenanceMerged {
+		t.Error("did not expect a provenance merge for same source_type")
+	}
+	m := findStored(t, store, content)
+	if h := storedProvenance(t, m); len(h) != 0 {
+		t.Errorf("expected no provenance_history, got %+v", h)
+	}
+}
+
+func TestProvenanceMerge_UnknownIncoming(t *testing.T) {
+	srv, store := newTestServer()
+	content := "Deployment happens on Fridays"
+
+	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "unknown"})
+	resp := parseDedupResp(t, result)
+
+	if resp.Status != "duplicate" {
+		t.Errorf("expected standard 'duplicate' for unknown incoming, got %q", resp.Status)
+	}
+	if resp.Existing.ProvenanceMerged {
+		t.Error("did not expect a merge for unknown incoming")
+	}
+	m := findStored(t, store, content)
+	if st, _ := m.Metadata["source_type"].(string); st != "user_input" {
+		t.Errorf("primary should stay user_input, got %q", st)
+	}
+	if h := storedProvenance(t, m); len(h) != 0 {
+		t.Errorf("expected no provenance_history, got %+v", h)
+	}
+}
+
+func TestProvenanceMerge_LegacyExisting(t *testing.T) {
+	srv, store := newTestServer()
+	content := "Legacy fact without provenance"
+
+	// No source_type → handleAdd defaults metadata.source_type to "unknown".
+	callTool(srv, "memory_add", map[string]any{"content": content})
+	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
+	resp := parseDedupResp(t, result)
+
+	// Opportunistic backfill: standard dedup (skip), but existing is enriched.
+	if resp.Status != "duplicate" {
+		t.Errorf("expected 'duplicate' (backfill is not a merge), got %q", resp.Status)
+	}
+	if resp.Existing.ProvenanceMerged {
+		t.Error("backfill must not set provenance_merged")
+	}
+	m := findStored(t, store, content)
+	if st, _ := m.Metadata["source_type"].(string); st != "tool_output" {
+		t.Errorf("legacy source_type should be backfilled to tool_output, got %q", st)
+	}
+	if h := storedProvenance(t, m); len(h) != 0 {
+		t.Errorf("backfill must not create provenance_history, got %+v", h)
+	}
+}
+
+func TestProvenanceMerge_Idempotent(t *testing.T) {
+	srv, store := newTestServer()
+	content := "Idempotent provenance fact"
+
+	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	// First tool_output → merge.
+	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
+	// Second tool_output → already recorded → no-op merge.
+	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
+	resp := parseDedupResp(t, result)
+
+	if resp.Status != "duplicate" {
+		t.Errorf("expected idempotent no-op to yield 'duplicate', got %q", resp.Status)
+	}
+	if resp.Existing.ProvenanceMerged {
+		t.Error("idempotent merge must not report provenance_merged")
+	}
+	m := findStored(t, store, content)
+	if h := storedProvenance(t, m); len(h) != 1 {
+		t.Errorf("expected provenance_history length 1 after idempotent re-add, got %d", len(h))
+	}
+}
+
+func TestProvenanceMerge_HistoryCap(t *testing.T) {
+	srv, store := newTestServer()
+	ctx := context.Background()
+	content := "Capped provenance fact"
+
+	vec, err := srv.embedder.Embed(ctx, content)
+	if err != nil {
+		t.Fatalf("embed failed: %v", err)
+	}
+	full := make([]memory.ProvenanceEntry, memory.MaxProvenanceHistory)
+	for i := range full {
+		full[i] = memory.ProvenanceEntry{SourceType: "web_search", MergedAt: int64(i), ContentScore: 0.95}
+	}
+	mem := memory.New(content, memory.WithMetadata(map[string]any{
+		"source_type":        "user_input",
+		"provenance_history": full,
+	}))
+	mem.Collection = CollectionFromContext(ctx)
+	if err := store.Insert(ctx, mem, vec); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	// Incoming a NEW different source → would merge, but cap is reached.
+	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "document"})
+	resp := parseDedupResp(t, result)
+	if resp.Status != "duplicate" {
+		t.Errorf("expected 'duplicate' when history cap reached, got %q", resp.Status)
+	}
+	if resp.Existing.ProvenanceMerged {
+		t.Error("must not merge when cap reached")
+	}
+	m := findStored(t, store, content)
+	if h := storedProvenance(t, m); len(h) != memory.MaxProvenanceHistory {
+		t.Errorf("provenance_history should stay capped at %d, got %d", memory.MaxProvenanceHistory, len(h))
 	}
 }

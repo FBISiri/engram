@@ -195,7 +195,10 @@ func runSingle(a args, trace string, eng *replay.Engine, override, baseCfg *repl
 	if err != nil {
 		return replay.Report{}, fmt.Errorf("replay failed: %w", err)
 	}
-	return replay.BuildReport(trace, a.collection, cfg, results, th), nil
+	// Load raw records (with task_id/task_result) for the Memory Worth join. A
+	// read failure here is non-fatal: MW is simply omitted from the report.
+	records, _ := replay.LoadRecords(trace)
+	return replay.BuildReport(trace, a.collection, cfg, results, th, records...), nil
 }
 
 func runMultiDay(a args, eng *replay.Engine, th replay.Thresholds) {

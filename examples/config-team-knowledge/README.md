@@ -53,6 +53,51 @@ memory_apply_config(config=json.dumps({
 
 ---
 
+## Startup & Verification
+
+These configs are runtime tuning profiles, not standalone services. To apply:
+
+### Step 1 — Ensure Engram is running
+
+```bash
+# Start Qdrant (if not already running)
+docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
+
+# Start Engram server
+ENGRAM_TRANSPORT=both \
+ENGRAM_HTTP_PORT=8080 \
+ENGRAM_OPENAI_API_KEY=sk-... \
+./engram serve
+```
+
+### Step 2 — Apply config via MCP tool
+
+Call `memory_apply_config` with the JSON from the Usage section above (in your MCP
+client session or via script).
+
+### Step 3 — Verify config was applied
+
+```bash
+# Confirm server is healthy
+curl http://localhost:8080/health
+# → {"status":"ok","qdrant":"ok"}
+
+# Test retrieval: search should return ≤10 results with min_score 0.65
+# In your MCP session:
+# memory_search(query="team coding standards", limit=10)
+# → Results should show recency-weighted ranking and near-duplicates collapsed
+```
+
+### Expected behavior
+
+- `memory_search` returns at most 10 results (per `limit: 10`)
+- Results with score below 0.65 are filtered out (per `min_score: 0.65`)
+- Reranking is active — second-pass rerank fights near-duplicate clutter
+- Writes with similarity ≥0.85 to existing memories are merged (per `dedupe_threshold: 0.85`)
+- `event` memories auto-expire after 180 days; `insight` memories never expire
+
+---
+
 ## ⚠️ Proposed fields
 
 These fields are **not yet wired server-side — roadmap**. They express the intended

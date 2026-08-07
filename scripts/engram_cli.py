@@ -25,6 +25,9 @@ import urllib.request
 
 DEFAULT_URL = "http://localhost:8080"
 
+SOURCE_TYPES = ["tool_output", "reflection", "web_search", "user_input",
+                "calendar", "document", "unknown"]
+
 
 def _die(msg, code=1):
     sys.stderr.write(msg.rstrip("\n") + "\n")
@@ -99,6 +102,10 @@ def cmd_add(args):
         body["valid_until"] = args.valid_until
     if args.metadata:
         body["metadata"] = _parse_json_obj(args.metadata, "--metadata")
+    if args.source_type:
+        md = body.get("metadata") or {}
+        md["source_type"] = args.source_type
+        body["metadata"] = md
     if args.collection:
         path = "/collections/%s/memories" % args.collection
     else:
@@ -116,6 +123,8 @@ def cmd_search(args):
         body["types"] = args.types
     if args.tags:
         body["tags"] = args.tags
+    if args.source_type:
+        body["source_type"] = args.source_type
     if args.collection:
         # The legacy /memories/search route accepts an explicit `collection`
         # field (see handleSearchMemories) — no caller-type ownership needed.
@@ -153,6 +162,10 @@ def cmd_update(args):
             body["valid_until"] = args.valid_until
         if args.metadata:
             body["metadata"] = _parse_json_obj(args.metadata, "--metadata")
+        if args.source_type:
+            md = body.get("metadata") or {}
+            md["source_type"] = args.source_type
+            body["metadata"] = md
         return request(args, "PUT", path, body)
 
     body = {}
@@ -166,6 +179,10 @@ def cmd_update(args):
         body["lifecycle_status"] = args.lifecycle_status
     if args.metadata:
         body["metadata"] = _parse_json_obj(args.metadata, "--metadata")
+    if args.source_type:
+        md = body.get("metadata") or {}
+        md["source_type"] = args.source_type
+        body["metadata"] = md
     if not body:
         _die("update: nothing to change — provide --content (PUT) or at least "
              "one of --importance/--tags/--source/--lifecycle-status/--metadata (PATCH)")
@@ -209,6 +226,8 @@ def cmd_cross_search(args):
         body["types"] = args.types
     if args.tags:
         body["tags"] = args.tags
+    if args.source_type:
+        body["source_type"] = args.source_type
     return request(args, "POST", "/memories/cross-search", body)
 
 
@@ -261,6 +280,8 @@ def build_parser():
     sp.add_argument("--source")
     sp.add_argument("--valid-until", type=float, dest="valid_until")
     sp.add_argument("--metadata", help="JSON object string")
+    sp.add_argument("--source-type", dest="source_type", choices=SOURCE_TYPES,
+                    help="memory source_type (stored in metadata)")
     sp.add_argument("--collection")
     sp.set_defaults(func=cmd_add)
 
@@ -270,6 +291,8 @@ def build_parser():
     sp.add_argument("--include-archived", action="store_true", dest="include_archived")
     sp.add_argument("--types", nargs="+")
     sp.add_argument("--tags", nargs="+")
+    sp.add_argument("--source-type", dest="source_type", nargs="+",
+                    help="filter by one or more source_type values")
     sp.add_argument("--collection")
     sp.set_defaults(func=cmd_search)
 
@@ -289,6 +312,8 @@ def build_parser():
                     choices=["active", "deprecated", "archived"])
     sp.add_argument("--valid-until", type=float, dest="valid_until")
     sp.add_argument("--metadata", help="JSON object string")
+    sp.add_argument("--source-type", dest="source_type", choices=SOURCE_TYPES,
+                    help="memory source_type (stored in metadata)")
     sp.add_argument("--collection")
     sp.set_defaults(func=cmd_update)
 
@@ -317,6 +342,8 @@ def build_parser():
     sp.add_argument("--include-archived", action="store_true", dest="include_archived")
     sp.add_argument("--types", nargs="+")
     sp.add_argument("--tags", nargs="+")
+    sp.add_argument("--source-type", dest="source_type", nargs="+",
+                    help="filter by one or more source_type values")
     sp.set_defaults(func=cmd_cross_search)
 
     sp = sub.add_parser("reflect", help="run a reflection cycle (POST /reflect)")

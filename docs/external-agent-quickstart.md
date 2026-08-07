@@ -471,23 +471,123 @@ Full reference: [`docs/configuration.md`](https://github.com/FBISiri/engram/blob
 
 ## Provenance tracking
 
-Every memory can record *what kind of input produced it* in `metadata.source_type`.
-The six valid values are:
+### What is `source_type`?
 
-| Value | Use case |
-|-------|----------|
-| `user_input` | Came directly from user input. |
-| `web_search` | Derived from a web search result. |
-| `tool_output` | Derived from a tool/function-call result. |
-| `reflection` | Synthesized by the Reflection Engine. |
-| `calendar` | Derived from calendar data. |
-| `document` | Extracted from an ingested document. |
+Every memory carries two orthogonal provenance fields:
 
-By default (`ENGRAM_PROVENANCE_MODE=warn`) an omitted `source_type` is accepted and
-stored as `"unknown"`. Running with `ENGRAM_PROVENANCE_MODE=strict` **rejects** any
-write that omits `source_type` (HTTP `422`); `ENGRAM_REQUIRE_PROVENANCE=true` is the
-legacy alias that additionally turns on the Reflection Engine's provenance filter. See
-[`api.md`](https://github.com/FBISiri/engram/blob/main/docs/api.md#provenance--eu-ai-act-compliance) for the full matrix.
+- **`source`** (`user` / `agent` / `system`) — *who* wrote the memory.
+- **`metadata.source_type`** — *what kind of input* produced the memory's content.
+
+`source_type` answers the question: "Where did this information **originally** come
+from?" This is required for EU AI Act traceability (distinguishing AI-generated from
+human-sourced content) and enables provenance-filtered search at query time.
+
+### The six valid values
+
+| Value | When to use | Example |
+|-------|-------------|---------|
+| `user_input` | Content came directly from a human (chat, dictation, form). | User says "I prefer dark mode" → store with `user_input`. |
+| `web_search` | Content derived from a web search result. | Agent searched "Python 3.12 release date" → store the finding. |
+| `tool_output` | Content derived from a non-search tool or function call. | CI pipeline returned build status → store the result. |
+| `reflection` | Insight synthesized by the agent itself (thinking, summarizing, connecting dots). | Agent realizes two directives conflict → store the insight. |
+| `calendar` | Content derived from calendar/scheduling data. | "Frank's flight lands at 14:00" from a calendar event. |
+| `document` | Content extracted from an ingested file (PDF, DOCX, code). | Key finding from an uploaded research paper. |
+
+**Selection guide — when in doubt:**
+
+1. Did a human type/say it? → `user_input`
+2. Did it come from a web search? → `web_search`
+3. Did it come from a tool call (API, CLI, database)? → `tool_output`
+4. Did it come from a calendar event? → `calendar`
+5. Did it come from reading a file/document? → `document`
+6. Did the agent generate it by thinking/synthesizing? → `reflection`
+
+Most agent-generated memories (summaries, lessons learned, synthesized insights) should
+use `reflection`. When uncertain, default to `reflection`.
+
+### Enforcement modes: `warn` vs `strict`
+
+Provenance enforcement at write time is controlled by the `ENGRAM_PROVENANCE_MODE`
+environment variable:
+
+| Mode | `source_type` **omitted** | `source_type` **present** |
+|------|---------------------------|---------------------------|
+| `warn` (default) | Accepted; defaults to `"unknown"`, warning logged. | Accepted if valid enum value; otherwise `400`. |
+| `strict` | **Rejected** with `422 Unprocessable Entity`. | `400` if not in enum; `422` if value is `"unknown"`. |
+
+In `warn` mode (the default), omitting `source_type` works but produces a log warning
+and stores `"unknown"` — this is fine for getting started but makes provenance auditing
+unreliable. In `strict` mode, every write **must** include a valid `source_type` or it
+will be rejected with HTTP `422`.
+
+> **Tip:** Start with `warn` during development. Switch to `strict` in production to
+> guarantee every memory has clean provenance.
+
+Related environment variables:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ENGRAM_PROVENANCE_MODE` | `warn` | Write-time enforcement (table above). |
+| `ENGRAM_ALLOWED_PROVENANCES` | *(empty)* | In `strict` mode, restricts accepted values to this comma-separated list. Empty = all six enum values accepted. |
+| `ENGRAM_REQUIRE_PROVENANCE` | `false` | Legacy flag. Enables the Reflection Engine's provenance evidence filter. Does **not** gate the write path — use `ENGRAM_PROVENANCE_MODE=strict` for that. |
+
+#### curl — storing with `source_type`
+
+```bash
+# Store a memory with explicit provenance
+curl -X POST http://localhost:8080/memories \
+  -H "Authorization: Bearer pick-a-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Python 3.12 was released on October 2, 2023.",
+    "type": "insight",
+    "importance": 5,
+    "tags": ["python", "releases"],
+    "metadata": {
+      "source_type": "web_search"
+    }
+  }'
+```
+
+In `strict` mode, omitting `metadata.source_type` returns:
+
+```json
+{"error": "source_type is required", "status": 422}
+```
+
+### Filtering search results by `source_type`
+
+Pass `source_type` as a string array in your search request to restrict results to
+specific provenances. This is useful when you only want human-provided facts, or only
+agent-generated insights:
+
+```bash
+# Find only memories that came from user input
+curl -X POST http://localhost:8080/memories/search \
+  -H "Authorization: Bearer pick-a-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "deployment policy",
+    "limit": 5,
+    "source_type": ["user_input"]
+  }'
+```
+
+```bash
+# Find memories from web search OR documents (multiple values = OR logic)
+curl -X POST http://localhost:8080/memories/search \
+  -H "Authorization: Bearer pick-a-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Python release dates",
+    "limit": 5,
+    "source_type": ["web_search", "document"]
+  }'
+```
+
+Invalid `source_type` filter values are rejected with `400`.
+
+See [`api.md § Provenance`](https://github.com/FBISiri/engram/blob/main/docs/api.md#provenance--eu-ai-act-compliance) for the full enforcement matrix and edge cases.
 
 ---
 

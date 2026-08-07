@@ -1,13 +1,11 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/collection"
@@ -100,29 +98,19 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		mem.Metadata = body.Metadata
 	}
 
-	// C1 provenance: if source_type is present in metadata, validate against the enum.
-	if st, ok := mem.Metadata["source_type"]; ok {
-		stStr, isStr := st.(string)
-		if !isStr || memory.ValidateSourceType(stStr) != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
-			return
-		}
-		if h.srv.strictProvenanceRejects(stStr) {
-			log.Printf("[WARN] engram REST POST /memories: source_type %q not permitted, rejecting (strict mode)", stStr)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceRejectMsg})
-			return
-		}
-	} else {
-		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
-			log.Printf("[WARN] engram REST POST /memories: source_type not provided, rejecting (strict mode)")
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceMsg})
-			return
-		}
-		if mem.Metadata == nil {
-			mem.Metadata = map[string]any{}
-		}
-		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram REST POST /memories: source_type not provided, defaulting to 'unknown' (memory %s)", mem.ID)
+	// C1 provenance (shared helper).
+	if mem.Metadata == nil {
+		mem.Metadata = map[string]any{}
+	}
+	sourceType, provided, perr := extractMetaSourceType(mem.Metadata)
+	if perr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": perr.Error()})
+		return
+	}
+	if err := h.srv.applyProvenance(mem.Metadata, sourceType, provided, "REST POST /memories"); err != nil {
+		code, msg := provenanceStatus(err)
+		writeJSON(w, code, map[string]string{"error": msg})
+		return
 	}
 
 	embedStart := time.Now()
@@ -248,46 +236,55 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Other patchable fields.
+	// Other patchable fields. A recognized field that is present but fails to
+	// unmarshal is a client error (400) rather than a silent skip.
 	if rawTags, ok := raw["tags"]; ok {
 		var tags []string
-		if err := json.Unmarshal(rawTags, &tags); err == nil {
-			tagsAny := make([]any, len(tags))
-			for i, t := range tags {
-				tagsAny[i] = t
-			}
-			updates["tags"] = tagsAny
+		if err := json.Unmarshal(rawTags, &tags); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tags: expected array of strings"})
+			return
 		}
+		tagsAny := make([]any, len(tags))
+		for i, t := range tags {
+			tagsAny[i] = t
+		}
+		updates["tags"] = tagsAny
 	}
 	if rawImp, ok := raw["importance"]; ok {
 		var imp float64
-		if err := json.Unmarshal(rawImp, &imp); err == nil {
-			updates["importance"] = imp
+		if err := json.Unmarshal(rawImp, &imp); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid importance: expected number"})
+			return
 		}
+		updates["importance"] = clampImportance(imp)
 	}
 	if rawSrc, ok := raw["source"]; ok {
 		var src string
-		if err := json.Unmarshal(rawSrc, &src); err == nil {
-			updates["source"] = src
+		if err := json.Unmarshal(rawSrc, &src); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid source: expected string"})
+			return
 		}
+		updates["source"] = src
 	}
 	if rawMeta, ok := raw["metadata"]; ok {
 		var meta map[string]any
-		if err := json.Unmarshal(rawMeta, &meta); err == nil {
-			if st, ok := meta["source_type"]; ok {
-				stStr, isStr := st.(string)
-				if !isStr || memory.ValidateSourceType(stStr) != nil {
-					writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
-					return
-				}
-				if h.srv.strictProvenanceRejects(stStr) {
-					log.Printf("[WARN] engram REST PATCH /memories/%s: source_type %q not permitted, rejecting (strict mode)", id, stStr)
-					writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceRejectMsg})
-					return
-				}
-			}
-			updates["metadata"] = meta
+		if err := json.Unmarshal(rawMeta, &meta); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid metadata: expected object"})
+			return
 		}
+		if st, ok := meta["source_type"]; ok {
+			stStr, isStr := st.(string)
+			if !isStr {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
+				return
+			}
+			if err := h.srv.validateProvenance(stStr); err != nil {
+				code, msg := provenanceStatus(err)
+				writeJSON(w, code, map[string]string{"error": msg})
+				return
+			}
+		}
+		updates["metadata"] = meta
 	}
 
 	// C1 provenance (R4): PATCH is a partial update. Only warn when, after the
@@ -405,6 +402,7 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 	if importance <= 0 {
 		importance = prev.Importance
 	}
+	importance = clampImportance(importance)
 
 	source := body.Source
 	if source == "" {
@@ -415,6 +413,11 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 	if tags == nil {
 		tags = prev.Tags
 	}
+
+	// TTL: compute valid_until from the TTL matrix (or honor an explicit,
+	// future-dated value), matching the POST path.
+	ttlCfg := memory.DefaultTTLConfig()
+	computedValidUntil := memory.ComputeValidUntil(ttlCfg, memType, importance, tags, body.ValidUntil)
 
 	now := float64(time.Now().Unix())
 	mem := &memory.Memory{
@@ -427,7 +430,7 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:          prev.CreatedAt,
 		UpdatedAt:          now,
 		Metadata:           body.Metadata,
-		ValidUntil:         body.ValidUntil,
+		ValidUntil:         computedValidUntil,
 		LifecycleStatus:    prev.LifecycleStatus,
 		AccessCount:        prev.AccessCount,
 		LastAccessedAt:     prev.LastAccessedAt,
@@ -445,29 +448,16 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 		mem.LifecycleStatus = memory.LifecycleActive
 	}
 
-	// C1 provenance: if source_type is present in metadata, validate against the enum.
-	if st, ok := mem.Metadata["source_type"]; ok {
-		stStr, isStr := st.(string)
-		if !isStr || memory.ValidateSourceType(stStr) != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid source_type: %v", st)})
-			return
-		}
-		if h.srv.strictProvenanceRejects(stStr) {
-			log.Printf("[WARN] engram REST PUT /memories/%s: source_type %q not permitted, rejecting (strict mode)", id, stStr)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceRejectMsg})
-			return
-		}
-	} else {
-		if h.srv.cfg != nil && h.srv.cfg.ProvenanceMode == "strict" {
-			log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, rejecting (strict mode)", id)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": strictProvenanceMsg})
-			return
-		}
-		if mem.Metadata == nil {
-			mem.Metadata = map[string]any{}
-		}
-		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram REST PUT /memories/%s: source_type not provided, defaulting to 'unknown'", id)
+	// C1 provenance (shared helper).
+	sourceType, provided, perr := extractMetaSourceType(mem.Metadata)
+	if perr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": perr.Error()})
+		return
+	}
+	if err := h.srv.applyProvenance(mem.Metadata, sourceType, provided, "REST PUT /memories"); err != nil {
+		code, msg := provenanceStatus(err)
+		writeJSON(w, code, map[string]string{"error": msg})
+		return
 	}
 
 	embedStart := time.Now()
@@ -710,53 +700,15 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	}
 
 	// Apply scoring + MMR (same as MCP search).
-	for i := range results {
-		results[i].Score = memory.Score(&results[i].Memory, results[i].Score, h.srv.weights, h.srv.decay)
-	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
-
-	vectors := make([][]float32, len(results))
-	hasVectors := false
-	for i, r := range results {
-		if len(r.Vector) > 0 {
-			vectors[i] = r.Vector
-			hasVectors = true
-		}
-	}
-	if hasVectors && len(results) > limit {
-		results = memory.MMR(results, vectors, limit, h.srv.mmrLambda)
-	} else if len(results) > limit {
-		results = results[:limit]
-	}
+	results = rerankResults(results, h.srv.weights, h.srv.decay, h.srv.mmrLambda, limit)
 
 	// Update access_count and last_accessed_source asynchronously.
 	callerType := CallerTypeFromContext(r.Context())
-	if len(results) > 0 {
-		toUpdate := make([]string, len(results))
-		accessCounts := make([]int64, len(results))
-		for i, res := range results {
-			toUpdate[i] = res.ID
-			accessCounts[i] = res.AccessCount
-		}
-		go func() {
-			now := float64(time.Now().Unix())
-			updates := map[string]any{
-				"last_accessed_at": now,
-				"updated_at":       now,
-			}
-			if callerType != "" {
-				updates["last_accessed_source"] = callerType
-			}
-			for i, id := range toUpdate {
-				u := make(map[string]any, len(updates)+1)
-				for k, v := range updates {
-					u[k] = v
-				}
-				u["access_count"] = accessCounts[i] + 1
-				_ = h.srv.store.Update(context.Background(), id, u)
-			}
-		}()
+	items := make([]accessUpdate, len(results))
+	for i, res := range results {
+		items[i] = accessUpdate{ID: res.ID, AccessCount: res.AccessCount}
 	}
+	asyncUpdateAccessCounts(h.srv.store, nil, items, callerType, true)
 
 	type result struct {
 		memory.Memory

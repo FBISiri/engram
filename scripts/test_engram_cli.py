@@ -119,6 +119,13 @@ class CLITestCase(unittest.TestCase):
         self.assertEqual(LAST["body"]["limit"], 3)
         self.assertEqual(LAST["body"]["collection"], "engram_user")
 
+    def test_search_source_type(self):
+        code, out, err = self.run_cli([
+            "search", "find me", "--source-type", "user_input", "web_search",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(LAST["body"]["source_type"], ["user_input", "web_search"])
+
     # ── get ──
     def test_get(self):
         code, out, err = self.run_cli(["get", "abc123"])
@@ -188,6 +195,49 @@ class CLITestCase(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(LAST["path"], "/memories/cross-search")
         self.assertEqual(LAST["body"]["collections"], ["engram_user", "engram_reflection"])
+
+    def test_cross_search_source_type(self):
+        code, out, err = self.run_cli([
+            "cross-search", "q", "--collections", "engram_user",
+            "--source-type", "reflection",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(LAST["body"]["source_type"], ["reflection"])
+
+    # ── source_type on add / update ──
+    def test_add_source_type(self):
+        code, out, err = self.run_cli([
+            "add", "hi", "--source-type", "reflection",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(LAST["body"]["metadata"]["source_type"], "reflection")
+
+    def test_add_source_type_with_metadata(self):
+        code, out, err = self.run_cli([
+            "add", "hi", "--metadata", '{"k": "v"}',
+            "--source-type", "reflection",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(LAST["body"]["metadata"]["k"], "v")
+        self.assertEqual(LAST["body"]["metadata"]["source_type"], "reflection")
+
+    def test_update_patch_source_type(self):
+        code, out, err = self.run_cli([
+            "update", "id1", "--source-type", "user_input",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(LAST["method"], "PATCH")
+        self.assertEqual(LAST["body"]["metadata"]["source_type"], "user_input")
+
+    def test_update_put_source_type(self):
+        code, out, err = self.run_cli([
+            "update", "id1", "--content", "new text",
+            "--source-type", "user_input",
+        ])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(LAST["method"], "PUT")
+        self.assertEqual(LAST["body"]["content"], "new text")
+        self.assertEqual(LAST["body"]["metadata"]["source_type"], "user_input")
 
     # ── reflect ──
     def test_reflect_dry_run(self):

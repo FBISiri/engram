@@ -59,6 +59,50 @@ memory_apply_config(config=json.dumps({
 
 ---
 
+## Startup & Verification
+
+These configs are runtime tuning profiles, not standalone services. To apply:
+
+### Step 1 — Ensure Engram is running
+
+```bash
+# Start Qdrant (if not already running)
+docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
+
+# Start Engram server
+ENGRAM_TRANSPORT=both \
+ENGRAM_HTTP_PORT=8080 \
+ENGRAM_OPENAI_API_KEY=sk-... \
+./engram serve
+```
+
+### Step 2 — Apply config via MCP tool
+
+Call `memory_apply_config` with the JSON from the Usage section above (in your MCP
+client session or via script).
+
+### Step 3 — Verify config was applied
+
+```bash
+# Confirm server is healthy
+curl http://localhost:8080/health
+# → {"status":"ok","qdrant":"ok"}
+
+# Test retrieval behavior: search should return ≤6 results with min_score 0.55
+# In your MCP session:
+# memory_search(query="user preferences", limit=6)
+# → Results should show importance-weighted ranking (high-importance memories first)
+```
+
+### Expected behavior
+
+- `memory_search` returns at most 6 results (per `limit: 6`)
+- Results with score below 0.55 are filtered out (per `min_score: 0.55`)
+- High-importance memories rank disproportionately higher (per `importance_weight: 0.35`)
+- Near-identical identity memories (≥0.95 similarity) are blocked at write time
+
+---
+
 ## ⚠️ Proposed fields
 
 These fields are **not yet wired server-side — roadmap**. They express the intended

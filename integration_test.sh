@@ -1,5 +1,5 @@
 #!/bin/bash
-# integration_test.sh — Engram M4 Integration Test
+# integration_test.sh — Engram D4 Integration Test
 # Tests the MCP server via stdio against a live Qdrant instance.
 #
 # Prerequisites:
@@ -112,121 +112,121 @@ TESTS=$((TESTS + 1))
 info "Test 2: List Tools"
 TOOLS_RESP=$(send_rpc "tools/list" '{}' 2)
 TOOL_COUNT=$(echo "$TOOLS_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('result',{}).get('tools',[])))" 2>/dev/null || echo "0")
-if [ "$TOOL_COUNT" -eq 4 ]; then
-    pass "List Tools: found 4 tools (memory.search, memory.add, memory.update, memory.delete)"
+if [ "$TOOL_COUNT" -eq 8 ]; then
+    pass "List Tools: found 8 tools (memory_search, memory_add, memory_update, memory_delete, reflection_check, reflection_run, memory_apply_config, memory_reset)"
 else
-    fail "List Tools: expected 4 tools, got $TOOL_COUNT. Response: $TOOLS_RESP"
+    fail "List Tools: expected 8 tools, got $TOOL_COUNT. Response: $TOOLS_RESP"
 fi
 
 # ============================================================================
-# Test 3: memory.add — store a memory
+# Test 3: memory_add — store a memory
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 3: memory.add"
-ADD_RESP=$(send_rpc "tools/call" '{"name":"memory.add","arguments":{"content":"User name is Frank, a software engineer in Beijing","type":"identity","importance":9,"tags":["name","occupation"]}}' 3)
+info "Test 3: memory_add"
+ADD_RESP=$(send_rpc "tools/call" '{"name":"memory_add","arguments":{"content":"User name is Frank, a software engineer in Beijing","type":"identity","importance":9,"tags":["name","occupation"]}}' 3)
 ADD_STATUS=$(echo "$ADD_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c['status'])" 2>/dev/null || echo "error")
 if [ "$ADD_STATUS" = "created" ]; then
-    pass "memory.add: created identity memory"
+    pass "memory_add: created identity memory"
 else
-    fail "memory.add: status=$ADD_STATUS. Response: $ADD_RESP"
+    fail "memory_add: status=$ADD_STATUS. Response: $ADD_RESP"
 fi
 
 # ============================================================================
-# Test 4: memory.add — store another memory of different type
+# Test 4: memory_add — store another memory of different type
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 4: memory.add (event type)"
+info "Test 4: memory_add (event type)"
 sleep 1  # Rate limit
-ADD2_RESP=$(send_rpc "tools/call" '{"name":"memory.add","arguments":{"content":"Discussed Engram project: Go rewrite of chat2mem, designed for open-source release","type":"event","importance":6,"tags":["topic","engram"]}}' 4)
+ADD2_RESP=$(send_rpc "tools/call" '{"name":"memory_add","arguments":{"content":"Discussed Engram project: Go rewrite of chat2mem, designed for open-source release","type":"event","importance":6,"tags":["topic","engram"]}}' 4)
 ADD2_STATUS=$(echo "$ADD2_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c['status'])" 2>/dev/null || echo "error")
 if [ "$ADD2_STATUS" = "created" ]; then
-    pass "memory.add (event): created event memory"
+    pass "memory_add (event): created event memory"
 else
-    fail "memory.add (event): status=$ADD2_STATUS. Response: $ADD2_RESP"
+    fail "memory_add (event): status=$ADD2_STATUS. Response: $ADD2_RESP"
 fi
 
 # ============================================================================
-# Test 5: memory.add — dedup check
+# Test 5: memory_add — dedup check
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 5: memory.add (duplicate check)"
+info "Test 5: memory_add (duplicate check)"
 sleep 1
-DUP_RESP=$(send_rpc "tools/call" '{"name":"memory.add","arguments":{"content":"User name is Frank, a software engineer in Beijing","type":"identity","importance":9}}' 5)
+DUP_RESP=$(send_rpc "tools/call" '{"name":"memory_add","arguments":{"content":"User name is Frank, a software engineer in Beijing","type":"identity","importance":9}}' 5)
 DUP_STATUS=$(echo "$DUP_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c['status'])" 2>/dev/null || echo "error")
 if [ "$DUP_STATUS" = "duplicate" ]; then
-    pass "memory.add (dedup): correctly detected duplicate"
+    pass "memory_add (dedup): correctly detected duplicate"
 else
-    fail "memory.add (dedup): expected 'duplicate', got '$DUP_STATUS'. Response: $DUP_RESP"
+    fail "memory_add (dedup): expected 'duplicate', got '$DUP_STATUS'. Response: $DUP_RESP"
 fi
 
 # ============================================================================
-# Test 6: memory.search — basic search
+# Test 6: memory_search — basic search
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 6: memory.search"
+info "Test 6: memory_search"
 sleep 1
-SEARCH_RESP=$(send_rpc "tools/call" '{"name":"memory.search","arguments":{"query":"What is the user name and job","limit":5}}' 6)
+SEARCH_RESP=$(send_rpc "tools/call" '{"name":"memory_search","arguments":{"query":"What is the user name and job","limit":5}}' 6)
 SEARCH_COUNT=$(echo "$SEARCH_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(len(c))" 2>/dev/null || echo "0")
 if [ "$SEARCH_COUNT" -ge 1 ]; then
-    pass "memory.search: returned $SEARCH_COUNT results"
+    pass "memory_search: returned $SEARCH_COUNT results"
 else
-    fail "memory.search: expected >= 1 results, got $SEARCH_COUNT. Response: $SEARCH_RESP"
+    fail "memory_search: expected >= 1 results, got $SEARCH_COUNT. Response: $SEARCH_RESP"
 fi
 
 # ============================================================================
-# Test 7: memory.search — with type filter
+# Test 7: memory_search — with type filter
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 7: memory.search (type filter)"
+info "Test 7: memory_search (type filter)"
 sleep 1
-FILTERED_RESP=$(send_rpc "tools/call" '{"name":"memory.search","arguments":{"query":"user information","limit":5,"types":["identity"]}}' 7)
+FILTERED_RESP=$(send_rpc "tools/call" '{"name":"memory_search","arguments":{"query":"user information","limit":5,"types":["identity"]}}' 7)
 FILTERED_TYPE=$(echo "$FILTERED_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c[0]['type'] if c else 'none')" 2>/dev/null || echo "error")
 if [ "$FILTERED_TYPE" = "identity" ]; then
-    pass "memory.search (type filter): correctly filtered to identity type"
+    pass "memory_search (type filter): correctly filtered to identity type"
 else
-    fail "memory.search (type filter): expected 'identity', got '$FILTERED_TYPE'. Response: $FILTERED_RESP"
+    fail "memory_search (type filter): expected 'identity', got '$FILTERED_TYPE'. Response: $FILTERED_RESP"
 fi
 
 # ============================================================================
-# Test 8: memory.update — update existing memory
+# Test 8: memory_update — update existing memory
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 8: memory.update"
+info "Test 8: memory_update"
 sleep 1
-UPDATE_RESP=$(send_rpc "tools/call" '{"name":"memory.update","arguments":{"old_content":"User name is Frank software engineer Beijing","new_content":"User name is Frank, a senior software engineer in Shanghai","type":"identity","importance":9,"tags":["name","occupation","location"]}}' 8)
+UPDATE_RESP=$(send_rpc "tools/call" '{"name":"memory_update","arguments":{"old_content":"User name is Frank software engineer Beijing","new_content":"User name is Frank, a senior software engineer in Shanghai","type":"identity","importance":9,"tags":["name","occupation","location"]}}' 8)
 UPDATE_STATUS=$(echo "$UPDATE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c['status'])" 2>/dev/null || echo "error")
 if [ "$UPDATE_STATUS" = "updated" ]; then
-    pass "memory.update: successfully updated memory"
+    pass "memory_update: successfully updated memory"
 else
-    fail "memory.update: status=$UPDATE_STATUS. Response: $UPDATE_RESP"
+    fail "memory_update: status=$UPDATE_STATUS. Response: $UPDATE_RESP"
 fi
 
 # ============================================================================
-# Test 9: memory.search — verify update took effect
+# Test 9: memory_search — verify update took effect
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 9: memory.search (verify update)"
+info "Test 9: memory_search (verify update)"
 sleep 1
-VERIFY_RESP=$(send_rpc "tools/call" '{"name":"memory.search","arguments":{"query":"Frank Shanghai senior engineer","limit":3}}' 9)
+VERIFY_RESP=$(send_rpc "tools/call" '{"name":"memory_search","arguments":{"query":"Frank Shanghai senior engineer","limit":3}}' 9)
 VERIFY_CONTENT=$(echo "$VERIFY_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c[0]['content'] if c else '')" 2>/dev/null || echo "")
 if echo "$VERIFY_CONTENT" | grep -q "Shanghai"; then
-    pass "memory.search (verify update): found updated content with 'Shanghai'"
+    pass "memory_search (verify update): found updated content with 'Shanghai'"
 else
-    fail "memory.search (verify update): expected 'Shanghai' in content. Got: $VERIFY_CONTENT"
+    fail "memory_search (verify update): expected 'Shanghai' in content. Got: $VERIFY_CONTENT"
 fi
 
 # ============================================================================
-# Test 10: memory.delete — delete by semantic search
+# Test 10: memory_delete — delete by semantic search
 # ============================================================================
 TESTS=$((TESTS + 1))
-info "Test 10: memory.delete"
+info "Test 10: memory_delete"
 sleep 1
-DELETE_RESP=$(send_rpc "tools/call" '{"name":"memory.delete","arguments":{"query":"Engram project Go rewrite chat2mem","similarity_threshold":0.5}}' 10)
+DELETE_RESP=$(send_rpc "tools/call" '{"name":"memory_delete","arguments":{"query":"Engram project Go rewrite chat2mem","similarity_threshold":0.5}}' 10)
 DELETE_STATUS=$(echo "$DELETE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); c=json.loads(d['result']['content'][0]['text']); print(c['status'])" 2>/dev/null || echo "error")
 if [ "$DELETE_STATUS" = "deleted" ]; then
-    pass "memory.delete: successfully deleted matching memories"
+    pass "memory_delete: successfully deleted matching memories"
 else
-    fail "memory.delete: status=$DELETE_STATUS. Response: $DELETE_RESP"
+    fail "memory_delete: status=$DELETE_STATUS. Response: $DELETE_RESP"
 fi
 
 # ============================================================================

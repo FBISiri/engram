@@ -153,7 +153,7 @@ func TestMCPHTTP_Handshake(t *testing.T) {
 func TestMCPHTTP_Add_LandsInPigoCollection(t *testing.T) {
 	ts, store := buildMCPTestServer(t)
 	c := newMCPClient(t, ts.URL, testPigoKey)
-	res := callMCP(t, c, "memory_add", map[string]any{"content": "pigo add via mcp", "type": "event"})
+	res := callMCP(t, c, "memory_add", map[string]any{"content": "pigo add via mcp", "type": "event", "source_type": "tool_output"})
 	if res.IsError {
 		t.Fatalf("add errored: %s", extractText(res))
 	}

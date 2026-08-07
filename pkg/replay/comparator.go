@@ -118,8 +118,11 @@ func scoreShift(rec, live []trajectory.ResultItem) float64 {
 
 // Aggregate rolls per-case comparisons and live/recorded latencies into an
 // AggregateReport, applying the pass/fail thresholds.
-func Aggregate(cmps []CaseComparison, th Thresholds) AggregateReport {
+func Aggregate(cmps []CaseComparison, th Thresholds, records ...trajectory.Record) AggregateReport {
 	rep := AggregateReport{TotalCases: len(cmps)}
+	// Memory Worth is joined from the raw trajectory records (task_id + outcome),
+	// independent of the recorded-vs-live comparison. Nil when no task_id data.
+	rep.MW = ComputeMW(records)
 	if len(cmps) == 0 {
 		rep.Verdict = VerdictPass
 		return rep

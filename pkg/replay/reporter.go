@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/FBISiri/engram/pkg/trajectory"
 )
 
 // BuildComparisons compares each replay result against its recorded case,
@@ -22,15 +24,17 @@ func BuildComparisons(results []ReplayResult) []CaseComparison {
 	return cmps
 }
 
-// BuildReport assembles the full report from a completed replay run.
-func BuildReport(trace, collection string, cfg MemoryConfig, results []ReplayResult, th Thresholds) Report {
+// BuildReport assembles the full report from a completed replay run. The
+// optional records are the raw trajectory entries (with task_id/task_result)
+// used to compute Memory Worth; pass none to omit the MW section.
+func BuildReport(trace, collection string, cfg MemoryConfig, results []ReplayResult, th Thresholds, records ...trajectory.Record) Report {
 	cmps := BuildComparisons(results)
 	return Report{
 		GeneratedAt: time.Now().UTC(),
 		Trace:       trace,
 		Collection:  collection,
 		ConfigDiff:  cfg,
-		Aggregate:   Aggregate(cmps, th),
+		Aggregate:   Aggregate(cmps, th, records...),
 		Comparisons: cmps,
 		Thresholds:  th,
 	}
@@ -91,7 +95,35 @@ func RenderMarkdown(r Report) string {
 		fmt.Fprintf(&b, "_No regressions above threshold._\n")
 	}
 	b.WriteString("\n")
+	if a.MW != nil {
+		b.WriteString(renderMWMarkdown(a.MW))
+	}
 	b.WriteString(knownLimitationsMarkdown())
+	return b.String()
+}
+
+// renderMWMarkdown formats the Memory Worth section. Only called when MW != nil.
+func renderMWMarkdown(mw *MWReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Memory Worth\n\n")
+	fmt.Fprintf(&b, "| Metric | Value |\n|---|---|\n")
+	fmt.Fprintf(&b, "| Tasks with memory | %d |\n", mw.TasksWithMemory)
+	fmt.Fprintf(&b, "| Mean MW | %.2f |\n", mw.MeanMW)
+	fmt.Fprintf(&b, "| Median MW | %.2f |\n\n", mw.MedianMW)
+
+	fmt.Fprintf(&b, "### Top 10 by MW\n\n")
+	fmt.Fprintf(&b, "| Memory (truncated) | MW | Times Used |\n|---|---|---|\n")
+	for _, m := range mw.TopMemories {
+		fmt.Fprintf(&b, "| %s | %.2f | %d |\n", truncate(m.Content, 60), m.MW, m.TimesUsed)
+	}
+	b.WriteString("\n")
+
+	fmt.Fprintf(&b, "### Bottom 10 (high usage, low MW)\n\n")
+	fmt.Fprintf(&b, "| Memory (truncated) | MW | Times Used |\n|---|---|---|\n")
+	for _, m := range mw.BottomMemories {
+		fmt.Fprintf(&b, "| %s | %.2f | %d |\n", truncate(m.Content, 60), m.MW, m.TimesUsed)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 

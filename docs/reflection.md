@@ -49,9 +49,23 @@ See [`configuration.md`](configuration.md) for the full reflection config block.
 
 ## V2 "focal" pipeline (default-off)
 
-A 4-stage "focal" reflection pipeline exists in the codebase but ships **default-off**. It is
-a more structured synthesis path (focus selection → gather → synthesize → write-back) intended
-for long-running, reflection-heavy agents. Until it is promoted to default, the throttled
+A 5-stage "focal" reflection pipeline exists in the codebase but ships **default-off**
+(`Mode: "v1"` in `DefaultConfig`; set `Mode: "v2"` to opt in). Its entry point is
+`Engine.RunV2` in [`pkg/reflection/pipeline.go`](../pkg/reflection/pipeline.go), and it is a
+more structured synthesis path intended for long-running, reflection-heavy agents:
+
+1. **Focal-question generation** — Haiku generates N focal questions (default 3) from the
+   unreflected batch (`generateFocalQuestions`).
+2. **Evidence retrieval** — semantic search gathers evidence per question, in parallel
+   (`retrieveAllEvidence`).
+3. **Dialectic synthesis** — Haiku synthesizes one dialectic insight per question, surfacing
+   tensions/contradictions across its evidence (`generateDialecticInsights`).
+4. **Write-back** — qualifying insights are written to the `engram_reflection` collection;
+   low-confidence ones are diverted to Obsidian drafts (`writeDialecticInsights`).
+5. **Source-marking** — source memories are marked reflected, but only if at least one
+   insight was produced.
+
+Until it is promoted to default, the throttled
 single-pass `reflection_run` above is the supported path. See the
 [`long-cycle-reflection-heavy`](../examples/long-cycle-reflection-heavy/) example for a
 reflection-tuned configuration.

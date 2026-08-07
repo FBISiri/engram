@@ -14,8 +14,8 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -54,7 +54,13 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req crossSearchRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
 		return
 	}
@@ -127,7 +133,7 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 	// same ID cannot appear across collections. Dedup is no longer needed.
 	all := make([]crossSearchHit, 0, perColLimit*len(req.Collections))
 	for _, colName := range req.Collections {
-		colFilter := append(filters, memory.Filter{Field: "collection", Op: memory.OpIn, Value: []string{colName}})
+		colFilter := append(append([]memory.Filter(nil), filters...), memory.Filter{Field: "collection", Op: memory.OpIn, Value: []string{colName}})
 		results, err := h.srv.store.Search(r.Context(), vec, memory.SearchOptions{
 			Limit:           perColLimit,
 			Filters:         colFilter,
@@ -158,32 +164,11 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Async access bookkeeping — same pattern as handleSearchMemories.
 	callerType := r.Header.Get("X-Caller-Type")
-	if len(all) > 0 {
-		ids := make([]string, len(all))
-		counts := make([]int64, len(all))
-		for i, hit := range all {
-			ids[i] = hit.ID
-			counts[i] = hit.AccessCount
-		}
-		go func() {
-			now := float64(time.Now().Unix())
-			updates := map[string]any{
-				"last_accessed_at": now,
-				"updated_at":       now,
-			}
-			if callerType != "" {
-				updates["last_accessed_source"] = callerType
-			}
-			for i, id := range ids {
-				u := make(map[string]any, len(updates)+1)
-				for k, v := range updates {
-					u[k] = v
-				}
-				u["access_count"] = counts[i] + 1
-				_ = h.srv.store.Update(context.Background(), id, u)
-			}
-		}()
+	items := make([]accessUpdate, len(all))
+	for i, hit := range all {
+		items[i] = accessUpdate{ID: hit.ID, AccessCount: hit.AccessCount}
 	}
+	asyncUpdateAccessCounts(h.srv.store, nil, items, callerType, true)
 
 	writeJSON(w, http.StatusOK, all)
 }

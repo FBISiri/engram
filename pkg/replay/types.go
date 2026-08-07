@@ -97,6 +97,10 @@ type AggregateReport struct {
 	LatencyP50Delta int64   `json:"latency_p50_delta"`
 	LatencyP99Delta int64   `json:"latency_p99_delta"`
 
+	// MW is the Memory Worth report joined from trajectory task outcomes. It is
+	// nil (and omitted) when no records carry a task_id (backward compatible).
+	MW *MWReport `json:"mw,omitempty"`
+
 	Verdict Verdict `json:"verdict"`
 }
 

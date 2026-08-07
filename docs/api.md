@@ -60,6 +60,7 @@ Semantic search over stored memories. Returns scored results combining relevance
 | `limit` | number | — | 5 | Maximum results to return. Range: 1–100. |
 | `types` | string[] | — | all | Filter by memory types: `identity`, `event`, `insight`, `directive`. |
 | `tags` | string[] | — | — | Filter by tags. Memories must have at least one matching tag. |
+| `source_type` | string[] | — | — | Filter by provenance. Each value validated against the enum; invalid → error. Enum: `reflection`, `user_input`, `web_search`, `tool_output`, `calendar`, `document`. |
 | `time_start` | number | — | — | Filter memories created after this Unix timestamp. |
 | `time_end` | number | — | — | Filter memories created before this Unix timestamp. |
 | `collections` | string[] | — | all (fan-out) | Filter by collection names (e.g. `engram_user`, `engram_reflection`). Unknown name → error. |
@@ -94,11 +95,13 @@ Semantic search over stored memories. Returns scored results combining relevance
     "type": "identity",
     "content": "Frank prefers road cycling in the morning before 8am.",
     "source": "user",
+    "source_type": "user_input",
     "importance": 7,
     "tags": ["frank", "cycling", "preferences"],
     "created_at": 1717200000,
     "updated_at": 1717200000,
     "score": 1.823,
+    "metadata": { "source_type": "user_input" },
     "valid_until": 0,
     "access_count": 42,
     "last_accessed_at": 1717300000,
@@ -122,6 +125,7 @@ Store a new memory. Automatically deduplicates against existing memories (cosine
 | `importance` | number | — | 5 | Importance score. Clamped to 1–10. |
 | `tags` | string[] | — | `[]` | Tags for classification. |
 | `source` | string | — | `"agent"` | Source of the memory: `user`, `agent`, or `system`. |
+| `source_type` | string | — | per `ENGRAM_PROVENANCE_MODE` | Provenance tag stored in `metadata.source_type`. Enum: `reflection`, `user_input`, `web_search`, `tool_output`, `calendar`, `document`. Invalid → error. |
 | `valid_until` | number | — | auto | Expiration time as Unix timestamp. 0 or omitted = auto-computed via TTL matrix (see [TTL Matrix](#ttl-matrix)). |
 
 **Deduplication behavior:**
@@ -154,6 +158,7 @@ Before inserting, the tool searches for the top 3 most similar memories within t
     "tags": ["frank", "preferences", "coffee"],
     "created_at": 1717401000,
     "updated_at": 1717401000,
+    "metadata": { "source_type": "user_input" },
     "valid_until": 0,
     "collection": "engram_user"
   }
@@ -191,6 +196,7 @@ Update memories by semantic search. Finds old memories matching `old_content`, d
 | `type` | string | — | `"event"` | Memory type for the new memory: `identity`, `event`, `insight`, `directive`. |
 | `importance` | number | — | 5 | Importance score for the new memory. Clamped to 1–10. |
 | `tags` | string[] | — | `[]` | Tags for the new memory. |
+| `source_type` | string | — | per `ENGRAM_PROVENANCE_MODE` | Provenance tag for the new memory. Enum: `reflection`, `user_input`, `web_search`, `tool_output`, `calendar`, `document`. Invalid → error. |
 | `similarity_threshold` | number | — | 0.7 (**rejected** — must use ≥ 0.85) | Minimum cosine similarity for deletion. Hard floor: 0.85. |
 | `valid_until` | number | — | inherited | Expiration timestamp. 0 or omitted = inherits from the first deleted memory, or auto-computed if no match. |
 | `dry_run` | boolean | — | `false` | Preview which memories would be deleted/added without making changes. |
@@ -236,6 +242,7 @@ Update memories by semantic search. Finds old memories matching `old_content`, d
     "content": "Frank switched from oat milk to almond milk in coffee as of 2026-05.",
     "importance": 6,
     "tags": ["frank", "preferences", "coffee"],
+    "metadata": { "source_type": "reflection" },
     "created_at": 1717500000,
     "updated_at": 1717500000
   }

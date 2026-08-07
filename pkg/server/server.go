@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"sort"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -364,35 +363,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultText("[]"), nil
 	}
 
-	// Apply 3-component scoring (the store returns raw cosine similarity)
+	// Apply 3-component scoring + MMR rerank (shared with REST search).
 	weights := s.overrides.getWeights(s.weights)
-	for i := range results {
-		results[i].Score = memory.Score(&results[i].Memory, results[i].Score, weights, s.decay)
-	}
-
-	// Sort by final score descending
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
-	})
-
-	// Apply MMR (Maximal Marginal Relevance) to rerank for relevance + diversity.
-	// Vectors are now returned by the store (with_vectors=true in Qdrant query).
-	// Extract vectors from results for MMR computation.
-	vectors := make([][]float32, len(results))
-	hasVectors := false
-	for i, r := range results {
-		if len(r.Vector) > 0 {
-			vectors[i] = r.Vector
-			hasVectors = true
-		}
-	}
-
-	if hasVectors && len(results) > limit {
-		results = memory.MMR(results, vectors, limit, s.mmrLambda)
-	} else if len(results) > limit {
-		// Fallback: simple truncation if vectors are missing
-		results = results[:limit]
-	}
+	results = rerankResults(results, weights, s.decay, s.mmrLambda, limit)
 
 	span.SetAttributes(
 		attribute.Int("result.count", len(results)),
@@ -400,27 +373,15 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	)
 
 	// Async update access_count and last_accessed_at for returned memories.
-	if len(results) > 0 {
-		toUpdate := make([]string, len(results))
-		for i, r := range results {
-			toUpdate[i] = r.ID
-		}
-		go func() {
-			now := float64(time.Now().Unix())
-			tu, hasTargeted := s.store.(targetedUpdater)
-			for i, id := range toUpdate {
-				fields := map[string]any{
-					"access_count":     results[i].AccessCount + 1,
-					"last_accessed_at": now,
-				}
-				if hasTargeted {
-					_ = tu.UpdateInCollection(context.Background(), id, fields, results[i].Collection)
-				} else {
-					_ = s.store.Update(context.Background(), id, fields)
-				}
-			}
-		}()
+	items := make([]accessUpdate, len(results))
+	for i, r := range results {
+		items[i] = accessUpdate{ID: r.ID, AccessCount: r.AccessCount, Collection: r.Collection}
 	}
+	var tu targetedUpdater
+	if t, ok := s.store.(targetedUpdater); ok {
+		tu = t
+	}
+	asyncUpdateAccessCounts(s.store, tu, items, "", false)
 
 	// Format output
 	type searchResult struct {
@@ -541,31 +502,14 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	mem := memory.New(content, opts...)
 	mem.Collection = CollectionFromContext(ctx)
 
-	// C1 provenance: soft-require source_type. If provided, validate and store
-	// in metadata.source_type; if omitted, log a debug warning but proceed.
+	// C1 provenance: soft-require source_type (shared helper). sourceType is
+	// also consumed by checkDedup below for source_type-aware merging (C2).
 	sourceType := request.GetString("source_type", "")
-	if sourceType != "" {
-		if err := memory.ValidateSourceType(sourceType); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if s.strictProvenanceRejects(sourceType) {
-			log.Printf("[WARN] engram memory_add: source_type %q not permitted, rejecting (strict mode)", sourceType)
-			return mcp.NewToolResultError(strictProvenanceRejectMsg), nil
-		}
-		if mem.Metadata == nil {
-			mem.Metadata = map[string]any{}
-		}
-		mem.Metadata["source_type"] = sourceType
-	} else {
-		if s.cfg != nil && s.cfg.ProvenanceMode == "strict" {
-			log.Printf("[WARN] engram memory_add: source_type not provided, rejecting (strict mode)")
-			return mcp.NewToolResultError(strictProvenanceMsg), nil
-		}
-		if mem.Metadata == nil {
-			mem.Metadata = map[string]any{}
-		}
-		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram memory_add: source_type not provided, defaulting to 'unknown' (source=%s)", mem.Source)
+	if mem.Metadata == nil {
+		mem.Metadata = map[string]any{}
+	}
+	if err := s.applyProvenance(mem.Metadata, sourceType, sourceType != "", "memory_add"); err != nil {
+		return mcp.NewToolResultError(provenanceMCPMsg(err)), nil
 	}
 
 	// Embed content
@@ -581,7 +525,13 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	}
 
 	// Check for duplicates (child span)
-	dupData, dupFound := s.checkDedup(ctx, vec, content)
+	dupData, dupFound, dupErr := s.checkDedup(ctx, vec, content, sourceType)
+	if dupErr != nil {
+		span.RecordError(dupErr)
+		span.SetStatus(codes.Error, "dedup check error")
+		log.Printf("[ERROR] engram memory_add: dedup check failed: %v", dupErr)
+		return mcp.NewToolResultError(fmt.Sprintf("dedup check error: %v", dupErr)), nil
+	}
 	if dupFound {
 		span.SetAttributes(attribute.Bool("dedup.hit", true))
 		if s.traj != nil {
@@ -640,7 +590,9 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 }
 
 // checkDedup runs deduplication check as a child span. Returns (json bytes, true) if duplicate found.
-func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) ([]byte, bool) {
+// incomingSourceType is the source_type of the memory being added; it drives
+// source_type-aware provenance merging (C2) when a content duplicate is found.
+func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, incomingSourceType string) ([]byte, bool, error) {
 	ctx, span := tracer.Start(ctx, "engram.memory.dedup_check")
 	defer span.End()
 	start := time.Now()
@@ -663,7 +615,7 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) 
 			attribute.Float64("top_score", 0),
 			attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
 		)
-		return nil, false
+		return nil, false, err
 	}
 
 	topScore := 0.0
@@ -689,9 +641,12 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) 
 			Status   string `json:"status"`
 			Message  string `json:"message"`
 			Existing struct {
-				ID      string  `json:"id"`
-				Content string  `json:"content"`
-				Score   float64 `json:"score"`
+				ID                 string  `json:"id"`
+				Content            string  `json:"content"`
+				Score              float64 `json:"score"`
+				SourceType         string  `json:"source_type,omitempty"`
+				ProvenanceMerged   bool    `json:"provenance_merged,omitempty"`
+				IncomingSourceType string  `json:"incoming_source_type,omitempty"`
 			} `json:"existing"`
 		}
 		result := dupResult{
@@ -701,11 +656,152 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string) 
 		result.Existing.ID = dup.ID
 		result.Existing.Content = dup.Content
 		result.Existing.Score = dup.Score
+
+		existingST := sourceTypeFromMeta(dup.Metadata)
+		result.Existing.SourceType = existingST
+
+		switch {
+		case incomingSourceType == "" || incomingSourceType == string(memory.SourceTypeUnknown):
+			// C2 §5.2: unknown/empty incoming adds no provenance value — standard dedup.
+		case existingST == "" || existingST == string(memory.SourceTypeUnknown):
+			// C2 §5.3: legacy existing memory — opportunistic backfill of source_type.
+			// This is initial classification, not a merge, so no provenance_history.
+			if err := s.store.Update(ctx, dup.ID, map[string]any{
+				"metadata.source_type": incomingSourceType,
+				"updated_at":           float64(time.Now().Unix()),
+			}); err == nil {
+				result.Existing.SourceType = incomingSourceType
+			}
+		case incomingSourceType != existingST:
+			// C2 §4.3: different source_type — merge provenance.
+			primary, merged, err := s.provenanceMerge(ctx, dup, incomingSourceType)
+			if err == nil && merged {
+				result.Status = "duplicate_provenance_merged"
+				result.Message = fmt.Sprintf(
+					"Content duplicate found. Provenance merged: added %q to existing memory (primary: %q).",
+					incomingSourceType, primary)
+				result.Existing.SourceType = primary
+				result.Existing.ProvenanceMerged = true
+				result.Existing.IncomingSourceType = incomingSourceType
+			}
+		}
+
 		data, _ := json.Marshal(result)
-		return data, true
+		return data, true, nil
 	}
 
-	return nil, false
+	return nil, false, nil
+}
+
+// provenanceMerge updates an existing memory's provenance metadata when a
+// content-duplicate arrives with a different source_type (C2 §4.4). The
+// existing content is not modified; only metadata.provenance_history and the
+// primary metadata.source_type (promoted to highest trust) are updated via a
+// payload-only store.Update (no re-embedding). Returns the new primary
+// source_type and whether a merge was performed.
+func (s *Server) provenanceMerge(ctx context.Context, existing *memory.ScoredMemory, incomingSourceType string) (string, bool, error) {
+	ctx, span := tracer.Start(ctx, "engram.memory.provenance_merge")
+	defer span.End()
+
+	existingST := sourceTypeFromMeta(existing.Metadata)
+	history := getProvenanceHistory(existing.Metadata)
+
+	// Idempotency: this source is already recorded (C2 §5.1 / test Idempotent).
+	if memory.HasSourceType(history, incomingSourceType) {
+		span.SetAttributes(attribute.String("decision", "provenance_merge_skip_idempotent"))
+		return "", false, nil
+	}
+	// Safety cap (C2 §5.4): don't grow provenance_history unboundedly.
+	if len(history) >= memory.MaxProvenanceHistory {
+		span.SetAttributes(attribute.String("decision", "provenance_merge_skip_cap"))
+		return "", false, nil
+	}
+
+	history = append(history, memory.ProvenanceEntry{
+		SourceType:   incomingSourceType,
+		MergedAt:     time.Now().Unix(),
+		ContentScore: existing.Score,
+	})
+
+	sources := make([]string, 0, len(history)+1)
+	if existingST != "" {
+		sources = append(sources, existingST)
+	}
+	for _, h := range history {
+		sources = append(sources, h.SourceType)
+	}
+	primary := memory.HighestTrustSource(sources)
+
+	fields := map[string]any{
+		"metadata.provenance_history": history,
+		"metadata.source_type":        primary,
+		"updated_at":                  float64(time.Now().Unix()),
+	}
+
+	span.SetAttributes(
+		attribute.String("decision", "provenance_merge"),
+		attribute.String("existing_source_type", existingST),
+		attribute.String("incoming_source_type", incomingSourceType),
+		attribute.String("primary_source_type", primary),
+		attribute.Bool("trust_promoted", primary != existingST),
+		attribute.Float64("top_score", existing.Score),
+	)
+
+	if err := s.store.Update(ctx, existing.ID, fields); err != nil {
+		span.RecordError(err)
+		return "", false, err
+	}
+	return primary, true, nil
+}
+
+// sourceTypeFromMeta extracts the source_type string from a metadata map.
+// Returns "" when absent.
+func sourceTypeFromMeta(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	st, _ := metadata["source_type"].(string)
+	return st
+}
+
+// getProvenanceHistory extracts and deserializes the provenance_history from a
+// metadata map. Handles both the in-process []memory.ProvenanceEntry form and
+// the JSON round-tripped []any-of-map form (as returned by the store).
+func getProvenanceHistory(metadata map[string]any) []memory.ProvenanceEntry {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata["provenance_history"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case []memory.ProvenanceEntry:
+		return v
+	case []any:
+		out := make([]memory.ProvenanceEntry, 0, len(v))
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			var e memory.ProvenanceEntry
+			e.SourceType, _ = m["source_type"].(string)
+			switch t := m["merged_at"].(type) {
+			case float64:
+				e.MergedAt = int64(t)
+			case int64:
+				e.MergedAt = t
+			case int:
+				e.MergedAt = int64(t)
+			}
+			e.ContentScore, _ = m["content_score"].(float64)
+			out = append(out, e)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // handleUpdate implements the memory.update tool.
@@ -849,29 +945,13 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 	mem := memory.New(newContent, opts...)
 	mem.Collection = CollectionFromContext(ctx)
 
-	// C1 provenance: if source_type provided, validate and store in metadata.
-	if sourceType := request.GetString("source_type", ""); sourceType != "" {
-		if err := memory.ValidateSourceType(sourceType); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if s.strictProvenanceRejects(sourceType) {
-			log.Printf("[WARN] engram memory_update: source_type %q not permitted, rejecting (strict mode)", sourceType)
-			return mcp.NewToolResultError(strictProvenanceRejectMsg), nil
-		}
-		if mem.Metadata == nil {
-			mem.Metadata = map[string]any{}
-		}
-		mem.Metadata["source_type"] = sourceType
-	} else {
-		if s.cfg != nil && s.cfg.ProvenanceMode == "strict" {
-			log.Printf("[WARN] engram memory_update: source_type not provided, rejecting (strict mode)")
-			return mcp.NewToolResultError(strictProvenanceMsg), nil
-		}
-		if mem.Metadata == nil {
-			mem.Metadata = map[string]any{}
-		}
-		mem.Metadata["source_type"] = string(memory.DefaultSourceType)
-		log.Printf("[WARN] engram memory_update: source_type not provided, defaulting to 'unknown' (source=%s)", mem.Source)
+	// C1 provenance (shared helper).
+	sourceTypeU := request.GetString("source_type", "")
+	if mem.Metadata == nil {
+		mem.Metadata = map[string]any{}
+	}
+	if err := s.applyProvenance(mem.Metadata, sourceTypeU, sourceTypeU != "", "memory_update"); err != nil {
+		return mcp.NewToolResultError(provenanceMCPMsg(err)), nil
 	}
 
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
