@@ -62,8 +62,8 @@ type dialecticLLMResponse struct {
 // using its retrieved evidence. Questions with empty evidence skip LLM calls.
 // Single-question failures are isolated via errgroup (goroutines never fail the group).
 func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []PerQuestionEvidence, cfg Config) ([]DialecticInsight, DialecticStats, error) {
-	if len(evidenceList) != 3 {
-		return nil, DialecticStats{}, fmt.Errorf("generateDialecticInsights: expected 3 questions, got %d", len(evidenceList))
+	if len(evidenceList) == 0 {
+		return nil, DialecticStats{}, fmt.Errorf("generateDialecticInsights: empty evidenceList")
 	}
 
 	timeout := cfg.DialecticTimeout

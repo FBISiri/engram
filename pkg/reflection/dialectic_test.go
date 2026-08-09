@@ -373,3 +373,56 @@ func TestGenerateDialecticInsights_ConcurrentFailureIsolation(t *testing.T) {
 		t.Errorf("invariant broken: sum=%d, expected 3", sum)
 	}
 }
+
+// --- Test: Dynamic question count (V2 supports N != 3) ---
+
+func TestGenerateDialecticInsights_EmptyList(t *testing.T) {
+	e := dialecticTestEngine()
+	_, _, err := e.generateDialecticInsights(context.Background(), nil, e.cfg)
+	if err == nil {
+		t.Fatal("expected error for empty evidenceList, got nil")
+	}
+}
+
+func TestGenerateDialecticInsights_DynamicCount(t *testing.T) {
+	origCallHaiku := callHaikuFunc
+	defer func() { callHaikuFunc = origCallHaiku }()
+
+	callHaikuFunc = func(_ context.Context, _ string) (string, error) {
+		resp := dialecticLLMResponse{
+			Content:    "Synthesized insight from evidence",
+			Tensions:   []string{"tension-a"},
+			SourceIDs:  []string{"e1", "e2"},
+			Confidence: 0.85,
+			Importance: 7,
+			Tags:       []string{"pattern"},
+		}
+		b, _ := json.Marshal(resp)
+		return string(b), nil
+	}
+
+	for _, n := range []int{1, 5} {
+		e := dialecticTestEngine()
+		var evidenceList []PerQuestionEvidence
+		for i := 0; i < n; i++ {
+			evidenceList = append(evidenceList, PerQuestionEvidence{
+				Question: fmt.Sprintf("q%d", i),
+				Evidence: makeEvidence("e1", "e2"),
+			})
+		}
+		insights, stats, err := e.generateDialecticInsights(context.Background(), evidenceList, e.cfg)
+		if err != nil {
+			t.Fatalf("n=%d: unexpected error: %v", n, err)
+		}
+		if len(insights) != n {
+			t.Errorf("n=%d: expected %d insights, got %d", n, n, len(insights))
+		}
+		if stats.OkCount != n {
+			t.Errorf("n=%d: expected OkCount=%d, got %d", n, n, stats.OkCount)
+		}
+		sum := stats.OkCount + stats.FailedCount + stats.DroppedNoEvidence + stats.DroppedLowConf
+		if sum != n {
+			t.Errorf("n=%d: invariant broken: sum=%d", n, sum)
+		}
+	}
+}
