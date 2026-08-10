@@ -2017,7 +2017,7 @@ func TestProvenanceMerge_SameSource(t *testing.T) {
 	srv, store := newTestServer()
 	content := "Frank prefers concise answers"
 
-	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
 	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
 	resp := parseDedupResp(t, result)
 
@@ -2037,7 +2037,7 @@ func TestProvenanceMerge_UnknownIncoming(t *testing.T) {
 	srv, store := newTestServer()
 	content := "Deployment happens on Fridays"
 
-	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
 	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "unknown"})
 	resp := parseDedupResp(t, result)
 
@@ -2061,7 +2061,7 @@ func TestProvenanceMerge_LegacyExisting(t *testing.T) {
 	content := "Legacy fact without provenance"
 
 	// No source_type → handleAdd defaults metadata.source_type to "unknown".
-	callTool(srv, "memory_add", map[string]any{"content": content})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": content})
 	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
 	resp := parseDedupResp(t, result)
 
@@ -2085,9 +2085,9 @@ func TestProvenanceMerge_Idempotent(t *testing.T) {
 	srv, store := newTestServer()
 	content := "Idempotent provenance fact"
 
-	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "user_input"})
 	// First tool_output → merge.
-	callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
+	_, _ = callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
 	// Second tool_output → already recorded → no-op merge.
 	result, _ := callTool(srv, "memory_add", map[string]any{"content": content, "source_type": "tool_output"})
 	resp := parseDedupResp(t, result)
