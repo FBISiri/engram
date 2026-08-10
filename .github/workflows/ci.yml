@@ -184,7 +184,7 @@ jobs:
 
       - name: Extract metadata (tags, labels)
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           # metadata-action lowercases the image name automatically, so the
           # repo "FBISiri/engram" becomes ghcr.io/fbisiri/engram (GHCR requires
