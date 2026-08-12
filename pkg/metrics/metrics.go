@@ -17,6 +17,12 @@ type Metrics struct {
 	Registry       *prometheus.Registry
 	SearchDuration prometheus.Histogram // engram_search_duration_seconds
 	EmbedDuration  prometheus.Histogram // engram_embed_duration_seconds
+	// ReflectionRuns counts reflection engine runs that actually triggered,
+	// labelled by mode ("v1-flat"|"v2-focal") and collection.
+	ReflectionRuns *prometheus.CounterVec // engram_reflection_runs_total
+	// ReflectionInsightsCreated counts insights produced by reflection runs,
+	// labelled by mode and confidence tier ("high"|"mid"|"low").
+	ReflectionInsightsCreated *prometheus.CounterVec // engram_reflection_insights_created_total
 }
 
 // New creates a Metrics instance and registers all metrics into a fresh Registry.
@@ -38,6 +44,16 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	})
 	reg.MustRegister(searchDur, embedDur)
 
+	reflectionRuns := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_reflection_runs_total",
+		Help: "Total reflection engine runs.",
+	}, []string{"mode", "collection"})
+	reflectionInsightsCreated := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_reflection_insights_created_total",
+		Help: "Total insights created by reflection engine.",
+	}, []string{"mode", "confidence"})
+	reg.MustRegister(reflectionRuns, reflectionInsightsCreated)
+
 	if embedCache != nil {
 		reg.MustRegister(newEmbedCacheCollector(embedCache))
 	}
@@ -46,9 +62,11 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}
 
 	return &Metrics{
-		Registry:       reg,
-		SearchDuration: searchDur,
-		EmbedDuration:  embedDur,
+		Registry:                  reg,
+		SearchDuration:            searchDur,
+		EmbedDuration:             embedDur,
+		ReflectionRuns:            reflectionRuns,
+		ReflectionInsightsCreated: reflectionInsightsCreated,
 	}
 }
 

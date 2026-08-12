@@ -1146,6 +1146,12 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("reflection run error: %v", err)), nil
 	}
+	if s.metrics != nil && result.Triggered {
+		s.metrics.ReflectionRuns.WithLabelValues(result.Mode, "default").Inc()
+		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "high").Add(float64(result.HaikuConfHighCount))
+		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "mid").Add(float64(result.HaikuConfMidCount))
+		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "low").Add(float64(result.HaikuConfLowCount))
+	}
 	data, err := json.Marshal(result)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil

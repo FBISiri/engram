@@ -63,6 +63,18 @@ func TestNew_RegistersBaseHistograms(t *testing.T) {
 			t.Errorf("missing metric family %q", want)
 		}
 	}
+	// CounterVecs emit no family via Gather until a child series exists, so
+	// prove registration by asserting the fields are wired and that a duplicate
+	// registration is rejected with AlreadyRegisteredError.
+	if m.ReflectionRuns == nil || m.ReflectionInsightsCreated == nil {
+		t.Fatal("reflection counters not initialized")
+	}
+	for _, c := range []prometheus.Collector{m.ReflectionRuns, m.ReflectionInsightsCreated} {
+		err := m.Registry.Register(c)
+		if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
+			t.Errorf("expected AlreadyRegisteredError re-registering reflection counter, got %v", err)
+		}
+	}
 	// Without an embed cache or stats fn, the optional families must be absent.
 	if names["engram_embed_cache_hit_total"] {
 		t.Error("embed cache counters registered without a cache")
@@ -135,6 +147,32 @@ func TestMemoryCountCollector(t *testing.T) {
 	}
 	if got["mem_scratch"] != 5 {
 		t.Errorf("mem_scratch = %v, want 5", got["mem_scratch"])
+	}
+}
+
+func TestReflectionCounters(t *testing.T) {
+	m := New(nil, nil)
+	if m.ReflectionRuns == nil || m.ReflectionInsightsCreated == nil {
+		t.Fatal("reflection counters not initialized")
+	}
+
+	m.ReflectionRuns.WithLabelValues("v1-flat", "default").Inc()
+	m.ReflectionInsightsCreated.WithLabelValues("v1-flat", "high").Add(3)
+
+	var runs dto.Metric
+	if err := m.ReflectionRuns.WithLabelValues("v1-flat", "default").Write(&runs); err != nil {
+		t.Fatalf("write runs: %v", err)
+	}
+	if got := runs.GetCounter().GetValue(); got != 1 {
+		t.Errorf("reflection_runs = %v, want 1", got)
+	}
+
+	var ins dto.Metric
+	if err := m.ReflectionInsightsCreated.WithLabelValues("v1-flat", "high").Write(&ins); err != nil {
+		t.Fatalf("write insights: %v", err)
+	}
+	if got := ins.GetCounter().GetValue(); got != 3 {
+		t.Errorf("reflection_insights_created(high) = %v, want 3", got)
 	}
 }
 
