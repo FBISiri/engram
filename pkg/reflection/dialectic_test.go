@@ -23,9 +23,9 @@ func makeEvidence(ids ...string) []memory.Memory {
 	return mems
 }
 
-// mockHaikuServer overrides callHaiku for dialectic tests.
+// mockLLMServer overrides callLLM for dialectic tests.
 // We use a package-level variable + init pattern to inject mock responses.
-// Since callHaiku is a package function, we wrap it via the Engine's LLM path.
+// Since callLLM is a package function, we wrap it via the Engine's LLM path.
 // For tests, we override at the test level using a custom approach.
 
 // dialecticTestEngine creates an Engine with mock store/embedder for dialectic tests.
@@ -40,12 +40,12 @@ func dialecticTestEngine() *Engine {
 // --- Test 1: Normal path (OkCount=3) ---
 
 func TestGenerateDialecticInsights_NormalPath(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
 	var mu sync.Mutex
 	callCount := 0
-	callHaikuFunc = func(_ context.Context, prompt string) (string, error) {
+	callLLMFunc = func(_ context.Context, prompt string) (string, error) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -98,12 +98,12 @@ func TestGenerateDialecticInsights_NormalPath(t *testing.T) {
 // --- Test 2: Empty evidence skip (no LLM call) ---
 
 func TestGenerateDialecticInsights_EmptyEvidenceSkip(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
 	var mu sync.Mutex
 	callCount := 0
-	callHaikuFunc = func(_ context.Context, _ string) (string, error) {
+	callLLMFunc = func(_ context.Context, _ string) (string, error) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
@@ -153,12 +153,12 @@ func TestGenerateDialecticInsights_EmptyEvidenceSkip(t *testing.T) {
 // --- Test 3: JSON corruption → single-question degrade ---
 
 func TestGenerateDialecticInsights_JSONCorruption(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
 	var mu sync.Mutex
 	callIdx := 0
-	callHaikuFunc = func(_ context.Context, _ string) (string, error) {
+	callLLMFunc = func(_ context.Context, _ string) (string, error) {
 		mu.Lock()
 		idx := callIdx
 		callIdx++
@@ -203,10 +203,10 @@ func TestGenerateDialecticInsights_JSONCorruption(t *testing.T) {
 // --- Test 4: LLM timeout ---
 
 func TestGenerateDialecticInsights_LLMTimeout(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
-	callHaikuFunc = func(ctx context.Context, _ string) (string, error) {
+	callLLMFunc = func(ctx context.Context, _ string) (string, error) {
 		select {
 		case <-time.After(5 * time.Second):
 			resp := dialecticLLMResponse{
@@ -249,10 +249,10 @@ func TestGenerateDialecticInsights_LLMTimeout(t *testing.T) {
 // --- Test 5: source_id out of bounds → degrade (prompt injection defense) ---
 
 func TestGenerateDialecticInsights_SourceIDOutOfBounds(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
-	callHaikuFunc = func(_ context.Context, _ string) (string, error) {
+	callLLMFunc = func(_ context.Context, _ string) (string, error) {
 		resp := dialecticLLMResponse{
 			Content:    "injected insight",
 			Tensions:   []string{},
@@ -305,12 +305,12 @@ func containsStr(s, sub string) bool {
 // --- Test 6: Cross-question concurrent failure isolation ---
 
 func TestGenerateDialecticInsights_ConcurrentFailureIsolation(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
 	var mu sync.Mutex
 	callIdx := 0
-	callHaikuFunc = func(ctx context.Context, _ string) (string, error) {
+	callLLMFunc = func(ctx context.Context, _ string) (string, error) {
 		mu.Lock()
 		idx := callIdx
 		callIdx++
@@ -385,10 +385,10 @@ func TestGenerateDialecticInsights_EmptyList(t *testing.T) {
 }
 
 func TestGenerateDialecticInsights_DynamicCount(t *testing.T) {
-	origCallHaiku := callHaikuFunc
-	defer func() { callHaikuFunc = origCallHaiku }()
+	origCallLLM := callLLMFunc
+	defer func() { callLLMFunc = origCallLLM }()
 
-	callHaikuFunc = func(_ context.Context, _ string) (string, error) {
+	callLLMFunc = func(_ context.Context, _ string) (string, error) {
 		resp := dialecticLLMResponse{
 			Content:    "Synthesized insight from evidence",
 			Tensions:   []string{"tension-a"},

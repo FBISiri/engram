@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/embedding"
+	"github.com/FBISiri/engram/pkg/llm"
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
@@ -281,7 +282,7 @@ func (e *Engine) gather(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
-// consolidate merges events and generates insights using Haiku LLM.
+// consolidate merges events and generates insights using the LLM.
 // In dry-run mode, only reports what would be done.
 func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 	var items []string
@@ -338,7 +339,7 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 			continue
 		}
 
-		// Build prompt for Haiku.
+		// Build prompt for the LLM.
 		insight, sourceIDs, err := e.generateInsight(ctx, tag, group)
 		if err != nil {
 			items = append(items, fmt.Sprintf("  error generating insight for tag=%q: %v", tag, err))
@@ -481,7 +482,7 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
-// generateInsight calls Haiku to produce a consolidated insight string from a group of events.
+// generateInsight calls the LLM to produce a consolidated insight string from a group of events.
 // Returns the insight text and the list of source memory IDs.
 func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory.Memory) (string, []string, error) {
 
@@ -504,7 +505,7 @@ func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory
 	}
 	sb.WriteString("\nInsight:")
 
-	insight, err := callHaiku(ctx, sb.String())
+	insight, err := llm.Call(ctx, sb.String())
 	if err != nil {
 		return "", nil, err
 	}
@@ -661,7 +662,7 @@ func (e *Engine) writeReport() error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
-// skillDiff scans Engram insights for skill-improvement signals, calls Haiku to
+// skillDiff scans Engram insights for skill-improvement signals, calls the LLM to
 // generate a structured diff draft per skill, and writes the draft to workspace.
 // Returns (draftFilePath, logItems, error).
 // In dry-run mode it still generates the draft (for review) but marks it as dry-run.
@@ -767,7 +768,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 	for _, c := range candidates {
 		items = append(items, fmt.Sprintf("  skill: %s (%d relevant memories)", c.name, len(c.memories)))
 
-		// Build Haiku prompt.
+		// Build LLM prompt.
 		var sb strings.Builder
 		fmt.Fprintf(&sb,
 			"You are a skill improvement analyst for an AI agent named Siri. "+
@@ -802,9 +803,9 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 		}
 		sb.WriteString("\nDiff proposal:")
 
-		proposal, hErr := callHaiku(ctx, sb.String())
+		proposal, hErr := llm.Call(ctx, sb.String())
 		if hErr != nil {
-			items = append(items, fmt.Sprintf("  haiku error for %s: %v", c.name, hErr))
+			items = append(items, fmt.Sprintf("  llm error for %s: %v", c.name, hErr))
 			draftContent += fmt.Sprintf("## %s\n\nError generating proposal: %v\n\n---\n\n", c.name, hErr)
 		} else {
 			items = append(items, fmt.Sprintf("  generated proposal for %s", c.name))

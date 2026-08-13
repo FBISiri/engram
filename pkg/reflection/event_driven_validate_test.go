@@ -7,18 +7,18 @@ import (
 )
 
 // TestRunSingleEvent_StructuralSmoke verifies the event-driven control-flow
-// path wires end-to-end: preconditions pass, Haiku is invoked, the result
+// path wires end-to-end: preconditions pass, LLM is invoked, the result
 // is well-formed. Actual insight content / insertion path depends on prod
 // credentials and embedder availability, so this is a structural check only.
 //
 // Accepted terminal states:
 //   - InsightsCreated >= 1 (prod path with embedder)
 //   - DraftsWritten >= 1  (low-confidence diversion)
-//   - len(Errors) >= 1    (no embedder / no haiku creds / parse failure)
+//   - len(Errors) >= 1    (no embedder / no llm creds / parse failure)
 //
 // What MUST NOT happen:
 //   - hard error return (means upstream bug)
-//   - LLMCalls != 1 (means we didn't reach Haiku)
+//   - LLMCalls != 1 (means we didn't reach LLM)
 //   - precondition-style error leaked to soft errors
 func TestRunSingleEvent_StructuralSmoke(t *testing.T) {
 	eng := NewEngine(nil, nil, DefaultConfig())

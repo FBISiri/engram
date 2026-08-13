@@ -95,7 +95,7 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 			prompt := buildDialecticPrompt(pq)
 
 			llmStart := time.Now()
-			response, err := callHaiku(qctx, prompt)
+			response, err := callLLM(qctx, prompt)
 			llmElapsed := time.Since(llmStart).Milliseconds()
 
 			errMu.Lock()

@@ -73,10 +73,6 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 	evidenceList := retrieveAllEvidence(ctx, questions, e.store, e.embedder, e.cfg, result)
 
 	// Stage 3: Dialectic synthesis.
-	if e.cfg.FocalModelStep3 != "" {
-		haikuModelOverride = e.cfg.FocalModelStep3
-		defer func() { haikuModelOverride = "" }()
-	}
 	dialectics, dStats, err := e.generateDialecticInsights(ctx, evidenceList, e.cfg)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("dialectic synthesis failed: %v", err))
@@ -169,13 +165,13 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 	return result, nil
 }
 
-// generateFocalQuestions calls Haiku to generate N focal questions from a batch
+// generateFocalQuestions calls the LLM to generate N focal questions from a batch
 // of unreflected memories.
 func generateFocalQuestions(ctx context.Context, batch []memory.Memory, n int) ([]string, error) {
 	prompt := buildFocalPrompt(batch, n)
-	response, err := callHaiku(ctx, prompt)
+	response, err := callLLM(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("haiku call: %w", err)
+		return nil, fmt.Errorf("llm call: %w", err)
 	}
 	return parseFocalResponse(response, n)
 }

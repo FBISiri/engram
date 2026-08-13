@@ -13,16 +13,14 @@
 package reflection
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/embedding"
+	"github.com/FBISiri/engram/pkg/llm"
 	"github.com/FBISiri/engram/pkg/memory"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -51,7 +49,7 @@ type Config struct {
 	Force bool
 
 	// Mode selects the reflection algorithm: "v1" (flat, default) or "v2" (focal point).
-	// V2 requires 4x Haiku calls but produces higher-quality insights.
+	// V2 requires 4x LLM calls but produces higher-quality insights.
 	Mode string
 
 	// FocalInputSize is the number of unreflected memories fed to focal question
@@ -86,9 +84,6 @@ type Config struct {
 
 	// EvidenceSearchTimeout is the per-question store.Search timeout. Default: 3s, hard max: 10s.
 	EvidenceSearchTimeout time.Duration
-
-	// FocalModelStep3 is the model ID for Part3 dialectic LLM calls. Default: Haiku.
-	FocalModelStep3 string
 
 	// DialecticTimeout is the per-question LLM call timeout for Part3. Default: 15s, hard max: 30s.
 	DialecticTimeout time.Duration
@@ -152,7 +147,7 @@ type RunResult struct {
 	SkipReason        string   `json:"skip_reason,omitempty"`
 	InputCount        int      `json:"input_count"`
 	InsightsCreated   int      `json:"insights_created"`
-	DraftsWritten     int      `json:"drafts_written"`      // W17 v1.1: confidence<0.6 → Obsidian draft
+	DraftsWritten     int      `json:"drafts_written"` // W17 v1.1: confidence<0.6 → Obsidian draft
 	SourcesMarked     int      `json:"sources_marked"`
 	SourcesOrphaned   int      `json:"sources_orphaned,omitempty"` // IDs deleted between fetch and mark (TOCTOU)
 	Duration          string   `json:"duration"`
@@ -161,11 +156,11 @@ type RunResult struct {
 	Errors            []string `json:"errors,omitempty"`
 
 	// V2 fields (populated when Mode == "v2").
-	Mode            string   `json:"mode"`                        // "v1-flat" | "v2-focal"
-	FocalQuestions  []string `json:"focal_questions,omitempty"`   // V2 only
-	EvidenceCount   int      `json:"evidence_count,omitempty"`    // V2: evidence set size
-	LLMCalls        int      `json:"llm_calls"`                   // total Haiku calls
-	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`       // estimated USD cost
+	Mode            string   `json:"mode"`                      // "v1-flat" | "v2-focal"
+	FocalQuestions  []string `json:"focal_questions,omitempty"` // V2 only
+	EvidenceCount   int      `json:"evidence_count,omitempty"`  // V2: evidence set size
+	LLMCalls        int      `json:"llm_calls"`                 // total LLM calls
+	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`     // estimated USD cost
 
 	// V2 Part2 fields: per-question evidence retrieval observability.
 	EvidenceOverlap   int   `json:"evidence_overlap,omitempty"`
@@ -174,28 +169,28 @@ type RunResult struct {
 	EvidenceSearchMs  int64 `json:"evidence_search_ms,omitempty"`
 
 	// V2 Part3 fields: dialectic insight observability.
-	DialecticOkCount            int   `json:"dialectic_ok_count,omitempty"`
-	DialecticFailedCount        int   `json:"dialectic_failed_count,omitempty"`
-	DialecticDroppedNoEvidence  int   `json:"dialectic_dropped_no_evidence,omitempty"`
-	DialecticDroppedLowConf     int   `json:"dialectic_dropped_low_conf,omitempty"`
-	DialecticLLMCalls           int   `json:"dialectic_llm_calls,omitempty"`
-	DialecticLLMMs              int64 `json:"dialectic_llm_ms,omitempty"`
+	DialecticOkCount           int   `json:"dialectic_ok_count,omitempty"`
+	DialecticFailedCount       int   `json:"dialectic_failed_count,omitempty"`
+	DialecticDroppedNoEvidence int   `json:"dialectic_dropped_no_evidence,omitempty"`
+	DialecticDroppedLowConf    int   `json:"dialectic_dropped_low_conf,omitempty"`
+	DialecticLLMCalls          int   `json:"dialectic_llm_calls,omitempty"`
+	DialecticLLMMs             int64 `json:"dialectic_llm_ms,omitempty"`
 
 	// V2 Day5 fields: write-back observability.
-	InsightsWritten    int   `json:"insights_written,omitempty"`
-	InsightsSkipped    int   `json:"insights_skipped,omitempty"`
-	InsightsWriteFailed int  `json:"insights_write_failed,omitempty"`
-	WriteBackMs        int64 `json:"write_back_ms,omitempty"`
+	InsightsWritten     int   `json:"insights_written,omitempty"`
+	InsightsSkipped     int   `json:"insights_skipped,omitempty"`
+	InsightsWriteFailed int   `json:"insights_write_failed,omitempty"`
+	WriteBackMs         int64 `json:"write_back_ms,omitempty"`
 
-	// §1.1 v0.3: Haiku confidence parsing counters (both V1 and V2 paths).
+	// §1.1 v0.3: LLM confidence parsing counters (both V1 and V2 paths).
 	// Invariants: Default+ParseFail+Explicit == blocks; Explicit == High+Mid+Low+OutOfBounds.
-	HaikuConfDefaultCount     int `json:"haiku_conf_default_count,omitempty"`
-	HaikuConfParseFailCount   int `json:"haiku_conf_parse_fail_count,omitempty"`
-	HaikuConfExplicitCount    int `json:"haiku_conf_explicit_count,omitempty"`
-	HaikuConfHighCount        int `json:"haiku_conf_high_count,omitempty"`
-	HaikuConfMidCount         int `json:"haiku_conf_mid_count,omitempty"`
-	HaikuConfLowCount         int `json:"haiku_conf_low_count,omitempty"`
-	HaikuConfOutOfBoundsCount int `json:"haiku_conf_out_of_bounds_count,omitempty"`
+	LLMConfDefaultCount     int `json:"llm_conf_default_count,omitempty"`
+	LLMConfParseFailCount   int `json:"llm_conf_parse_fail_count,omitempty"`
+	LLMConfExplicitCount    int `json:"llm_conf_explicit_count,omitempty"`
+	LLMConfHighCount        int `json:"llm_conf_high_count,omitempty"`
+	LLMConfMidCount         int `json:"llm_conf_mid_count,omitempty"`
+	LLMConfLowCount         int `json:"llm_conf_low_count,omitempty"`
+	LLMConfOutOfBoundsCount int `json:"llm_conf_out_of_bounds_count,omitempty"`
 
 	// §1.1 v0.3: runs_today tracks how many reflection runs have occurred today (CST day).
 	RunsToday int `json:"runs_today,omitempty"`
@@ -207,10 +202,10 @@ type RunResult struct {
 	// ValidUntilSet is true when ALL insights produced in this run have a
 	// non-zero ValidUntil — i.e. the entire run output is TTL-reclaimable.
 	// Any single missing TTL → false (fail-closed for observability).
-	ValidUntilSet bool    `json:"valid_until_set"`
+	ValidUntilSet bool `json:"valid_until_set"`
 	// ValidUntil is the earliest (minimum) expiry across all produced insights,
 	// in RFC 3339 UTC. Null when ValidUntilSet is false.
-	ValidUntil    *string `json:"valid_until"`
+	ValidUntil *string `json:"valid_until"`
 }
 
 // Engine orchestrates the reflection cycle.
@@ -299,27 +294,27 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 		return result, nil
 	}
 
-	// Build prompt and call Haiku.
+	// Build prompt and call the LLM.
 	prompt := buildPrompt(batch)
-	haikuResponse, err := callHaiku(ctx, prompt)
-	result.LLMCalls++ // count the Haiku call
+	llmResponse, err := callLLM(ctx, prompt)
+	result.LLMCalls++ // count the LLM call
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("haiku call failed: %v", err))
+		result.Errors = append(result.Errors, fmt.Sprintf("llm call failed: %v", err))
 		result.Duration = formatDuration(time.Since(start))
 		return result, nil
 	}
 
 	// Parse insights and collect confidence counters (§1.1 single-point hook).
-	insights, confCounts := parseHaikuResponse(haikuResponse)
-	result.HaikuConfDefaultCount = confCounts.HaikuConfDefaultCount
-	result.HaikuConfParseFailCount = confCounts.HaikuConfParseFailCount
-	result.HaikuConfExplicitCount = confCounts.HaikuConfExplicitCount
-	result.HaikuConfHighCount = confCounts.HaikuConfHighCount
-	result.HaikuConfMidCount = confCounts.HaikuConfMidCount
-	result.HaikuConfLowCount = confCounts.HaikuConfLowCount
-	result.HaikuConfOutOfBoundsCount = confCounts.HaikuConfOutOfBoundsCount
+	insights, confCounts := parseLLMResponse(llmResponse)
+	result.LLMConfDefaultCount = confCounts.LLMConfDefaultCount
+	result.LLMConfParseFailCount = confCounts.LLMConfParseFailCount
+	result.LLMConfExplicitCount = confCounts.LLMConfExplicitCount
+	result.LLMConfHighCount = confCounts.LLMConfHighCount
+	result.LLMConfMidCount = confCounts.LLMConfMidCount
+	result.LLMConfLowCount = confCounts.LLMConfLowCount
+	result.LLMConfOutOfBoundsCount = confCounts.LLMConfOutOfBoundsCount
 	if len(insights) == 0 {
-		result.Errors = append(result.Errors, "haiku returned no parseable insights")
+		result.Errors = append(result.Errors, "llm returned no parseable insights")
 		result.Duration = formatDuration(time.Since(start))
 		return result, nil
 	}
@@ -367,22 +362,22 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 				memory.WithConfidence(ins.Confidence),
 				memory.WithValidUntil(reflectionValidUntil),
 				memory.WithMetadata(map[string]any{
-					"reflection_source_ids":        sourceIDsAny,
-					"reflection_count":             len(sourceIDs),
-					"trigger_importance":           checkResult.AccumulatedImportance,
+					"reflection_source_ids": sourceIDsAny,
+					"reflection_count":      len(sourceIDs),
+					"trigger_importance":    checkResult.AccumulatedImportance,
 					// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
-					"caller_type":                  "reflection",
-					"target_collection":            "engram_reflection",
-					"source_type":                 "reflection",
+					"caller_type":       "reflection",
+					"target_collection": "engram_reflection",
+					"source_type":       "reflection",
 					// §1.1 v0.3: run-level confidence counters written to engram_reflection.
-					"haiku_conf_default_count":     result.HaikuConfDefaultCount,
-					"haiku_conf_parse_fail_count":  result.HaikuConfParseFailCount,
-					"haiku_conf_explicit_count":    result.HaikuConfExplicitCount,
-					"haiku_conf_high_count":        result.HaikuConfHighCount,
-					"haiku_conf_mid_count":         result.HaikuConfMidCount,
-					"haiku_conf_low_count":         result.HaikuConfLowCount,
-					"haiku_conf_oob_count":         result.HaikuConfOutOfBoundsCount,
-					"runs_today":                   result.RunsToday,
+					"llm_conf_default_count":    result.LLMConfDefaultCount,
+					"llm_conf_parse_fail_count": result.LLMConfParseFailCount,
+					"llm_conf_explicit_count":   result.LLMConfExplicitCount,
+					"llm_conf_high_count":       result.LLMConfHighCount,
+					"llm_conf_mid_count":        result.LLMConfMidCount,
+					"llm_conf_low_count":        result.LLMConfLowCount,
+					"llm_conf_oob_count":        result.LLMConfOutOfBoundsCount,
+					"runs_today":                result.RunsToday,
 				}),
 			)
 			insightMem.Collection = "engram_reflection"
@@ -512,177 +507,28 @@ func setRunSpanAttributes(span trace.Span, r *RunResult) {
 	} else {
 		span.SetAttributes(attribute.String("engram.memory.valid_until", ""))
 	}
-	// §1.1 v0.3: Haiku confidence parsing counters and runs_today.
+	// §1.1 v0.3: LLM confidence parsing counters and runs_today.
 	span.SetAttributes(
-		attribute.Int("reflection.haiku.conf.default_count", r.HaikuConfDefaultCount),
-		attribute.Int("reflection.haiku.conf.parse_fail_count", r.HaikuConfParseFailCount),
-		attribute.Int("reflection.haiku.conf.explicit_count", r.HaikuConfExplicitCount),
-		attribute.Int("reflection.haiku.conf.high_count", r.HaikuConfHighCount),
-		attribute.Int("reflection.haiku.conf.mid_count", r.HaikuConfMidCount),
-		attribute.Int("reflection.haiku.conf.low_count", r.HaikuConfLowCount),
-		attribute.Int("reflection.haiku.conf.out_of_bounds_count", r.HaikuConfOutOfBoundsCount),
+		attribute.Int("reflection.llm.conf.default_count", r.LLMConfDefaultCount),
+		attribute.Int("reflection.llm.conf.parse_fail_count", r.LLMConfParseFailCount),
+		attribute.Int("reflection.llm.conf.explicit_count", r.LLMConfExplicitCount),
+		attribute.Int("reflection.llm.conf.high_count", r.LLMConfHighCount),
+		attribute.Int("reflection.llm.conf.mid_count", r.LLMConfMidCount),
+		attribute.Int("reflection.llm.conf.low_count", r.LLMConfLowCount),
+		attribute.Int("reflection.llm.conf.out_of_bounds_count", r.LLMConfOutOfBoundsCount),
 		attribute.Int("reflection.runs_today", r.RunsToday),
 	)
 }
 
-// ── Haiku LLM call ─────────────────────────────────────────────────────────
+// ── LLM call ────────────────────────────────────────────────────────────────
 
-// haikuConfig holds credentials for Haiku API calls.
-type haikuConfig struct {
-	APIKey  string
-	BaseURL string
-	Model   string
-	IsOAuth bool
-}
-
-// haikuModelOverride is set by RunV2 before Stage 3 (dialectic) to apply Config.FocalModelStep3.
-// Sequential stage execution guarantees no race.
-var haikuModelOverride string
-
-func getHaikuConfig() *haikuConfig {
-	model := haikuModelOverride
-	if model == "" {
-		model = os.Getenv("ANTHROPIC_LIGHT_MODEL")
-	}
-	if model == "" {
-		model = "claude-haiku-4-5-20251001"
-	}
-
-	// 1. Claude Code OAuth token from env.
-	if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
-		return &haikuConfig{
-			APIKey:  token,
-			BaseURL: "https://api.anthropic.com",
-			Model:   model,
-			IsOAuth: true,
-		}
-	}
-
-	// 2. Claude Code credentials file.
-	if token := readClaudeOAuthToken(); token != "" {
-		return &haikuConfig{
-			APIKey:  token,
-			BaseURL: "https://api.anthropic.com",
-			Model:   model,
-			IsOAuth: true,
-		}
-	}
-
-	// 3. Direct Anthropic API key.
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		return &haikuConfig{
-			APIKey:  key,
-			BaseURL: "https://api.anthropic.com",
-			Model:   model,
-			IsOAuth: false,
-		}
-	}
-
-	return nil
-}
-
-// credentialsPaths lists OAuth credentials files in priority order.
-var credentialsPaths = []string{
-	"/root/.claude/.credentials.json",
-}
-
-// readClaudeOAuthToken reads a non-expired OAuth access token from the first
-// valid credentials file in credentialsPaths.
-func readClaudeOAuthToken() string {
-	var creds struct {
-		ClaudeAiOauth struct {
-			AccessToken string `json:"accessToken"`
-			ExpiresAt   int64  `json:"expiresAt"`
-		} `json:"claudeAiOauth"`
-	}
-	nowMs := time.Now().UnixMilli()
-	for _, path := range credentialsPaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if err := json.Unmarshal(data, &creds); err != nil {
-			continue
-		}
-		token := creds.ClaudeAiOauth.AccessToken
-		expires := creds.ClaudeAiOauth.ExpiresAt
-		if token == "" {
-			continue
-		}
-		if expires > 0 && expires < nowMs {
-			continue // token expired
-		}
-		return token
-	}
-	return ""
-}
-
-// callHaikuFunc is the package-level LLM call function. Tests override this
+// callLLMFunc is the package-level LLM call function. Tests override this
 // to inject mock responses without hitting the real API.
-var callHaikuFunc = callHaikuReal
+var callLLMFunc = llm.Call
 
-// callHaiku sends a prompt to Claude Haiku and returns the text response.
-func callHaiku(ctx context.Context, prompt string) (string, error) {
-	return callHaikuFunc(ctx, prompt)
-}
-
-func callHaikuReal(ctx context.Context, prompt string) (string, error) {
-	cfg := getHaikuConfig()
-	if cfg == nil {
-		return "", fmt.Errorf("no Haiku API credentials available")
-	}
-
-	reqBody, err := json.Marshal(map[string]any{
-		"model":      cfg.Model,
-		"max_tokens": haikuMaxTokens,
-		"messages": []map[string]any{
-			{"role": "user", "content": prompt},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", cfg.BaseURL+"/v1/messages", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Anthropic-Version", "2023-06-01")
-	if cfg.IsOAuth {
-		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-		req.Header.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20")
-	} else {
-		req.Header.Set("X-Api-Key", cfg.APIKey)
-	}
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("haiku request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("haiku returned status %d", resp.StatusCode)
-	}
-
-	var apiResp struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return "", fmt.Errorf("decode haiku response: %w", err)
-	}
-
-	for _, block := range apiResp.Content {
-		if block.Type == "text" {
-			return strings.TrimSpace(block.Text), nil
-		}
-	}
-	return "", fmt.Errorf("no text content in haiku response")
+// callLLM sends a prompt to the shared LLM client and returns the text response.
+func callLLM(ctx context.Context, prompt string) (string, error) {
+	return callLLMFunc(ctx, prompt)
 }
 
 // ── W17 v1.1 helpers ────────────────────────────────────────────────────────
@@ -835,17 +681,17 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 
 	// Build a compact prompt from the event summary and optional evidence IDs.
 	prompt := buildSingleEventPrompt(in)
-	haikuResponse, err := callHaiku(ctx, prompt)
+	llmResponse, err := callLLM(ctx, prompt)
 	result.LLMCalls++
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("haiku call failed: %v", err))
+		result.Errors = append(result.Errors, fmt.Sprintf("llm call failed: %v", err))
 		result.Duration = formatDuration(time.Since(start))
 		return result, nil
 	}
 
-	insights, _ := parseHaikuResponse(haikuResponse)
+	insights, _ := parseLLMResponse(llmResponse)
 	if len(insights) == 0 {
-		result.Errors = append(result.Errors, "haiku returned no parseable insights")
+		result.Errors = append(result.Errors, "llm returned no parseable insights")
 		result.Duration = formatDuration(time.Since(start))
 		return result, nil
 	}
@@ -905,9 +751,9 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 				"reflection_trigger":    string(in.Cause),
 				"reflection_summary":    in.Summary,
 				// W20 Day2 Phase 3: tag metadata for Phase 4 physical isolation routing.
-				"caller_type":           "reflection",
-				"source_type":           "reflection",
-				"target_collection":     "engram_reflection",
+				"caller_type":       "reflection",
+				"source_type":       "reflection",
+				"target_collection": "engram_reflection",
 			}),
 		)
 		insightMem.Collection = "engram_reflection"

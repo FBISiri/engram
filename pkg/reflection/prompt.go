@@ -8,12 +8,10 @@ import (
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
-const haikuMaxTokens = 1500
-
 // humanAge returns a human-readable relative time string for a memory's
 // creation timestamp, given an explicit "now" reference. Passing "now"
 // in (rather than calling time.Now() internally) makes the helper
-// deterministic and unit-testable. Used to give the Haiku model temporal
+// deterministic and unit-testable. Used to give the LLM model temporal
 // context about each memory (W16/W17 v1.2 T2).
 //
 // Bucketing:
@@ -41,7 +39,7 @@ func humanAge(createdAt float64, now time.Time) string {
 	}
 }
 
-// buildPrompt constructs the Haiku reflection prompt from a batch of memories.
+// buildPrompt constructs the LLM reflection prompt from a batch of memories.
 // Uses time.Now() as the reference for age formatting; tests should call
 // buildPromptAt with an injected clock instead.
 func buildPrompt(memories []memory.Memory) string {
@@ -52,7 +50,7 @@ func buildPrompt(memories []memory.Memory) string {
 func buildPromptAt(memories []memory.Memory, now time.Time) string {
 	var sb strings.Builder
 
-	fmt.Fprintf(&sb, 
+	fmt.Fprintf(&sb,
 		"You are a reflection engine for an AI agent named Siri. "+
 			"Below are %d recent memories that have not yet been reflected upon.\n\n"+
 			"Your task: synthesize these memories into 1-3 high-level insights about "+
@@ -83,7 +81,7 @@ func buildPromptAt(memories []memory.Memory, now time.Time) string {
 			idShort = idShort[:8]
 		}
 		age := humanAge(m.CreatedAt, now)
-		fmt.Fprintf(&sb, 
+		fmt.Fprintf(&sb,
 			"%d. [id=%s type=%s importance=%.0f age=%s] %s\n",
 			i+1, idShort, m.Type, m.Importance, age, content,
 		)
@@ -93,7 +91,7 @@ func buildPromptAt(memories []memory.Memory, now time.Time) string {
 	return sb.String()
 }
 
-// ParsedInsight holds a single parsed insight from Haiku's response.
+// ParsedInsight holds a single parsed insight from the LLM's response.
 type ParsedInsight struct {
 	Content    string
 	Importance float64
@@ -101,19 +99,19 @@ type ParsedInsight struct {
 	Tags       []string
 }
 
-// HaikuConfCounts holds per-run confidence parsing counters (§1.1 v0.3).
+// LLMConfCounts holds per-run confidence parsing counters (§1.1 v0.3).
 // Invariants: Default+ParseFail+Explicit == blocks processed; Explicit == High+Mid+Low+OutOfBounds.
-type HaikuConfCounts struct {
-	HaikuConfDefaultCount     int // no CONFIDENCE: line in block
-	HaikuConfParseFailCount   int // CONFIDENCE: line present but ParseFloat failed
-	HaikuConfExplicitCount    int // CONFIDENCE: line successfully parsed
-	HaikuConfHighCount        int // explicit and conf >= 0.6
-	HaikuConfMidCount         int // explicit and 0 < conf < 0.6
-	HaikuConfLowCount         int // explicit and conf == 0
-	HaikuConfOutOfBoundsCount int // explicit but raw value <0 or >1 (before clamping)
+type LLMConfCounts struct {
+	LLMConfDefaultCount     int // no CONFIDENCE: line in block
+	LLMConfParseFailCount   int // CONFIDENCE: line present but ParseFloat failed
+	LLMConfExplicitCount    int // CONFIDENCE: line successfully parsed
+	LLMConfHighCount        int // explicit and conf >= 0.6
+	LLMConfMidCount         int // explicit and 0 < conf < 0.6
+	LLMConfLowCount         int // explicit and conf == 0
+	LLMConfOutOfBoundsCount int // explicit but raw value <0 or >1 (before clamping)
 }
 
-// parseHaikuResponse parses the structured Haiku response into insights and
+// parseLLMResponse parses the structured LLM response into insights and
 // confidence parsing counters (§1.1 single-point hook).
 // Format per block:
 //
@@ -122,9 +120,9 @@ type HaikuConfCounts struct {
 //	IMPORTANCE: <int>
 //	TAGS: <comma-separated>
 //	---
-func parseHaikuResponse(response string) ([]ParsedInsight, HaikuConfCounts) {
+func parseLLMResponse(response string) ([]ParsedInsight, LLMConfCounts) {
 	var insights []ParsedInsight
-	var counts HaikuConfCounts
+	var counts LLMConfCounts
 
 	// Split on --- delimiter.
 	blocks := strings.Split(response, "---")
@@ -194,19 +192,19 @@ func parseHaikuResponse(response string) ([]ParsedInsight, HaikuConfCounts) {
 
 		// Count confidence parsing outcome for this block (all non-empty blocks).
 		if !hasConfidenceLine {
-			counts.HaikuConfDefaultCount++
+			counts.LLMConfDefaultCount++
 		} else if !confParseOk {
-			counts.HaikuConfParseFailCount++
+			counts.LLMConfParseFailCount++
 		} else {
-			counts.HaikuConfExplicitCount++
+			counts.LLMConfExplicitCount++
 			if confOOB {
-				counts.HaikuConfOutOfBoundsCount++
+				counts.LLMConfOutOfBoundsCount++
 			} else if insight.Confidence >= 0.6 {
-				counts.HaikuConfHighCount++
+				counts.LLMConfHighCount++
 			} else if insight.Confidence > 0 {
-				counts.HaikuConfMidCount++
+				counts.LLMConfMidCount++
 			} else {
-				counts.HaikuConfLowCount++
+				counts.LLMConfLowCount++
 			}
 		}
 

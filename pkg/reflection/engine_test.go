@@ -8,16 +8,16 @@ import (
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
-// ── parseHaikuResponse tests ───────────────────────────────────────────────
+// ── parseLLMResponse tests ───────────────────────────────────────────────
 
-func TestParseHaikuResponse_SingleInsight(t *testing.T) {
+func TestParseLLMResponse_SingleInsight(t *testing.T) {
 	input := `---
 INSIGHT: Siri has been consistently creating calendar events before committing to tasks, reflecting improved adherence to the task-scheduling discipline that Frank reinforced.
 IMPORTANCE: 8
 TAGS: siri-behavior, task-scheduling, improvement
 ---`
 
-	insights, _ := parseHaikuResponse(input)
+	insights, _ := parseLLMResponse(input)
 	if len(insights) != 1 {
 		t.Fatalf("expected 1 insight, got %d", len(insights))
 	}
@@ -32,7 +32,7 @@ TAGS: siri-behavior, task-scheduling, improvement
 	}
 }
 
-func TestParseHaikuResponse_MultipleInsights(t *testing.T) {
+func TestParseLLMResponse_MultipleInsights(t *testing.T) {
 	input := `---
 INSIGHT: Frank tends to prioritize cycling goals over other fitness activities, dedicating significant planning energy to route optimization and performance tracking.
 IMPORTANCE: 7
@@ -44,7 +44,7 @@ IMPORTANCE: 9
 TAGS: siri-behavior, calendar, recurring-failure, frank-feedback
 ---`
 
-	insights, _ := parseHaikuResponse(input)
+	insights, _ := parseLLMResponse(input)
 	if len(insights) != 2 {
 		t.Fatalf("expected 2 insights, got %d", len(insights))
 	}
@@ -56,7 +56,7 @@ TAGS: siri-behavior, calendar, recurring-failure, frank-feedback
 	}
 }
 
-func TestParseHaikuResponse_CapsAt3(t *testing.T) {
+func TestParseLLMResponse_CapsAt3(t *testing.T) {
 	input := `---
 INSIGHT: Insight one.
 IMPORTANCE: 5
@@ -78,20 +78,20 @@ IMPORTANCE: 8
 TAGS: tag4
 ---`
 
-	insights, _ := parseHaikuResponse(input)
+	insights, _ := parseLLMResponse(input)
 	if len(insights) != 3 {
 		t.Fatalf("expected 3 insights (capped), got %d", len(insights))
 	}
 }
 
-func TestParseHaikuResponse_Empty(t *testing.T) {
-	insights, _ := parseHaikuResponse("")
+func TestParseLLMResponse_Empty(t *testing.T) {
+	insights, _ := parseLLMResponse("")
 	if len(insights) != 0 {
 		t.Errorf("expected 0 insights for empty input, got %d", len(insights))
 	}
 }
 
-func TestParseHaikuResponse_MissingInsightField(t *testing.T) {
+func TestParseLLMResponse_MissingInsightField(t *testing.T) {
 	// Block without INSIGHT: should be skipped.
 	input := `---
 IMPORTANCE: 5
@@ -102,7 +102,7 @@ INSIGHT: Valid insight.
 IMPORTANCE: 7
 TAGS: bar
 ---`
-	insights, _ := parseHaikuResponse(input)
+	insights, _ := parseLLMResponse(input)
 	if len(insights) != 1 {
 		t.Fatalf("expected 1 valid insight, got %d", len(insights))
 	}
@@ -111,13 +111,13 @@ TAGS: bar
 	}
 }
 
-func TestParseHaikuResponse_TagNormalization(t *testing.T) {
+func TestParseLLMResponse_TagNormalization(t *testing.T) {
 	input := `---
 INSIGHT: Some insight about Siri.
 IMPORTANCE: 5
 TAGS: Siri Behavior, Frank Feedback, Task Scheduling, Extra Tag One, Extra Tag Two, This Should Be Cut
 ---`
-	insights, _ := parseHaikuResponse(input)
+	insights, _ := parseLLMResponse(input)
 	if len(insights) != 1 {
 		t.Fatalf("expected 1 insight, got %d", len(insights))
 	}
@@ -136,25 +136,25 @@ TAGS: Siri Behavior, Frank Feedback, Task Scheduling, Extra Tag One, Extra Tag T
 	}
 }
 
-// ── parseHaikuResponse confidence counting tests (§1.1 v0.3) ──────────────
+// ── parseLLMResponse confidence counting tests (§1.1 v0.3) ──────────────
 
-func TestParseHaikuResponse_ConfDefault(t *testing.T) {
+func TestParseLLMResponse_ConfDefault(t *testing.T) {
 	// No CONFIDENCE line → default_count incremented.
 	input := `---
 INSIGHT: Siri tends to improve over time.
 IMPORTANCE: 7
 TAGS: growth
 ---`
-	_, counts := parseHaikuResponse(input)
-	if counts.HaikuConfDefaultCount != 1 {
-		t.Errorf("expected DefaultCount=1, got %d", counts.HaikuConfDefaultCount)
+	_, counts := parseLLMResponse(input)
+	if counts.LLMConfDefaultCount != 1 {
+		t.Errorf("expected DefaultCount=1, got %d", counts.LLMConfDefaultCount)
 	}
-	if counts.HaikuConfExplicitCount != 0 {
-		t.Errorf("expected ExplicitCount=0, got %d", counts.HaikuConfExplicitCount)
+	if counts.LLMConfExplicitCount != 0 {
+		t.Errorf("expected ExplicitCount=0, got %d", counts.LLMConfExplicitCount)
 	}
 }
 
-func TestParseHaikuResponse_ConfParseFail(t *testing.T) {
+func TestParseLLMResponse_ConfParseFail(t *testing.T) {
 	// CONFIDENCE line present but not a float → parse_fail_count.
 	input := `---
 INSIGHT: Some insight.
@@ -162,58 +162,58 @@ IMPORTANCE: 5
 CONFIDENCE: high
 TAGS: foo
 ---`
-	_, counts := parseHaikuResponse(input)
-	if counts.HaikuConfParseFailCount != 1 {
-		t.Errorf("expected ParseFailCount=1, got %d", counts.HaikuConfParseFailCount)
+	_, counts := parseLLMResponse(input)
+	if counts.LLMConfParseFailCount != 1 {
+		t.Errorf("expected ParseFailCount=1, got %d", counts.LLMConfParseFailCount)
 	}
-	if counts.HaikuConfExplicitCount != 0 {
-		t.Errorf("expected ExplicitCount=0, got %d", counts.HaikuConfExplicitCount)
+	if counts.LLMConfExplicitCount != 0 {
+		t.Errorf("expected ExplicitCount=0, got %d", counts.LLMConfExplicitCount)
 	}
 }
 
-func TestParseHaikuResponse_ConfHigh(t *testing.T) {
+func TestParseLLMResponse_ConfHigh(t *testing.T) {
 	input := `---
 INSIGHT: Some insight.
 IMPORTANCE: 8
 CONFIDENCE: 0.9
 TAGS: foo
 ---`
-	_, counts := parseHaikuResponse(input)
-	if counts.HaikuConfExplicitCount != 1 {
-		t.Errorf("expected ExplicitCount=1, got %d", counts.HaikuConfExplicitCount)
+	_, counts := parseLLMResponse(input)
+	if counts.LLMConfExplicitCount != 1 {
+		t.Errorf("expected ExplicitCount=1, got %d", counts.LLMConfExplicitCount)
 	}
-	if counts.HaikuConfHighCount != 1 {
-		t.Errorf("expected HighCount=1, got %d", counts.HaikuConfHighCount)
+	if counts.LLMConfHighCount != 1 {
+		t.Errorf("expected HighCount=1, got %d", counts.LLMConfHighCount)
 	}
 }
 
-func TestParseHaikuResponse_ConfMid(t *testing.T) {
+func TestParseLLMResponse_ConfMid(t *testing.T) {
 	input := `---
 INSIGHT: Some insight.
 IMPORTANCE: 5
 CONFIDENCE: 0.4
 TAGS: foo
 ---`
-	_, counts := parseHaikuResponse(input)
-	if counts.HaikuConfMidCount != 1 {
-		t.Errorf("expected MidCount=1, got %d", counts.HaikuConfMidCount)
+	_, counts := parseLLMResponse(input)
+	if counts.LLMConfMidCount != 1 {
+		t.Errorf("expected MidCount=1, got %d", counts.LLMConfMidCount)
 	}
 }
 
-func TestParseHaikuResponse_ConfLow(t *testing.T) {
+func TestParseLLMResponse_ConfLow(t *testing.T) {
 	input := `---
 INSIGHT: Some insight.
 IMPORTANCE: 5
 CONFIDENCE: 0.0
 TAGS: foo
 ---`
-	_, counts := parseHaikuResponse(input)
-	if counts.HaikuConfLowCount != 1 {
-		t.Errorf("expected LowCount=1, got %d", counts.HaikuConfLowCount)
+	_, counts := parseLLMResponse(input)
+	if counts.LLMConfLowCount != 1 {
+		t.Errorf("expected LowCount=1, got %d", counts.LLMConfLowCount)
 	}
 }
 
-func TestParseHaikuResponse_ConfOOB(t *testing.T) {
+func TestParseLLMResponse_ConfOOB(t *testing.T) {
 	// Raw value > 1 → oob_count (then clamped to 1).
 	input := `---
 INSIGHT: Some insight.
@@ -221,12 +221,12 @@ IMPORTANCE: 5
 CONFIDENCE: 1.5
 TAGS: foo
 ---`
-	insights, counts := parseHaikuResponse(input)
-	if counts.HaikuConfOutOfBoundsCount != 1 {
-		t.Errorf("expected OOBCount=1, got %d", counts.HaikuConfOutOfBoundsCount)
+	insights, counts := parseLLMResponse(input)
+	if counts.LLMConfOutOfBoundsCount != 1 {
+		t.Errorf("expected OOBCount=1, got %d", counts.LLMConfOutOfBoundsCount)
 	}
-	if counts.HaikuConfExplicitCount != 1 {
-		t.Errorf("expected ExplicitCount=1, got %d", counts.HaikuConfExplicitCount)
+	if counts.LLMConfExplicitCount != 1 {
+		t.Errorf("expected ExplicitCount=1, got %d", counts.LLMConfExplicitCount)
 	}
 	// Value should be clamped to 1.0.
 	if insights[0].Confidence != 1.0 {
@@ -234,7 +234,7 @@ TAGS: foo
 	}
 }
 
-func TestParseHaikuResponse_ConfInvariant(t *testing.T) {
+func TestParseLLMResponse_ConfInvariant(t *testing.T) {
 	// 3 blocks: one default, one explicit-high, one parse-fail.
 	// Invariant: Default+ParseFail+Explicit == 3; Explicit == High+Mid+Low+OOB.
 	input := `---
@@ -254,14 +254,14 @@ IMPORTANCE: 4
 CONFIDENCE: notanumber
 TAGS: c
 ---`
-	_, counts := parseHaikuResponse(input)
-	total := counts.HaikuConfDefaultCount + counts.HaikuConfParseFailCount + counts.HaikuConfExplicitCount
+	_, counts := parseLLMResponse(input)
+	total := counts.LLMConfDefaultCount + counts.LLMConfParseFailCount + counts.LLMConfExplicitCount
 	if total != 3 {
 		t.Errorf("invariant Default+ParseFail+Explicit=%d, want 3", total)
 	}
-	explicitSub := counts.HaikuConfHighCount + counts.HaikuConfMidCount + counts.HaikuConfLowCount + counts.HaikuConfOutOfBoundsCount
-	if explicitSub != counts.HaikuConfExplicitCount {
-		t.Errorf("invariant Explicit=%d != High+Mid+Low+OOB=%d", counts.HaikuConfExplicitCount, explicitSub)
+	explicitSub := counts.LLMConfHighCount + counts.LLMConfMidCount + counts.LLMConfLowCount + counts.LLMConfOutOfBoundsCount
+	if explicitSub != counts.LLMConfExplicitCount {
+		t.Errorf("invariant Explicit=%d != High+Mid+Low+OOB=%d", counts.LLMConfExplicitCount, explicitSub)
 	}
 }
 

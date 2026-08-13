@@ -22,7 +22,7 @@ import (
 // silently removed from the Run() pipeline in a future refactor.
 
 func TestRun_InsightsHaveSourceReflectionTag_EmptyInputTags(t *testing.T) {
-	// Simulate a parsed Haiku insight with no tags — e.g. TAGS line absent.
+	// Simulate a parsed LLM insight with no tags — e.g. TAGS line absent.
 	got := ensureSourceReflectionTag(nil)
 	if len(got) != 1 || got[0] != sourceReflectionTag {
 		t.Errorf("ensureSourceReflectionTag(nil) = %v, want [%q]", got, sourceReflectionTag)
@@ -86,18 +86,18 @@ func TestRun_InsightsHaveSourceReflectionTag_DoesNotMutateInput(t *testing.T) {
 }
 
 // TestRun_ParsedInsightIntegration_TagFlow simulates the exact tag plumbing
-// that Run() performs at engine.go:203 — parseHaikuResponse produces
+// that Run() performs at engine.go:203 — parseLLMResponse produces
 // ParsedInsight{Tags}, then Run() calls ensureSourceReflectionTag on it
 // before constructing the Memory. This test pins that the flow yields the
 // tag without any extra work in between.
 func TestRun_ParsedInsightIntegration_TagFlow(t *testing.T) {
-	haikuResp := `---
+	llmResp := `---
 INSIGHT: Siri has been consistently creating calendar events before committing to tasks.
 IMPORTANCE: 8
 CONFIDENCE: 0.8
 TAGS: siri-behavior, task-scheduling
 ---`
-	parsed, _ := parseHaikuResponse(haikuResp)
+	parsed, _ := parseLLMResponse(llmResp)
 	if len(parsed) != 1 {
 		t.Fatalf("expected 1 parsed insight, got %d", len(parsed))
 	}
@@ -115,8 +115,8 @@ TAGS: siri-behavior, task-scheduling
 	if !found {
 		t.Errorf("Run()-path final tags missing %q: %v", sourceReflectionTag, finalTags)
 	}
-	// Also check Haiku-provided tags are still there.
+	// Also check LLM-provided tags are still there.
 	if finalTags[0] != "siri-behavior" || finalTags[1] != "task-scheduling" {
-		t.Errorf("Haiku-provided tags lost in merge: %v", finalTags)
+		t.Errorf("LLM-provided tags lost in merge: %v", finalTags)
 	}
 }

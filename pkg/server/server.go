@@ -181,7 +181,7 @@ func (s *Server) registerTools() {
 
 	// Tool 6: reflection_run
 	reflectionRunTool := mcp.NewTool("reflection_run",
-		mcp.WithDescription("Run one Reflection Engine cycle. Synthesizes insights from unreflected memories using Haiku LLM. Respects min-interval (2h) and daily limit (3x/day). Returns RunResult with insights_created, sources_marked, and errors."),
+		mcp.WithDescription("Run one Reflection Engine cycle. Synthesizes insights from unreflected memories using an LLM. Respects min-interval (2h) and daily limit (3x/day). Returns RunResult with insights_created, sources_marked, and errors."),
 		mcp.WithBoolean("dry_run", mcp.Description("If true, simulate the run without writing any changes. Default: false.")),
 	)
 	s.mcpServer.AddTool(reflectionRunTool, s.handleReflectionRun)
@@ -1148,9 +1148,9 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 	}
 	if s.metrics != nil && result.Triggered {
 		s.metrics.ReflectionRuns.WithLabelValues(result.Mode, "default").Inc()
-		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "high").Add(float64(result.HaikuConfHighCount))
-		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "mid").Add(float64(result.HaikuConfMidCount))
-		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "low").Add(float64(result.HaikuConfLowCount))
+		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "high").Add(float64(result.LLMConfHighCount))
+		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "mid").Add(float64(result.LLMConfMidCount))
+		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "low").Add(float64(result.LLMConfLowCount))
 	}
 	data, err := json.Marshal(result)
 	if err != nil {
