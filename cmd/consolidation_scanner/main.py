@@ -25,7 +25,7 @@ import requests
 # ---------------------------------------------------------------------------
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 DEFAULT_COLLECTIONS = ["engram_user", "engram_reflection", "engram_pigo"]
-DEFAULT_THRESHOLD = 0.82
+DEFAULT_THRESHOLD = 0.88
 
 JSON_REPORT = Path("/data/armyoftheagent/engram/eval/reports/consolidation_scanner_report.json")
 MD_REPORT = Path("/data/obsidian-vault/Research/consolidation-scanner-report-2026-08-04.md")
@@ -90,12 +90,37 @@ class UnionFind:
             self.rank[ra] += 1
 
 
-def zone_for(max_sim):
-    if max_sim >= ZONE_DEDUP_ANOMALY:
+# Zone severity ordering (higher = more severe). Cluster zone = max over pairs.
+ZONE_SEVERITY = {"llm_adjudicate": 0, "auto_merge": 1, "dedup_anomaly": 2}
+
+
+def zone_for_pair(sim, type_a, type_b):
+    """Pair-aware zone classification.
+
+    P0-1: if either memory is a directive, dedup_anomaly threshold is 0.95
+          (else ZONE_DEDUP_ANOMALY = 0.92).
+    P0-2: directive pairs never auto_merge -> downgraded to llm_adjudicate.
+    P1-1: cross-type pairs (type_a != type_b) never auto_merge -> llm_adjudicate.
+    """
+    is_directive = (type_a == "directive") or (type_b == "directive")
+    dedup_threshold = 0.95 if is_directive else ZONE_DEDUP_ANOMALY
+    if sim >= dedup_threshold:
         return "dedup_anomaly"
-    if max_sim >= ZONE_AUTO_MERGE:
+    if sim >= ZONE_AUTO_MERGE:
+        if is_directive or type_a != type_b:
+            return "llm_adjudicate"
         return "auto_merge"
     return "llm_adjudicate"
+
+
+def cluster_zone(metas, pairs_idx):
+    """Cluster zone = highest-severity zone among all its pair zones."""
+    zone = "llm_adjudicate"
+    for a, b, s in pairs_idx:
+        pz = zone_for_pair(s, metas[a]["type"], metas[b]["type"])
+        if ZONE_SEVERITY[pz] > ZONE_SEVERITY[zone]:
+            zone = pz
+    return zone
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +212,15 @@ def render_json(metas, clusters, scan_date):
     }
     out_clusters = []
     for cid, c in enumerate(clusters, start=1):
-        zone = zone_for(c["max_similarity"])
+        zone = cluster_zone(metas, c["pairs_idx"])
         members = [metas[i] for i in c["members_idx"]]
         pairs = [
-            {"id_a": metas[a]["id"], "id_b": metas[b]["id"], "similarity": round(s, 6)}
+            {
+                "id_a": metas[a]["id"],
+                "id_b": metas[b]["id"],
+                "similarity": round(s, 6),
+                "zone": zone_for_pair(s, metas[a]["type"], metas[b]["type"]),
+            }
             for (a, b, s) in c["pairs_idx"]
         ]
         pairs.sort(key=lambda p: p["similarity"], reverse=True)
@@ -253,7 +283,8 @@ def render_markdown(report):
         lines.append("**Similar pairs:**")
         lines.append("")
         for p in c["pairs"]:
-            lines.append("- {:.4f} — `{}` ↔ `{}`".format(p["similarity"], p["id_a"], p["id_b"]))
+            lines.append("- {:.4f} `{}` — `{}` ↔ `{}`".format(
+                p["similarity"], p["zone"], p["id_a"], p["id_b"]))
         lines.append("")
     return "\n".join(lines) + "\n"
 
