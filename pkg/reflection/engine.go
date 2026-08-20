@@ -150,17 +150,18 @@ func (c Config) resolveProvenanceFilter() ProvenanceFilterConfig {
 
 // RunResult holds the output of a single reflection run.
 type RunResult struct {
-	Triggered         bool     `json:"triggered"`
-	SkipReason        string   `json:"skip_reason,omitempty"`
-	InputCount        int      `json:"input_count"`
-	InsightsCreated   int      `json:"insights_created"`
-	DraftsWritten     int      `json:"drafts_written"` // W17 v1.1: confidence<0.6 → Obsidian draft
-	SourcesMarked     int      `json:"sources_marked"`
-	SourcesOrphaned   int      `json:"sources_orphaned,omitempty"` // IDs deleted between fetch and mark (TOCTOU)
-	Duration          string   `json:"duration"`
-	TriggerImportance float64  `json:"trigger_importance,omitempty"`
-	DryRun            bool     `json:"dry_run"`
-	Errors            []string `json:"errors,omitempty"`
+	Triggered            bool     `json:"triggered"`
+	SkipReason           string   `json:"skip_reason,omitempty"`
+	InputCount           int      `json:"input_count"`
+	InsightsCreated      int      `json:"insights_created"`
+	InsightsDedupSkipped int      `json:"insights_dedup_skipped"` // pre-write dedup skips (V1 batch + single-event)
+	DraftsWritten        int      `json:"drafts_written"`         // W17 v1.1: confidence<0.6 → Obsidian draft
+	SourcesMarked        int      `json:"sources_marked"`
+	SourcesOrphaned      int      `json:"sources_orphaned,omitempty"` // IDs deleted between fetch and mark (TOCTOU)
+	Duration             string   `json:"duration"`
+	TriggerImportance    float64  `json:"trigger_importance,omitempty"`
+	DryRun               bool     `json:"dry_run"`
+	Errors               []string `json:"errors,omitempty"`
 
 	// V2 fields (populated when Mode == "v2").
 	Mode            string   `json:"mode"`                      // "v1-flat" | "v2-focal"
@@ -406,6 +407,25 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 					fmt.Sprintf("skipped insight (no embedder): %s", ins.Content[:min(40, len(ins.Content))]))
 				continue
 			}
+
+			// Pre-write dedup: skip if a semantically similar reflection insight already exists.
+			dedupThreshold := e.cfg.InsightDedupThreshold
+			if dedupThreshold == 0 {
+				dedupThreshold = 0.78 // default: catch paraphrases in the 0.78-0.92 band
+			}
+			existing, searchErr := e.store.Search(ctx, vec, memory.SearchOptions{
+				Limit: 1,
+				Filters: []memory.Filter{
+					{Field: "collection", Op: memory.OpIn, Value: []string{"engram_reflection"}},
+					{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)},
+				},
+			})
+			if searchErr == nil && len(existing) > 0 && existing[0].Score >= dedupThreshold {
+				fmt.Fprintf(os.Stderr, "reflection: dedup skip — existing score %.3f >= %.3f threshold\n", existing[0].Score, dedupThreshold)
+				result.InsightsDedupSkipped++
+				continue
+			}
+			// Fail-open: if the search errors, fall through and insert (dedup is best-effort).
 
 			if err := e.store.Insert(ctx, insightMem, vec); err != nil {
 				result.Errors = append(result.Errors,
@@ -778,6 +798,25 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 				"skipped insight (no embedder)")
 			continue
 		}
+
+		// Pre-write dedup: skip if a semantically similar reflection insight already exists.
+		dedupThreshold := e.cfg.InsightDedupThreshold
+		if dedupThreshold == 0 {
+			dedupThreshold = 0.78 // default: catch paraphrases in the 0.78-0.92 band
+		}
+		existing, searchErr := e.store.Search(ctx, vec, memory.SearchOptions{
+			Limit: 1,
+			Filters: []memory.Filter{
+				{Field: "collection", Op: memory.OpIn, Value: []string{"engram_reflection"}},
+				{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)},
+			},
+		})
+		if searchErr == nil && len(existing) > 0 && existing[0].Score >= dedupThreshold {
+			fmt.Fprintf(os.Stderr, "reflection: dedup skip — existing score %.3f >= %.3f threshold\n", existing[0].Score, dedupThreshold)
+			result.InsightsDedupSkipped++
+			continue
+		}
+		// Fail-open: if the search errors, fall through and insert (dedup is best-effort).
 
 		if err := e.store.Insert(ctx, insightMem, vec); err != nil {
 			result.Errors = append(result.Errors,
