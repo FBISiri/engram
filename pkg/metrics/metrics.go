@@ -23,6 +23,12 @@ type Metrics struct {
 	// ReflectionInsightsCreated counts insights produced by reflection runs,
 	// labelled by mode and confidence tier ("high"|"mid"|"low").
 	ReflectionInsightsCreated *prometheus.CounterVec // engram_reflection_insights_created_total
+	// MemoryOps counts memory_add/update/delete operations, labelled by
+	// operation ("add"|"update"|"delete"), collection, and source_type.
+	MemoryOps *prometheus.CounterVec // engram_memory_ops_total
+	// DedupHits counts deduplication hits, labelled by collection and
+	// dedup_type ("server_side_092"|"client_side_078").
+	DedupHits *prometheus.CounterVec // engram_dedup_hits_total
 }
 
 // New creates a Metrics instance and registers all metrics into a fresh Registry.
@@ -54,6 +60,16 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"mode", "confidence"})
 	reg.MustRegister(reflectionRuns, reflectionInsightsCreated)
 
+	memoryOps := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_memory_ops_total",
+		Help: "Total memory operations by operation, collection, and source_type.",
+	}, []string{"operation", "collection", "source_type"})
+	dedupHits := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_dedup_hits_total",
+		Help: "Total deduplication hits by collection and dedup_type (server_side_092|client_side_078).",
+	}, []string{"collection", "dedup_type"})
+	reg.MustRegister(memoryOps, dedupHits)
+
 	if embedCache != nil {
 		reg.MustRegister(newEmbedCacheCollector(embedCache))
 	}
@@ -67,6 +83,8 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		EmbedDuration:             embedDur,
 		ReflectionRuns:            reflectionRuns,
 		ReflectionInsightsCreated: reflectionInsightsCreated,
+		MemoryOps:                 memoryOps,
+		DedupHits:                 dedupHits,
 	}
 }
 

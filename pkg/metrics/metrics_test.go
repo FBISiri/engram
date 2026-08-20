@@ -176,6 +176,59 @@ func TestReflectionCounters(t *testing.T) {
 	}
 }
 
+func TestMemoryOpsAndDedupHitsCounters(t *testing.T) {
+	m := New(nil, nil)
+	if m.MemoryOps == nil || m.DedupHits == nil {
+		t.Fatal("memory ops / dedup hits counters not initialized")
+	}
+
+	m.MemoryOps.WithLabelValues("add", "mem_default", "user_input").Inc()
+	m.MemoryOps.WithLabelValues("add", "mem_default", "user_input").Inc()
+	m.MemoryOps.WithLabelValues("update", "mem_default", "reflection").Inc()
+	m.MemoryOps.WithLabelValues("delete", "mem_default", "unknown").Inc()
+	m.DedupHits.WithLabelValues("mem_default", "server_side_092").Add(4)
+
+	var add dto.Metric
+	if err := m.MemoryOps.WithLabelValues("add", "mem_default", "user_input").Write(&add); err != nil {
+		t.Fatalf("write add: %v", err)
+	}
+	if got := add.GetCounter().GetValue(); got != 2 {
+		t.Errorf("memory_ops(add) = %v, want 2", got)
+	}
+
+	var upd dto.Metric
+	if err := m.MemoryOps.WithLabelValues("update", "mem_default", "reflection").Write(&upd); err != nil {
+		t.Fatalf("write update: %v", err)
+	}
+	if got := upd.GetCounter().GetValue(); got != 1 {
+		t.Errorf("memory_ops(update) = %v, want 1", got)
+	}
+
+	var del dto.Metric
+	if err := m.MemoryOps.WithLabelValues("delete", "mem_default", "unknown").Write(&del); err != nil {
+		t.Fatalf("write delete: %v", err)
+	}
+	if got := del.GetCounter().GetValue(); got != 1 {
+		t.Errorf("memory_ops(delete) = %v, want 1", got)
+	}
+
+	var dedup dto.Metric
+	if err := m.DedupHits.WithLabelValues("mem_default", "server_side_092").Write(&dedup); err != nil {
+		t.Fatalf("write dedup: %v", err)
+	}
+	if got := dedup.GetCounter().GetValue(); got != 4 {
+		t.Errorf("dedup_hits(server_side_092) = %v, want 4", got)
+	}
+
+	// Registration proof: re-registering must be rejected.
+	for _, c := range []prometheus.Collector{m.MemoryOps, m.DedupHits} {
+		err := m.Registry.Register(c)
+		if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
+			t.Errorf("expected AlreadyRegisteredError re-registering counter, got %v", err)
+		}
+	}
+}
+
 func TestNew_RegistersOptionalCollectors(t *testing.T) {
 	fn := func(context.Context) map[string]uint64 { return map[string]uint64{"c": 1} }
 	m := New(&fakeEmbedCache{hits: 1, misses: 2}, fn)

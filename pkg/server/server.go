@@ -534,6 +534,10 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	}
 	if dupFound {
 		span.SetAttributes(attribute.Bool("dedup.hit", true))
+		if s.metrics != nil {
+			s.metrics.DedupHits.WithLabelValues(mem.Collection, "server_side_092").Inc()
+			s.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()
+		}
 		if s.traj != nil {
 			s.traj.Log(trajectory.Record{
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -584,6 +588,10 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 			LatencyMs: time.Since(addStart).Milliseconds(),
 			Caller:    CallerTypeFromContext(ctx),
 		})
+	}
+
+	if s.metrics != nil {
+		s.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()
 	}
 
 	return mcp.NewToolResultText(string(data)), nil
@@ -958,6 +966,10 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
 	}
 
+	if s.metrics != nil {
+		s.metrics.MemoryOps.WithLabelValues("update", mem.Collection, sourceTypeU).Inc()
+	}
+
 	type updateResult struct {
 		Status       string         `json:"status"`
 		DeletedCount int            `json:"deleted_count"`
@@ -1085,6 +1097,10 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	deletedCount, err := s.store.Delete(ctx, toDelete)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("delete error: %v", err)), nil
+	}
+
+	if s.metrics != nil {
+		s.metrics.MemoryOps.WithLabelValues("delete", CollectionFromContext(ctx), "unknown").Inc()
 	}
 
 	type deleteResult struct {
