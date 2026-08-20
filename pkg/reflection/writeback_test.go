@@ -332,10 +332,94 @@ func TestWriteDialecticInsights_ModeFlag(t *testing.T) {
 	}
 }
 
+// --- R5: Pre-write dedup tests ---
+
+func TestWriteDialecticInsights_DedupSkip(t *testing.T) {
+	insertCount := 0
+	store := &writeBackMockStore{
+		insertFn: func(_ context.Context, _ *memory.Memory, _ []float32) error {
+			insertCount++
+			return nil
+		},
+		searchFn: func(_ context.Context, _ []float32, _ memory.SearchOptions) ([]memory.ScoredMemory, error) {
+			return []memory.ScoredMemory{{Score: 0.85}}, nil
+		},
+	}
+
+	e := writeBackTestEngine(store)
+	dialectics := makeDialecticInsights(1, 0.85)
+	evidenceList := []PerQuestionEvidence{{Question: "q1", Evidence: makeEvidence("e1-a", "e1-b")}}
+
+	stats := e.writeDialecticInsights(context.Background(), dialectics, evidenceList, e.cfg)
+
+	if insertCount != 0 {
+		t.Errorf("expected 0 inserts (deduped), got %d", insertCount)
+	}
+	if stats.Written != 0 {
+		t.Errorf("expected Written=0, got %d", stats.Written)
+	}
+	if stats.Skipped != 1 {
+		t.Errorf("expected Skipped=1, got %d", stats.Skipped)
+	}
+}
+
+func TestWriteDialecticInsights_DedupProceedNoMatch(t *testing.T) {
+	insertCount := 0
+	store := &writeBackMockStore{
+		insertFn: func(_ context.Context, _ *memory.Memory, _ []float32) error {
+			insertCount++
+			return nil
+		},
+		searchFn: func(_ context.Context, _ []float32, _ memory.SearchOptions) ([]memory.ScoredMemory, error) {
+			return nil, nil
+		},
+	}
+
+	e := writeBackTestEngine(store)
+	dialectics := makeDialecticInsights(1, 0.85)
+	evidenceList := []PerQuestionEvidence{{Question: "q1", Evidence: makeEvidence("e1-a", "e1-b")}}
+
+	stats := e.writeDialecticInsights(context.Background(), dialectics, evidenceList, e.cfg)
+
+	if insertCount != 1 {
+		t.Errorf("expected 1 insert, got %d", insertCount)
+	}
+	if stats.Written != 1 {
+		t.Errorf("expected Written=1, got %d", stats.Written)
+	}
+}
+
+func TestWriteDialecticInsights_DedupFailOpen(t *testing.T) {
+	insertCount := 0
+	store := &writeBackMockStore{
+		insertFn: func(_ context.Context, _ *memory.Memory, _ []float32) error {
+			insertCount++
+			return nil
+		},
+		searchFn: func(_ context.Context, _ []float32, _ memory.SearchOptions) ([]memory.ScoredMemory, error) {
+			return nil, fmt.Errorf("simulated search failure")
+		},
+	}
+
+	e := writeBackTestEngine(store)
+	dialectics := makeDialecticInsights(1, 0.85)
+	evidenceList := []PerQuestionEvidence{{Question: "q1", Evidence: makeEvidence("e1-a", "e1-b")}}
+
+	stats := e.writeDialecticInsights(context.Background(), dialectics, evidenceList, e.cfg)
+
+	if insertCount != 1 {
+		t.Errorf("expected 1 insert (fail-open), got %d", insertCount)
+	}
+	if stats.Written != 1 {
+		t.Errorf("expected Written=1, got %d", stats.Written)
+	}
+}
+
 // ── mock store for write-back tests ──────────────────────────────────────
 
 type writeBackMockStore struct {
 	insertFn func(ctx context.Context, mem *memory.Memory, vec []float32) error
+	searchFn func(ctx context.Context, vec []float32, opts memory.SearchOptions) ([]memory.ScoredMemory, error)
 }
 
 func (s *writeBackMockStore) Insert(ctx context.Context, mem *memory.Memory, vec []float32) error {
@@ -345,14 +429,17 @@ func (s *writeBackMockStore) Insert(ctx context.Context, mem *memory.Memory, vec
 	return nil
 }
 
-func (s *writeBackMockStore) Search(context.Context, []float32, memory.SearchOptions) ([]memory.ScoredMemory, error) {
+func (s *writeBackMockStore) Search(ctx context.Context, vec []float32, opts memory.SearchOptions) ([]memory.ScoredMemory, error) {
+	if s.searchFn != nil {
+		return s.searchFn(ctx, vec, opts)
+	}
 	return nil, nil
 }
 func (s *writeBackMockStore) Scroll(context.Context, memory.ScrollOptions) ([]memory.Memory, string, error) {
 	return nil, "", nil
 }
-func (s *writeBackMockStore) Delete(context.Context, []string) (int, error)          { return 0, nil }
-func (s *writeBackMockStore) Update(context.Context, string, map[string]any) error    { return nil }
+func (s *writeBackMockStore) Delete(context.Context, []string) (int, error)        { return 0, nil }
+func (s *writeBackMockStore) Update(context.Context, string, map[string]any) error { return nil }
 func (s *writeBackMockStore) SearchByIDs(context.Context, []string) ([]memory.Memory, error) {
 	return nil, nil
 }

@@ -102,21 +102,28 @@ type Config struct {
 	// Any DialecticInsight with a higher importance is clamped to this value
 	// before write-back. Default: 8.
 	MaxInsightImportance int
+
+	// InsightDedupThreshold is the similarity threshold for pre-write dedup.
+	// Before writing a new reflection insight, the engine searches existing
+	// reflections; if a match exceeds this threshold, the new insight is
+	// skipped. Default: 0.78 (catches paraphrases that pass the server 0.92 gate).
+	InsightDedupThreshold float64
 }
 
 // DefaultConfig returns the default Reflection Engine configuration.
 func DefaultConfig() Config {
 	return Config{
-		Threshold:            40.0,
-		MaxInputSize:         20,
-		MinIntervalH:         2.0,
-		DryRun:               false,
-		Mode:                 "v1", // V1 by default; V2 requires explicit opt-in
-		FocalInputSize:       50,
-		FocalQuestions:       3,
-		EvidencePerFocal:     10,
-		MaxInsightImportance: 8,
-		ProvenanceFilter:     ProvenanceFilterConfig{Enabled: false},
+		Threshold:             40.0,
+		MaxInputSize:          20,
+		MinIntervalH:          2.0,
+		DryRun:                false,
+		Mode:                  "v1", // V1 by default; V2 requires explicit opt-in
+		FocalInputSize:        50,
+		FocalQuestions:        3,
+		EvidencePerFocal:      10,
+		MaxInsightImportance:  8,
+		InsightDedupThreshold: 0.78,
+		ProvenanceFilter:      ProvenanceFilterConfig{Enabled: false},
 	}
 }
 
