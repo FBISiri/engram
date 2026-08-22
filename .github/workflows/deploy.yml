@@ -17,6 +17,11 @@ name: deploy-production
 #   DEPLOY_USER     — SSH login user on the prod host
 #   DEPLOY_SSH_KEY  — private SSH key (PEM) authorized for DEPLOY_USER
 #
+# ⚠️ REPOSITORY VARIABLE ALSO REQUIRED:
+#   DEPLOY_HOST     — must ALSO be set as a repository variable (vars.DEPLOY_HOST),
+#                     because the job-level environment.url below cannot read the
+#                     secrets context (see comment there).
+#
 # PROD HOST PREREQUISITES (see /Engram/cicd-design.md → Deployment):
 #   1. Docker + docker compose v2 installed and DEPLOY_USER in the docker group.
 #   2. A compose project at $ENGRAM_DEPLOY_DIR (default /opt/engram) whose engram
@@ -55,7 +60,10 @@ jobs:
       !contains(github.event.workflow_run.head_branch, '-')
     environment:
       name: production            # attach GitHub Environment protection / required reviewers here
-      url: https://${{ secrets.DEPLOY_HOST }}
+      # Use vars (repository variable), NOT secrets: the secrets context is not
+      # available in the job-level environment.url expression, so secrets.DEPLOY_HOST
+      # would resolve to empty and break the Environments UI deployment link.
+      url: https://${{ vars.DEPLOY_HOST }}
 
     steps:
       - name: Resolve version from triggering tag
