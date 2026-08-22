@@ -29,3 +29,6 @@ __pycache__/
 
 # Trajectory logs (runtime data, may contain sensitive API traces)
 trajectories/
+
+# Auto-generated evaluation reports (large files)
+eval/reports/consolidation_scanner_report.json
