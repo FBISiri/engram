@@ -5,7 +5,7 @@
 <!-- badges row — CI/Eval badges are static shields for now; wire up real endpoints once CI status + release are public -->
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Eval](https://img.shields.io/badge/eval-26%2F26%20passing-brightgreen)](eval/taskset/core_v1.json)
+[![Eval](https://img.shields.io/badge/eval-28%2F28%20passing-brightgreen)](eval/taskset/core_v1.json)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](.github/workflows/pr.yml)
 
 Engram is an agent memory service that governs **what gets stored, how long it lives, and
@@ -301,18 +301,26 @@ a tool, or the agent's own reflection.
 | `tool_output` | Non-search tool / function-call output |
 | `calendar` | Calendar event context |
 | `document` | File / document extraction |
+| `unknown` | Unknown or unclassifiable provenance (legacy data, migrations) |
 
 > Source of truth: `pkg/memory/source_type.go` (`IsValidSourceType` /
 > `ValidateSourceType`). Qdrant keeps a keyword index on `metadata.source_type`
 > so filtering by provenance is fast.
 
-### Optional, but soft-required
+### Provenance enforcement modes
 
-`source_type` is **optional but soft-required**: if you provide it, it's
-validated against the six values above (an invalid value is rejected); if you
-omit it, the write still succeeds but a warning is logged. Set it whenever you
-know the provenance — it's cheap to add and it's what makes the compliance story
-work.
+`source_type` enforcement is controlled by `ENGRAM_PROVENANCE_MODE` (env var):
+
+| Mode | Behavior |
+|---|---|
+| `strict` | `source_type` is **required** — writes without it are rejected. This is the production default (with `ENGRAM_REQUIRE_PROVENANCE=true`). |
+| `warn` | Writes without `source_type` succeed but a warning is logged. |
+| `off` | No `source_type` validation. |
+
+If provided, `source_type` is validated against the seven values above (an
+invalid value is always rejected regardless of mode). In `strict` mode, every
+write must carry a valid `source_type` — this is what makes the EU AI Act
+compliance story work.
 
 ### MCP usage
 
@@ -419,7 +427,7 @@ Tool name = function name. Siri / BMO talk to Engram over MCP stdio.
 | `importance` | number | — | 1–10, default 5. Accurate > high |
 | `tags` | string[] | — | e.g. `["frank", "preference", "thread:xxx"]` |
 | `source` | string | — | `user` / `agent` / `system`, default `agent` |
-| `source_type` | string | — | provenance tag: `reflection` / `user_input` / `web_search` / `tool_output` / `calendar` / `document`. See [Source Type](#source-type-provenance-metadata) |
+| `source_type` | string | — | provenance tag: `reflection` / `user_input` / `web_search` / `tool_output` / `calendar` / `document` / `unknown`. See [Source Type](#source-type-provenance-metadata) |
 | `valid_until` | number | — | expiry Unix ts (auto-computed from TTL matrix if omitted) |
 
 ```python
@@ -503,18 +511,18 @@ reflection / OTel / TTL / multi-collection) → [`docs/configuration.md`](docs/c
 
 ---
 
-## Eval: 26/26 (our own, not a borrowed number)
+## Eval: 28/28 (our own, not a borrowed number)
 
 Engram ships a regression eval (`eval/taskset/core_v1.json`) — not a marketing benchmark.
-Latest run (2026-06-13, core_v1): **26/26 passing, gate PASS** (requires ≥80% overall,
-≥65% per class). The 26 cases cover `retrieve_precision`, `dedup_accuracy`, `recency_bias`,
+Latest run (2026-07-28, core_v1): **28/28 passing, gate PASS** (requires ≥80% overall,
+≥65% per class). The 28 cases cover `retrieve_precision`, `dedup_accuracy`, `recency_bias`,
 `cross_collection`, and `trajectory_replay`.
 
 Honest about what it is: a *self-test* and a *regression guardrail* — change a dedup
 threshold or a fusion weight, re-run, and you know instantly what broke. We deliberately
 **don't quote mem0/Letta/Zep benchmark numbers**; their tasks and metrics differ from ours,
-and borrowing someone's accuracy to flatter ourselves would be dishonest. 26/26 means only
-that these 26 behaviors haven't regressed — nothing more, nothing less.
+and borrowing someone's accuracy to flatter ourselves would be dishonest. 28/28 means only
+that these 28 behaviors haven't regressed — nothing more, nothing less.
 
 ---
 

@@ -1275,6 +1275,9 @@ func (s *Server) reflectionConfig() reflection.Config {
 		c.RequireProvenance = s.cfg.RequireProvenance   //nolint:staticcheck // backward compat: migration to ProvenanceFilter tracked separately
 		c.AllowedProvenances = s.cfg.AllowedProvenances //nolint:staticcheck // backward compat: migration to ProvenanceFilter tracked separately
 		c.ProvenanceFilter = s.cfg.ProvenanceFilterConfig()
+		if s.cfg.ReflectionMode != "" {
+			c.Mode = s.cfg.ReflectionMode
+		}
 	}
 	return c
 }

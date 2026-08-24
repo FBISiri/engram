@@ -248,6 +248,30 @@ func (e *Engine) Check(ctx context.Context) (*CheckResult, error) {
 	return result, err
 }
 
+// isDedupDuplicate reports whether a semantically similar reflection insight
+// already exists for vec. It defaults the threshold to 0.78 when unset, logs a
+// dedup-skip line to stderr on a match, and fails open (returns false) when the
+// search errors so insertion can proceed.
+func (e *Engine) isDedupDuplicate(ctx context.Context, vec []float32) bool {
+	dedupThreshold := e.cfg.InsightDedupThreshold
+	if dedupThreshold == 0 {
+		dedupThreshold = 0.78 // default: catch paraphrases in the 0.78-0.92 band
+	}
+	existing, searchErr := e.store.Search(ctx, vec, memory.SearchOptions{
+		Limit: 1,
+		Filters: []memory.Filter{
+			{Field: "collection", Op: memory.OpIn, Value: []string{"engram_reflection"}},
+			{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)},
+		},
+	})
+	if searchErr == nil && len(existing) > 0 && existing[0].Score >= dedupThreshold {
+		fmt.Fprintf(os.Stderr, "reflection: dedup skip — existing score %.3f >= %.3f threshold\n", existing[0].Score, dedupThreshold)
+		return true
+	}
+	// Fail-open: if the search errors, treat as non-duplicate so insertion proceeds.
+	return false
+}
+
 // Run executes one reflection cycle. Respects DryRun mode.
 // Returns RunResult with metrics on what was done.
 func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
@@ -409,23 +433,10 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 			}
 
 			// Pre-write dedup: skip if a semantically similar reflection insight already exists.
-			dedupThreshold := e.cfg.InsightDedupThreshold
-			if dedupThreshold == 0 {
-				dedupThreshold = 0.78 // default: catch paraphrases in the 0.78-0.92 band
-			}
-			existing, searchErr := e.store.Search(ctx, vec, memory.SearchOptions{
-				Limit: 1,
-				Filters: []memory.Filter{
-					{Field: "collection", Op: memory.OpIn, Value: []string{"engram_reflection"}},
-					{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)},
-				},
-			})
-			if searchErr == nil && len(existing) > 0 && existing[0].Score >= dedupThreshold {
-				fmt.Fprintf(os.Stderr, "reflection: dedup skip — existing score %.3f >= %.3f threshold\n", existing[0].Score, dedupThreshold)
+			if e.isDedupDuplicate(ctx, vec) {
 				result.InsightsDedupSkipped++
 				continue
 			}
-			// Fail-open: if the search errors, fall through and insert (dedup is best-effort).
 
 			if err := e.store.Insert(ctx, insightMem, vec); err != nil {
 				result.Errors = append(result.Errors,
@@ -800,23 +811,10 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 		}
 
 		// Pre-write dedup: skip if a semantically similar reflection insight already exists.
-		dedupThreshold := e.cfg.InsightDedupThreshold
-		if dedupThreshold == 0 {
-			dedupThreshold = 0.78 // default: catch paraphrases in the 0.78-0.92 band
-		}
-		existing, searchErr := e.store.Search(ctx, vec, memory.SearchOptions{
-			Limit: 1,
-			Filters: []memory.Filter{
-				{Field: "collection", Op: memory.OpIn, Value: []string{"engram_reflection"}},
-				{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)},
-			},
-		})
-		if searchErr == nil && len(existing) > 0 && existing[0].Score >= dedupThreshold {
-			fmt.Fprintf(os.Stderr, "reflection: dedup skip — existing score %.3f >= %.3f threshold\n", existing[0].Score, dedupThreshold)
+		if e.isDedupDuplicate(ctx, vec) {
 			result.InsightsDedupSkipped++
 			continue
 		}
-		// Fail-open: if the search errors, fall through and insert (dedup is best-effort).
 
 		if err := e.store.Insert(ctx, insightMem, vec); err != nil {
 			result.Errors = append(result.Errors,

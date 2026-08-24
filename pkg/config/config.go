@@ -50,6 +50,7 @@ type Config struct {
 	ReflectionTrigger  string // "count", "cron", "manual"
 	ReflectionCount    int
 	ReflectionModel    string
+	ReflectionMode     string   // ENGRAM_REFLECTION_MODE: "v1" | "v2" (focal point)
 	RequireProvenance  bool     // ENGRAM_REQUIRE_PROVENANCE
 	AllowedProvenances []string // ENGRAM_ALLOWED_PROVENANCES (comma-separated)
 	ProvenanceMode     string   // ENGRAM_PROVENANCE_MODE: "warn" (default) | "strict" | "default"
@@ -115,6 +116,7 @@ func Load() *Config {
 		ReflectionTrigger:  envStr("ENGRAM_REFLECTION_TRIGGER", "count"),
 		ReflectionCount:    envInt("ENGRAM_REFLECTION_COUNT", 10),
 		ReflectionModel:    envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
+		ReflectionMode:     envStr("ENGRAM_REFLECTION_MODE", ""),
 		RequireProvenance:  envBool("ENGRAM_REQUIRE_PROVENANCE", false),
 		AllowedProvenances: parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
 		ProvenanceMode:     provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),

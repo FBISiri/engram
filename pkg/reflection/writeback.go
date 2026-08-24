@@ -146,22 +146,10 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 		}
 
 		// Pre-write dedup: skip if a semantically similar reflection insight already exists.
-		dedupThreshold := cfg.InsightDedupThreshold
-		if dedupThreshold == 0 {
-			dedupThreshold = 0.78 // default: catch paraphrases in the 0.78-0.92 band
-		}
-		existing, searchErr := e.store.Search(ctx, vec, memory.SearchOptions{
-			Limit: 1,
-			Filters: []memory.Filter{
-				{Field: "collection", Op: memory.OpIn, Value: []string{"engram_reflection"}},
-				{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)},
-			},
-		})
-		if searchErr == nil && len(existing) > 0 && existing[0].Score >= dedupThreshold {
+		if e.isDedupDuplicate(ctx, vec) {
 			stats.Skipped++
 			continue
 		}
-		// Fail-open: if the search errors, fall through and insert (dedup is best-effort).
 
 		if err := e.store.Insert(ctx, insightMem, vec); err != nil {
 			stats.Failed++
