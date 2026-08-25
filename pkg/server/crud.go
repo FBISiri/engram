@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -719,6 +720,98 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	output := make([]result, len(results))
 	for i, r := range results {
 		output[i] = result{Memory: r.Memory, Score: r.Score, ResolvedCollection: resolvedCollection, SourceType: sourceTypeFromMetadata(r.Metadata)}
+	}
+
+	writeJSON(w, http.StatusOK, output)
+}
+
+// ─────────────────────────────────────────────────────────────
+// POST /memories/list — filter-only time-window listing (no vector search)
+//
+// Body: {time_start?, time_end?, collections?, limit?}. limit defaults to 50
+// and is silently capped to a maximum of 100.
+// ─────────────────────────────────────────────────────────────
+
+func (h *HTTPServer) handleListMemories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use POST"})
+		return
+	}
+
+	var req struct {
+		TimeStart   float64  `json:"time_start"`
+		TimeEnd     float64  `json:"time_end"`
+		Collections []string `json:"collections"`
+		Limit       int      `json:"limit"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
+		return
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = memory.DefaultListLimit
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Resolve collection scope. READ ISOLATION: an isolated caller may ONLY
+	// read its own collection; a self-declared collections field cannot widen
+	// scope.
+	collections := req.Collections
+	if ct := CallerTypeFromContext(r.Context()); collection.IsIsolatedCallerType(ct) {
+		collections = []string{collection.DefaultRegistry.Resolve(ct)}
+	} else if len(collections) > 0 {
+		for _, col := range collections {
+			if _, ok := collection.DefaultRegistry.Get(col); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown collection: " + col})
+				return
+			}
+		}
+	}
+
+	opts := memory.ListMemoriesOptions{
+		TimeStart:   req.TimeStart,
+		TimeEnd:     req.TimeEnd,
+		Collections: collections,
+		Limit:       limit,
+	}
+
+	mems, err := memory.ListMemories(r.Context(), h.srv.store, opts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("scroll error: %v", err)})
+		return
+	}
+
+	type listResult struct {
+		ID               string   `json:"id"`
+		Content          string   `json:"content"`
+		Type             string   `json:"type"`
+		Importance       float64  `json:"importance"`
+		CreatedAt        float64  `json:"created_at"`
+		Tags             []string `json:"tags"`
+		SourceCollection string   `json:"source_collection"`
+	}
+
+	output := make([]listResult, len(mems))
+	for i, m := range mems {
+		output[i] = listResult{
+			ID:               m.ID,
+			Content:          m.Content,
+			Type:             string(m.Type),
+			Importance:       m.Importance,
+			CreatedAt:        m.CreatedAt,
+			Tags:             m.Tags,
+			SourceCollection: collectionOrFallback(m.Collection, collection.CollectionUser),
+		}
 	}
 
 	writeJSON(w, http.StatusOK, output)

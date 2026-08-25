@@ -112,6 +112,7 @@ func (h *HTTPServer) registerRoutes() {
 	// v0.2 CRUD routes
 	h.mux.HandleFunc("POST /memories", h.withAuth(h.handleCreateMemory))
 	h.mux.HandleFunc("POST /memories/search", h.withAuth(h.handleSearchMemories))
+	h.mux.HandleFunc("POST /memories/list", h.withAuth(h.handleListMemories))
 	h.mux.HandleFunc("GET /memories/{id}", h.withAuth(h.handleGetMemory))
 	h.mux.HandleFunc("PATCH /memories/{id}", h.withAuth(h.handlePatchMemory))
 	h.mux.HandleFunc("PUT /memories/{id}", h.withAuth(h.handlePutMemory))

@@ -135,6 +135,16 @@ func (s *Server) registerTools() {
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
+	// Tool 1b: memory_list — filter-only time-window listing (no vector search).
+	listTool := mcp.NewTool("memory_list",
+		mcp.WithDescription("List memories within a time window without semantic search (no embedding cost). Filter-only pass-through to the store's scroll query. Excludes superseded/expired entries. Results are sorted by created_at ascending. Each entry includes source_collection identifying which collection it came from."),
+		mcp.WithNumber("time_start", mcp.Description("List memories created at or after this Unix timestamp.")),
+		mcp.WithNumber("time_end", mcp.Description("List memories created at or before this Unix timestamp.")),
+		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: all collections (fan-out)."), mcp.WithStringItems()),
+		mcp.WithNumber("limit", mcp.Description("Maximum number of entries to return. Default: 50. Values above 100 are capped to 100.")),
+	)
+	s.mcpServer.AddTool(listTool, s.handleList)
+
 	// Tool 2: memory_add
 	addTool := mcp.NewTool("memory_add",
 		mcp.WithDescription("Store a new memory. Automatically deduplicates against existing memories."),
@@ -446,6 +456,81 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		})
 	}
 
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// handleList implements the memory_list tool: a filter-only, time-window
+// listing that passes straight through to Store.Scroll (no vector search, no
+// embedding cost). Superseded/expired entries are excluded by Scroll. Results
+// are sorted by created_at ascending and truncated to limit.
+func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, span := tracer.Start(ctx, "engram.memory.list")
+	defer span.End()
+
+	limit := request.GetInt("limit", memory.DefaultListLimit)
+	if limit <= 0 {
+		limit = memory.DefaultListLimit
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Resolve collection scope. ISOLATION: an isolated caller (e.g. pigo) may
+	// ONLY read its own collection; a self-declared collections arg can never
+	// widen scope.
+	var collections []string
+	if own, isolated := isolatedCaller(ctx); isolated {
+		collections = []string{own}
+	} else if cols := getStringSlice(request, "collections"); len(cols) > 0 {
+		for _, col := range cols {
+			if _, ok := collection.DefaultRegistry.Get(col); !ok {
+				return mcp.NewToolResultError(fmt.Sprintf("unknown collection: %s", col)), nil
+			}
+		}
+		collections = cols
+	}
+
+	opts := memory.ListMemoriesOptions{
+		TimeStart:   request.GetFloat("time_start", 0),
+		TimeEnd:     request.GetFloat("time_end", 0),
+		Collections: collections,
+		Limit:       limit,
+	}
+
+	mems, err := memory.ListMemories(ctx, s.store, opts)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "scroll error")
+		return mcp.NewToolResultError(fmt.Sprintf("scroll error: %v", err)), nil
+	}
+
+	type listResult struct {
+		ID               string   `json:"id"`
+		Content          string   `json:"content"`
+		Type             string   `json:"type"`
+		Importance       float64  `json:"importance"`
+		CreatedAt        float64  `json:"created_at"`
+		Tags             []string `json:"tags"`
+		SourceCollection string   `json:"source_collection"`
+	}
+
+	output := make([]listResult, len(mems))
+	for i, m := range mems {
+		output[i] = listResult{
+			ID:               m.ID,
+			Content:          m.Content,
+			Type:             string(m.Type),
+			Importance:       m.Importance,
+			CreatedAt:        m.CreatedAt,
+			Tags:             m.Tags,
+			SourceCollection: collectionOrFallback(m.Collection, collection.CollectionUser),
+		}
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
 	return mcp.NewToolResultText(string(data)), nil
 }
 
