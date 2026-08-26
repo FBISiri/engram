@@ -49,6 +49,15 @@ func hasTag(tags []string, target string) bool {
 
 // isExpiryCandidate returns true if m is eligible for policy-based deletion.
 func isExpiryCandidate(m *memory.Memory, now time.Time) bool {
+	// Evaporation-deprecated memories are always candidates, bypassing the
+	// normal importance/age checks — evaporation already made a finer-grained
+	// judgement (spec §5.4).
+	if m.LifecycleStatus == memory.LifecycleDeprecated {
+		if reason, _ := m.Metadata["deprecated_reason"].(string); reason == "evaporation" {
+			return true
+		}
+	}
+
 	policy, ok := defaultPolicies[m.Type]
 	if !ok {
 		return false // identity or unknown type: never delete

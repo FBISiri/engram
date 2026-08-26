@@ -186,17 +186,21 @@ func serve(cfg *config.Config) error {
 	switch cfg.Transport {
 	case "stdio":
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio (ready)\n")
+		// No HTTP metrics on the stdio path; sweep records nothing but still runs.
+		srv.StartEvaporationSweep(serverCtx)
 		return srv.ServeStdio()
 	case "http":
 		fmt.Fprintf(os.Stderr, "  Transport:  http (port %d)\n", cfg.HTTPPort)
 		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
 		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
+		srv.StartEvaporationSweep(serverCtx) // metrics wired by NewHTTPServer
 		return httpSrv.ListenAndServe(serverCtx)
 	case "both":
 		// Start HTTP in background; MCP stdio in foreground.
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio + http (port %d)\n", cfg.HTTPPort)
 		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
 		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
+		srv.StartEvaporationSweep(serverCtx) // metrics wired by NewHTTPServer
 		go func() {
 			if err := httpSrv.ListenAndServe(serverCtx); err != nil {
 				fmt.Fprintf(os.Stderr, "http server error: %v\n", err)

@@ -449,6 +449,10 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 		mem.LifecycleStatus = memory.LifecycleActive
 	}
 
+	// Spec §5.5: revive a memory that was deprecated by evaporation when the
+	// update lifts its effective importance back to/above the eviction threshold.
+	h.reviveIfEvaporated(prev, mem)
+
 	// C1 provenance (shared helper).
 	sourceType, provided, perr := extractMetaSourceType(mem.Metadata)
 	if perr != nil {
@@ -701,7 +705,8 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	}
 
 	// Apply scoring + MMR (same as MCP search).
-	results = rerankResults(results, h.srv.weights, h.srv.decay, h.srv.mmrLambda, limit)
+	evapCfg := h.srv.evaporationConfig()
+	results = rerankResults(results, h.srv.weights, h.srv.decay, evapCfg, h.srv.mmrLambda, limit)
 
 	// Update access_count and last_accessed_source asynchronously.
 	callerType := CallerTypeFromContext(r.Context())
@@ -713,13 +718,18 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 
 	type result struct {
 		memory.Memory
-		Score              float64 `json:"score"`
-		ResolvedCollection string  `json:"resolved_collection,omitempty"`
-		SourceType         string  `json:"source_type,omitempty"`
+		Score               float64 `json:"score"`
+		EffectiveImportance float64 `json:"effective_importance"`
+		ResolvedCollection  string  `json:"resolved_collection,omitempty"`
+		SourceType          string  `json:"source_type,omitempty"`
 	}
 	output := make([]result, len(results))
 	for i, r := range results {
-		output[i] = result{Memory: r.Memory, Score: r.Score, ResolvedCollection: resolvedCollection, SourceType: sourceTypeFromMetadata(r.Metadata)}
+		effImp := memory.EffectiveImportance(&results[i].Memory, evapCfg)
+		if h.srv.metrics != nil {
+			h.srv.metrics.EvaporationEffectiveImportance.WithLabelValues(string(r.Type)).Observe(effImp)
+		}
+		output[i] = result{Memory: r.Memory, Score: r.Score, EffectiveImportance: effImp, ResolvedCollection: resolvedCollection, SourceType: sourceTypeFromMetadata(r.Metadata)}
 	}
 
 	writeJSON(w, http.StatusOK, output)
@@ -817,9 +827,76 @@ func (h *HTTPServer) handleListMemories(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, output)
 }
 
-// ─────────────────────────────────────────────────────────────
-// FSM helpers
-// ─────────────────────────────────────────────────────────────
+// handleEvaporationStatus handles GET /memories/evaporation-status. It returns
+// the server's effective evaporation config plus current stats: the count of
+// evaporation-deprecated memories by type and an estimate of the next sweep
+// time.
+func (h *HTTPServer) handleEvaporationStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed — use GET"})
+		return
+	}
+
+	cfg := h.srv.evaporationConfig()
+
+	deprecatedByType := map[string]int{}
+	var offset string
+	for {
+		mems, next, err := h.srv.store.Scroll(r.Context(), memory.ScrollOptions{Limit: 100, Offset: offset})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("scroll error: %v", err)})
+			return
+		}
+		for i := range mems {
+			m := &mems[i]
+			if m.LifecycleStatus != memory.LifecycleDeprecated {
+				continue
+			}
+			if reason, _ := m.Metadata["deprecated_reason"].(string); reason == "evaporation" {
+				deprecatedByType[string(m.Type)]++
+			}
+		}
+		if next == "" {
+			break
+		}
+		offset = next
+	}
+
+	var nextSweep any
+	if cfg.Enabled && cfg.SweepIntervalH > 0 {
+		nextSweep = time.Now().Add(time.Duration(cfg.SweepIntervalH) * time.Hour).UTC().Format(time.RFC3339)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"config":                   cfg,
+		"deprecated_count_by_type": deprecatedByType,
+		"next_sweep_estimate":      nextSweep,
+	})
+}
+
+// reviveIfEvaporated restores m to "active" when prev was deprecated by
+// evaporation and m's recomputed effective importance now meets the eviction
+// threshold (spec §5.5). It clears the deprecated_* metadata keys on m. Returns
+// true if a revival occurred.
+func (h *HTTPServer) reviveIfEvaporated(prev memory.Memory, m *memory.Memory) bool {
+	if prev.LifecycleStatus != memory.LifecycleDeprecated {
+		return false
+	}
+	if reason, _ := prev.Metadata["deprecated_reason"].(string); reason != "evaporation" {
+		return false
+	}
+	cfg := h.srv.evaporationConfig()
+	if memory.EffectiveImportance(m, cfg) < cfg.EvictionThreshold {
+		return false
+	}
+	m.LifecycleStatus = memory.LifecycleActive
+	if m.Metadata != nil {
+		delete(m.Metadata, "deprecated_reason")
+		delete(m.Metadata, "deprecated_at")
+		delete(m.Metadata, "effective_importance_at_deprecation")
+	}
+	return true
+}
 
 // isValidLifecycleTransition returns true if transitioning from current to next
 // is allowed via PATCH. The transition archived→* is always false here;

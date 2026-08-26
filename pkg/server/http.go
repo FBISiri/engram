@@ -107,6 +107,7 @@ func (h *HTTPServer) registerRoutes() {
 	h.mux.HandleFunc("/reflect", h.withAuth(h.handleReflect))
 	h.mux.HandleFunc("/reflect/check", h.withAuth(h.handleReflectCheck))
 	h.mux.HandleFunc("GET /memories/expiry-candidates", h.withAuth(h.handleExpiryCandidates))
+	h.mux.HandleFunc("GET /memories/evaporation-status", h.withAuth(h.handleEvaporationStatus))
 	h.mux.HandleFunc("DELETE /memories/expired", h.withAuth(h.handleDeleteExpired))
 
 	// v0.2 CRUD routes

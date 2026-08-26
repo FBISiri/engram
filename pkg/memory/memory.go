@@ -195,7 +195,7 @@ func DefaultScoringWeights() ScoringWeights {
 // for pre-v1.1 memories that never set the field). Reflection-origin
 // insights self-report a grounding score in [0, 1]; low-confidence ones
 // are kept out of Engram entirely and saved to Obsidian drafts instead.
-func Score(m *Memory, cosineSim float64, weights ScoringWeights, decay DecayConfig) float64 {
+func Score(m *Memory, cosineSim float64, weights ScoringWeights, decay DecayConfig, evapCfg EvaporationConfig) float64 {
 	// S_relevance: clamp cosine similarity to [0, 1]
 	relevance := math.Max(0, math.Min(1, cosineSim))
 
@@ -204,8 +204,8 @@ func Score(m *Memory, cosineSim float64, weights ScoringWeights, decay DecayConf
 	decayFactor := decay.DecayFactor(m.Type)
 	recency := math.Pow(decayFactor, hoursPassed)
 
-	// S_importance: normalized to [0, 1]
-	importance := m.Importance / 10.0
+	// S_importance: normalized to [0, 1], with evaporation applied.
+	importance := EffectiveImportance(m, evapCfg) / 10.0
 
 	base := weights.Relevance*relevance + weights.Recency*recency + weights.Importance*importance
 

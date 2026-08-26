@@ -34,6 +34,9 @@ type Config struct {
 	MMRLambda      float64
 	DedupThreshold float64
 
+	// Evaporation (importance runtime decay). Feature-flagged off by default.
+	Evaporation memory.EvaporationConfig
+
 	// Server
 	Transport string // "stdio", "http", "both"
 	HTTPPort  int
@@ -107,6 +110,8 @@ func Load() *Config {
 		MMRLambda:      envFloat("ENGRAM_MMR_LAMBDA", 0.5),
 		DedupThreshold: envFloat("ENGRAM_DEDUP_THRESHOLD", 0.92),
 
+		Evaporation: loadEvaporationConfig(),
+
 		// Server
 		Transport:     envStr("ENGRAM_TRANSPORT", "stdio"),
 		HTTPPort:      envInt("ENGRAM_HTTP_PORT", 8080),
@@ -124,6 +129,22 @@ func Load() *Config {
 		AllowedProvenances: parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
 		ProvenanceMode:     provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),
 	}
+}
+
+// loadEvaporationConfig starts from DefaultEvaporationConfig() and overrides
+// each field from ENGRAM_EVAPORATION_* environment variables.
+func loadEvaporationConfig() memory.EvaporationConfig {
+	c := memory.DefaultEvaporationConfig()
+	c.Enabled = envBool("ENGRAM_EVAPORATION_ENABLED", c.Enabled)
+	c.HalfLifeDays[memory.TypeEvent] = envFloat("ENGRAM_EVAPORATION_HALF_LIFE_EVENT", c.HalfLifeDays[memory.TypeEvent])
+	c.HalfLifeDays[memory.TypeInsight] = envFloat("ENGRAM_EVAPORATION_HALF_LIFE_INSIGHT", c.HalfLifeDays[memory.TypeInsight])
+	c.HalfLifeDays[memory.TypeDirective] = envFloat("ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE", c.HalfLifeDays[memory.TypeDirective])
+	c.HalfLifeDays[memory.TypeIdentity] = envFloat("ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY", c.HalfLifeDays[memory.TypeIdentity])
+	c.AccessBoostAlpha = envFloat("ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA", c.AccessBoostAlpha)
+	c.EvictionThreshold = envFloat("ENGRAM_EVAPORATION_EVICTION_THRESHOLD", c.EvictionThreshold)
+	c.SweepIntervalH = envInt("ENGRAM_EVAPORATION_SWEEP_INTERVAL_H", c.SweepIntervalH)
+	c.SweepBatchLimit = envInt("ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT", c.SweepBatchLimit)
+	return c
 }
 
 // provenanceMode validates the ENGRAM_PROVENANCE_MODE value. Valid values are

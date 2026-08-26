@@ -21,9 +21,9 @@ import (
 // final score descending, then reranks with MMR for relevance + diversity. When
 // vectors are missing it falls back to simple truncation. The slice is mutated
 // in place and trimmed to at most limit. Shared by the MCP and REST search paths.
-func rerankResults(results []memory.ScoredMemory, weights memory.ScoringWeights, decay memory.DecayConfig, mmrLambda float64, limit int) []memory.ScoredMemory {
+func rerankResults(results []memory.ScoredMemory, weights memory.ScoringWeights, decay memory.DecayConfig, evapCfg memory.EvaporationConfig, mmrLambda float64, limit int) []memory.ScoredMemory {
 	for i := range results {
-		results[i].Score = memory.Score(&results[i].Memory, results[i].Score, weights, decay)
+		results[i].Score = memory.Score(&results[i].Memory, results[i].Score, weights, decay, evapCfg)
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
 
