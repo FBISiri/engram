@@ -32,3 +32,5 @@ trajectories/
 
 # Auto-generated evaluation reports (large files)
 eval/reports/consolidation_scanner_report.json
+consolidation/reports/
+consolidation/metrics.jsonl

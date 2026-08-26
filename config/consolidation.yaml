@@ -1,0 +1,53 @@
+# Engram Consolidation Agent — default configuration
+# Priority: CLI args > env vars > this file > built-in defaults.
+consolidation:
+  enabled: true
+
+  thresholds:
+    auto_merge: 0.88        # Zone 3 lower bound
+    llm_adjudicate: 0.82    # Zone 2 lower bound
+    dedup_anomaly: 0.92     # Zone 4 lower bound
+    cluster_edge: 0.88      # union-find edge threshold (fixes v1 0.82 explosion)
+
+  type_rules:
+    identity:
+      merge_enabled: false        # identity never auto-merged
+    directive:
+      merge_threshold: 0.95       # directives need >= 0.95 to merge
+      auto_merge_enabled: false   # always LLM-judged
+    insight:
+      merge_threshold: 0.82
+    event:
+      merge_threshold: 0.80       # more aggressive
+
+  safety:
+    recency_guard_hours: 24
+    max_merges_per_run: 20
+    max_cluster_size: 20
+    llm_confidence_threshold: 0.7
+    dry_run_default: true
+    min_memory_count: 100
+    min_interval_hours: 24
+
+  llm:
+    provider: anthropic
+    model: claude-haiku-4-20250414
+    max_tokens: 1024
+    temperature: 0.0
+
+  collections:
+    - engram_user
+    - engram_reflection
+    - engram_pigo
+
+  endpoints:
+    qdrant_url: http://localhost:6333
+    engram_url: http://localhost:8081
+
+  undo:
+    dir: /data/armyoftheagent/engram/consolidation/undo
+    retention_days: 90
+
+  report:
+    dir: /data/obsidian-vault/Engram/consolidation-reports
+    json_dir: /data/armyoftheagent/engram/consolidation/reports
