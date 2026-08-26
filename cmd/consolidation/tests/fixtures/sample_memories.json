@@ -1,0 +1,35 @@
+[
+  {
+    "id": "sample-1",
+    "collection": "engram_user",
+    "vector": [0.1, 0.2, 0.3],
+    "type": "insight",
+    "content": "Frank prefers concise, direct answers over long explanations.",
+    "importance": 6,
+    "tags": ["frank", "preference"],
+    "source_type": "reflection",
+    "created_at": 1722000000
+  },
+  {
+    "id": "sample-2",
+    "collection": "engram_user",
+    "vector": [0.1, 0.21, 0.29],
+    "type": "insight",
+    "content": "Frank likes short, to-the-point responses instead of verbose ones.",
+    "importance": 5,
+    "tags": ["frank", "style"],
+    "source_type": "reflection",
+    "created_at": 1722100000
+  },
+  {
+    "id": "sample-3",
+    "collection": "engram_user",
+    "vector": [0.9, 0.1, 0.05],
+    "type": "directive",
+    "content": "Never delete production data without an explicit confirmation step.",
+    "importance": 9,
+    "tags": ["safety", "ops"],
+    "source_type": "user_input",
+    "created_at": 1721000000
+  }
+]

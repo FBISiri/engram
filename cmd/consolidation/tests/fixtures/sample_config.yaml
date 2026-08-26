@@ -1,0 +1,19 @@
+consolidation:
+  enabled: true
+  thresholds:
+    auto_merge: 0.88
+    llm_adjudicate: 0.82
+    dedup_anomaly: 0.92
+    cluster_edge: 0.88
+  safety:
+    recency_guard_hours: 24
+    max_merges_per_run: 5
+    max_cluster_size: 20
+    llm_confidence_threshold: 0.7
+  llm:
+    provider: anthropic
+    model: claude-haiku-4-20250414
+    max_tokens: 1024
+    temperature: 0.0
+  collections:
+    - engram_user
