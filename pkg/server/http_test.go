@@ -25,6 +25,19 @@ func buildHTTPTestServer(t *testing.T, apiKey string) *httptest.Server {
 	return ts
 }
 
+// buildHTTPTestServerWithStore returns the test HTTP server together with the
+// underlying mock store and embedder so tests can seed data directly
+// (bypassing REST dedup).
+func buildHTTPTestServerWithStore(t *testing.T) (*httptest.Server, *mockStore, *mockEmbedder) {
+	t.Helper()
+	srv, store := newTestServer()
+	emb := srv.embedder.(*mockEmbedder)
+	h := NewHTTPServer(srv, 0, "")
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(ts.Close)
+	return ts, store, emb
+}
+
 // failingStore wraps mockStore but makes Stats() return an error.
 type failingStore struct {
 	mockStore

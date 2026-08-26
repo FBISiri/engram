@@ -165,15 +165,43 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Server-side 0.92 dedup (C1): mirror the MCP add path so REST writers
+	// (e.g. the Consolidation Agent) don't bypass dedup. Fail-open on error.
+	dedupResult, dupErr := h.srv.checkDedup(r.Context(), vec, body.Content, sourceType, memType)
+	if dupErr != nil {
+		log.Printf("[WARN] engram REST POST /memories: dedup check failed, proceeding with insert: %v", dupErr)
+		dedupResult = &DedupResult{}
+	} else if dedupResult.DupFound {
+		if h.srv.metrics != nil {
+			h.srv.metrics.DedupHits.WithLabelValues(mem.Collection, "server_side_092").Inc()
+			h.srv.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()
+		}
+		var dup struct {
+			Existing struct {
+				ID    string  `json:"id"`
+				Score float64 `json:"score"`
+			} `json:"existing"`
+		}
+		_ = json.Unmarshal(dedupResult.DupData, &dup)
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"status":      "duplicate",
+			"existing_id": dup.Existing.ID,
+			"similarity":  dup.Existing.Score,
+		})
+		return
+	}
+
 	if err := h.srv.store.Insert(r.Context(), mem, vec); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("insert error: %v", err)})
 		return
 	}
 
-	// Write Discipline Checkpoints (R10): CP2/CP3/CP4 apply on REST create.
-	// CP1 is not run here (this path performs no dedup search).
+	// Write Discipline Checkpoints (R10): CP1/CP2/CP3/CP4 apply on REST create.
 	var advisories []Advisory
 	if h.srv.writeCheckpointsEnabled() {
+		if a := h.srv.cp1DedupAdvisory(dedupResult.Candidates, memType); a != nil {
+			advisories = append(advisories, *a)
+		}
 		if a := h.srv.cp2Importance(mem.Collection, importance); a != nil {
 			advisories = append(advisories, *a)
 		}

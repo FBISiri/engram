@@ -1,20 +1,32 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/FBISiri/engram/pkg/memory"
 )
 
-// seedCrossSearchMem creates a memory in engram_user (caller "user") carrying
-// the given source_type in metadata. Fails the test on any non-201 status.
-func seedCrossSearchMem(t *testing.T, ts, content, sourceType string) {
+// seedCrossSearchMem inserts a memory into engram_user directly via the mock
+// store, bypassing the REST 0.92 dedup check (C1) that the toy mock embedder
+// would otherwise trip for any two >20-char strings. The memory carries the
+// given source_type in metadata so cross-search filters can find it.
+func seedCrossSearchMem(t *testing.T, store *mockStore, emb *mockEmbedder, content, sourceType string) {
 	t.Helper()
-	body := `{"content":"` + content + `","type":"event","importance":5,"metadata":{"source_type":"` + sourceType + `"}}`
-	resp := doJSON(t, ts, "POST", "/collections/engram_user/memories", "user", body)
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("seed %s: want 201, got %d", sourceType, resp.StatusCode)
+	mem := memory.New(content,
+		memory.WithType(memory.TypeEvent),
+		memory.WithImportance(5),
+		memory.WithMetadata(map[string]any{"source_type": sourceType}),
+	)
+	mem.Collection = "engram_user"
+	vec, err := emb.Embed(context.Background(), content)
+	if err != nil {
+		t.Fatalf("embed %s: %v", sourceType, err)
+	}
+	if err := store.Insert(context.Background(), mem, vec); err != nil {
+		t.Fatalf("seed %s: insert failed: %v", sourceType, err)
 	}
 }
 
@@ -26,11 +38,11 @@ func crossSearch(t *testing.T, ts, body string) *http.Response {
 // (a) source_type filter returns only matching memories.
 // (d) response includes the source_type field in results.
 func TestCrossSearch_SourceTypeFilter(t *testing.T) {
-	ts := buildHTTPTestServer(t, "")
-	seedCrossSearchMem(t, ts.URL, "Paris is the capital of France", "web_search")
-	seedCrossSearchMem(t, ts.URL, "Paris is a lovely place to visit", "user_input")
+	ts, store, emb := buildHTTPTestServerWithStore(t)
+	seedCrossSearchMem(t, store, emb, "Paris is the capital of France", "web_search")
+	seedCrossSearchMem(t, store, emb, "Berlin has an excellent public transit system", "user_input")
 
-	body := `{"query":"Paris","collections":["engram_user"],"limit":10,"source_type":["web_search"]}`
+	body := `{"query":"European cities","collections":["engram_user"],"limit":10,"source_type":["web_search"]}`
 	resp := crossSearch(t, ts.URL, body)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -50,11 +62,11 @@ func TestCrossSearch_SourceTypeFilter(t *testing.T) {
 
 // (b) WITHOUT source_type filter returns all memories (backward compat).
 func TestCrossSearch_NoSourceTypeFilter_ReturnsAll(t *testing.T) {
-	ts := buildHTTPTestServer(t, "")
-	seedCrossSearchMem(t, ts.URL, "Paris is the capital of France", "web_search")
-	seedCrossSearchMem(t, ts.URL, "Paris is a lovely place to visit", "user_input")
+	ts, store, emb := buildHTTPTestServerWithStore(t)
+	seedCrossSearchMem(t, store, emb, "Paris is the capital of France", "web_search")
+	seedCrossSearchMem(t, store, emb, "Berlin has an excellent public transit system", "user_input")
 
-	body := `{"query":"Paris","collections":["engram_user"],"limit":10}`
+	body := `{"query":"European cities","collections":["engram_user"],"limit":10}`
 	resp := crossSearch(t, ts.URL, body)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
