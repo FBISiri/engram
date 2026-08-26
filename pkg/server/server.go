@@ -40,6 +40,7 @@ type Server struct {
 	embedder       embedding.Embedder
 	weights        memory.ScoringWeights
 	decay          memory.DecayConfig
+	evapCfg        memory.EvaporationConfig
 	mmrLambda      float64
 	dedupThreshold float64
 	mcpServer      *mcpserver.MCPServer
@@ -53,6 +54,12 @@ type Server struct {
 // SetMetrics registers prometheus metrics so handlers can record latency.
 func (s *Server) SetMetrics(m *engrammetrics.Metrics) {
 	s.metrics = m
+}
+
+// evaporationConfig returns the server's effective evaporation config, honoring
+// any runtime override applied via memory_apply_config.
+func (s *Server) evaporationConfig() memory.EvaporationConfig {
+	return s.overrides.getEvaporation(s.evapCfg)
 }
 
 // collectionStatter is satisfied by qdrant.MultiStore.
@@ -93,6 +100,7 @@ func NewServer(store memory.Store, embedder embedding.Embedder, cfg *config.Conf
 		embedder:       embedder,
 		weights:        cfg.Weights,
 		decay:          cfg.Decay,
+		evapCfg:        cfg.Evaporation,
 		mmrLambda:      cfg.MMRLambda,
 		dedupThreshold: cfg.DedupThreshold,
 		cfg:            cfg,
@@ -375,7 +383,8 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Apply 3-component scoring + MMR rerank (shared with REST search).
 	weights := s.overrides.getWeights(s.weights)
-	results = rerankResults(results, weights, s.decay, s.mmrLambda, limit)
+	evapCfg := s.evaporationConfig()
+	results = rerankResults(results, weights, s.decay, evapCfg, s.mmrLambda, limit)
 
 	span.SetAttributes(
 		attribute.Int("result.count", len(results)),
@@ -395,41 +404,47 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	// Format output
 	type searchResult struct {
-		ID               string         `json:"id"`
-		Type             string         `json:"type"`
-		Content          string         `json:"content"`
-		Source           string         `json:"source"`
-		Importance       float64        `json:"importance"`
-		Tags             []string       `json:"tags"`
-		CreatedAt        float64        `json:"created_at"`
-		UpdatedAt        float64        `json:"updated_at"`
-		Score            float64        `json:"score"`
-		ValidUntil       float64        `json:"valid_until,omitempty"`
-		AccessCount      int64          `json:"access_count"`
-		LastAccessedAt   float64        `json:"last_accessed_at,omitempty"`
-		Metadata         map[string]any `json:"metadata,omitempty"`
-		SourceCollection string         `json:"source_collection"`
-		SourceType       string         `json:"source_type,omitempty"`
+		ID                  string         `json:"id"`
+		Type                string         `json:"type"`
+		Content             string         `json:"content"`
+		Source              string         `json:"source"`
+		Importance          float64        `json:"importance"`
+		EffectiveImportance float64        `json:"effective_importance"`
+		Tags                []string       `json:"tags"`
+		CreatedAt           float64        `json:"created_at"`
+		UpdatedAt           float64        `json:"updated_at"`
+		Score               float64        `json:"score"`
+		ValidUntil          float64        `json:"valid_until,omitempty"`
+		AccessCount         int64          `json:"access_count"`
+		LastAccessedAt      float64        `json:"last_accessed_at,omitempty"`
+		Metadata            map[string]any `json:"metadata,omitempty"`
+		SourceCollection    string         `json:"source_collection"`
+		SourceType          string         `json:"source_type,omitempty"`
 	}
 
 	output := make([]searchResult, len(results))
 	for i, r := range results {
+		effImp := memory.EffectiveImportance(&results[i].Memory, evapCfg)
+		if s.metrics != nil {
+			s.metrics.EvaporationEffectiveImportance.WithLabelValues(string(r.Type)).Observe(effImp)
+		}
 		output[i] = searchResult{
-			ID:               r.ID,
-			Type:             string(r.Type),
-			Content:          r.Content,
-			Source:           r.Source,
-			Importance:       r.Importance,
-			Tags:             r.Tags,
-			CreatedAt:        r.CreatedAt,
-			UpdatedAt:        r.UpdatedAt,
-			Score:            r.Score,
-			ValidUntil:       r.ValidUntil,
-			AccessCount:      r.AccessCount,
-			LastAccessedAt:   r.LastAccessedAt,
-			Metadata:         r.Metadata,
-			SourceCollection: collectionOrFallback(r.Collection, collection.CollectionUser),
-			SourceType:       sourceTypeFromMetadata(r.Metadata),
+			ID:                  r.ID,
+			Type:                string(r.Type),
+			Content:             r.Content,
+			Source:              r.Source,
+			Importance:          r.Importance,
+			EffectiveImportance: effImp,
+			Tags:                r.Tags,
+			CreatedAt:           r.CreatedAt,
+			UpdatedAt:           r.UpdatedAt,
+			Score:               r.Score,
+			ValidUntil:          r.ValidUntil,
+			AccessCount:         r.AccessCount,
+			LastAccessedAt:      r.LastAccessedAt,
+			Metadata:            r.Metadata,
+			SourceCollection:    collectionOrFallback(r.Collection, collection.CollectionUser),
+			SourceType:          sourceTypeFromMetadata(r.Metadata),
 		}
 	}
 

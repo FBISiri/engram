@@ -386,3 +386,43 @@ func TestConfig_RequireProvenanceTrue(t *testing.T) {
 		t.Error("RequireProvenance should be true when ENGRAM_REQUIRE_PROVENANCE=true")
 	}
 }
+
+func TestEvaporationConfigDefaults(t *testing.T) {
+	clearEngramEnv(t)
+	c := Load().Evaporation
+	if c.Enabled {
+		t.Error("Evaporation.Enabled default should be false")
+	}
+	if c.HalfLifeDays[memory.TypeEvent] != 30 || c.HalfLifeDays[memory.TypeInsight] != 180 ||
+		c.HalfLifeDays[memory.TypeDirective] != 365 || c.HalfLifeDays[memory.TypeIdentity] != 0 {
+		t.Errorf("unexpected default half-lives: %+v", c.HalfLifeDays)
+	}
+	if c.AccessBoostAlpha != 0.15 || c.EvictionThreshold != 1.0 || c.SweepIntervalH != 6 || c.SweepBatchLimit != 100 {
+		t.Errorf("unexpected scalar defaults: %+v", c)
+	}
+}
+
+func TestEvaporationConfigFromEnv(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_EVAPORATION_ENABLED", "true")
+	t.Setenv("ENGRAM_EVAPORATION_HALF_LIFE_EVENT", "45")
+	t.Setenv("ENGRAM_EVAPORATION_HALF_LIFE_INSIGHT", "120")
+	t.Setenv("ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE", "400")
+	t.Setenv("ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY", "10")
+	t.Setenv("ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA", "0.2")
+	t.Setenv("ENGRAM_EVAPORATION_EVICTION_THRESHOLD", "1.5")
+	t.Setenv("ENGRAM_EVAPORATION_SWEEP_INTERVAL_H", "12")
+	t.Setenv("ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT", "50")
+
+	c := Load().Evaporation
+	if !c.Enabled {
+		t.Error("Enabled should be true")
+	}
+	if c.HalfLifeDays[memory.TypeEvent] != 45 || c.HalfLifeDays[memory.TypeInsight] != 120 ||
+		c.HalfLifeDays[memory.TypeDirective] != 400 || c.HalfLifeDays[memory.TypeIdentity] != 10 {
+		t.Errorf("half-lives not loaded: %+v", c.HalfLifeDays)
+	}
+	if c.AccessBoostAlpha != 0.2 || c.EvictionThreshold != 1.5 || c.SweepIntervalH != 12 || c.SweepBatchLimit != 50 {
+		t.Errorf("scalars not loaded: %+v", c)
+	}
+}

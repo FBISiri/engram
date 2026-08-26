@@ -65,7 +65,7 @@ func TestScore_PureRelevance(t *testing.T) {
 	weights := ScoringWeights{Relevance: 1.0, Recency: 0.0, Importance: 0.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 0.85, weights, decay)
+	score := Score(m, 0.85, weights, decay, EvaporationConfig{})
 	if math.Abs(score-0.85) > 1e-6 {
 		t.Errorf("score = %f, want 0.85", score)
 	}
@@ -78,7 +78,7 @@ func TestScore_PureImportance(t *testing.T) {
 	weights := ScoringWeights{Relevance: 0.0, Recency: 0.0, Importance: 1.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 0.5, weights, decay)
+	score := Score(m, 0.5, weights, decay, EvaporationConfig{})
 	expected := 8.0 / 10.0
 	if math.Abs(score-expected) > 1e-6 {
 		t.Errorf("score = %f, want %f", score, expected)
@@ -93,7 +93,7 @@ func TestScore_RecencyDecay_Identity(t *testing.T) {
 	weights := ScoringWeights{Relevance: 0.0, Recency: 1.0, Importance: 0.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 0.0, weights, decay)
+	score := Score(m, 0.0, weights, decay, EvaporationConfig{})
 	// decay=1.0, so 1.0^24 = 1.0
 	if math.Abs(score-1.0) > 1e-6 {
 		t.Errorf("score = %f, want 1.0 (identity never decays)", score)
@@ -108,7 +108,7 @@ func TestScore_RecencyDecay_Event(t *testing.T) {
 	weights := ScoringWeights{Relevance: 0.0, Recency: 1.0, Importance: 0.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 0.0, weights, decay)
+	score := Score(m, 0.0, weights, decay, EvaporationConfig{})
 	// 0.99^69 ≈ 0.5005
 	if score < 0.45 || score > 0.55 {
 		t.Errorf("score = %f, want ~0.5 for event after 69h", score)
@@ -123,7 +123,7 @@ func TestScore_RecencyDecay_Insight(t *testing.T) {
 	weights := ScoringWeights{Relevance: 0.0, Recency: 1.0, Importance: 0.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 0.0, weights, decay)
+	score := Score(m, 0.0, weights, decay, EvaporationConfig{})
 	// 0.9998^24 ≈ 0.9952
 	if score < 0.99 {
 		t.Errorf("score = %f, want > 0.99 for insight after 24h", score)
@@ -138,7 +138,7 @@ func TestScore_Combined(t *testing.T) {
 	weights := DefaultScoringWeights()
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 1.0, weights, decay)
+	score := Score(m, 1.0, weights, decay, EvaporationConfig{})
 	// 1.0 * 1.0 + 0.5 * 1.0 + 0.3 * 1.0 = 1.8
 	if math.Abs(score-1.8) > 0.01 {
 		t.Errorf("score = %f, want ~1.8", score)
@@ -152,7 +152,7 @@ func TestScore_ClampsNegativeSimilarity(t *testing.T) {
 	weights := ScoringWeights{Relevance: 1.0, Recency: 0.0, Importance: 0.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, -0.5, weights, decay)
+	score := Score(m, -0.5, weights, decay, EvaporationConfig{})
 	if score != 0.0 {
 		t.Errorf("score = %f, want 0.0 (clamped negative)", score)
 	}
@@ -165,9 +165,44 @@ func TestScore_ClampsHighSimilarity(t *testing.T) {
 	weights := ScoringWeights{Relevance: 1.0, Recency: 0.0, Importance: 0.0}
 	decay := DefaultDecayConfig()
 
-	score := Score(m, 1.5, weights, decay)
+	score := Score(m, 1.5, weights, decay, EvaporationConfig{})
 	if math.Abs(score-1.0) > 1e-6 {
 		t.Errorf("score = %f, want 1.0 (clamped high)", score)
+	}
+}
+
+func TestScoreUsesEffectiveImportance(t *testing.T) {
+	// Pure-importance weighting; event decays, so enabled evaporation lowers score.
+	m := New("test", WithType(TypeEvent), WithImportance(8))
+	m.CreatedAt = float64(time.Now().Add(-30 * 24 * time.Hour).Unix()) // 1 half-life
+
+	weights := ScoringWeights{Relevance: 0.0, Recency: 0.0, Importance: 1.0}
+	decay := DefaultDecayConfig()
+	evap := DefaultEvaporationConfig()
+	evap.Enabled = true
+
+	score := Score(m, 0.0, weights, decay, evap)
+	// effective ≈ 4.0 → importance component ≈ 0.4.
+	if math.Abs(score-0.4) > 0.02 {
+		t.Errorf("score = %f, want ≈0.4 (evaporated importance)", score)
+	}
+}
+
+func TestScoreBackwardCompat(t *testing.T) {
+	// Disabled evaporation must behave exactly like raw importance.
+	m := New("test", WithType(TypeEvent), WithImportance(8))
+	m.CreatedAt = float64(time.Now().Add(-200 * 24 * time.Hour).Unix())
+
+	weights := ScoringWeights{Relevance: 0.0, Recency: 0.0, Importance: 1.0}
+	decay := DefaultDecayConfig()
+
+	disabled := DefaultEvaporationConfig() // Enabled=false
+	if got := Score(m, 0.0, weights, decay, disabled); math.Abs(got-0.8) > 1e-6 {
+		t.Errorf("score = %f, want 0.8 (raw importance)", got)
+	}
+	// Zero-value config is also disabled.
+	if got := Score(m, 0.0, weights, decay, EvaporationConfig{}); math.Abs(got-0.8) > 1e-6 {
+		t.Errorf("score = %f, want 0.8 (zero-value config)", got)
 	}
 }
 

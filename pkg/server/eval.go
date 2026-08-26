@@ -40,10 +40,22 @@ type UpdateConfig struct {
 	EvictionPolicy  string  `json:"eviction_policy,omitempty"`
 }
 
-// MemoryConfig bundles the two hot-reloadable sub-configs.
+// EvaporationConfigInput holds hot-reloadable evaporation settings. Pointer/
+// map fields distinguish "provided" from "omitted" for partial updates.
+type EvaporationConfigInput struct {
+	Enabled           *bool              `json:"enabled,omitempty"`
+	HalfLifeDays      map[string]float64 `json:"half_life_days,omitempty"`
+	AccessBoostAlpha  *float64           `json:"access_boost_alpha,omitempty"`
+	EvictionThreshold *float64           `json:"eviction_threshold,omitempty"`
+	SweepIntervalH    *int               `json:"sweep_interval_hours,omitempty"`
+	SweepBatchLimit   *int               `json:"sweep_batch_limit,omitempty"`
+}
+
+// MemoryConfig bundles the hot-reloadable sub-configs.
 type MemoryConfig struct {
-	RetrieveConfig RetrieveConfig `json:"retrieve_config"`
-	UpdateConfig   UpdateConfig   `json:"update_config"`
+	RetrieveConfig RetrieveConfig          `json:"retrieve_config"`
+	UpdateConfig   UpdateConfig            `json:"update_config"`
+	Evaporation    *EvaporationConfigInput `json:"evaporation,omitempty"`
 }
 
 // runtimeOverrides stores active config overrides under a RWMutex.
@@ -53,6 +65,7 @@ type runtimeOverrides struct {
 	weights *memory.ScoringWeights
 	dedup   *float64
 	topK    *int
+	evap    *memory.EvaporationConfig
 }
 
 func (o *runtimeOverrides) getWeights(def memory.ScoringWeights) memory.ScoringWeights {
@@ -69,6 +82,17 @@ func (o *runtimeOverrides) getDedupThreshold(def float64) float64 {
 	defer o.mu.RUnlock()
 	if o.dedup != nil {
 		return *o.dedup
+	}
+	return def
+}
+
+// getEvaporation returns the active evaporation config override, or def when
+// none has been applied.
+func (o *runtimeOverrides) getEvaporation(def memory.EvaporationConfig) memory.EvaporationConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.evap != nil {
+		return *o.evap
 	}
 	return def
 }
@@ -107,6 +131,9 @@ func (s *Server) handleApplyConfig(ctx context.Context, request mcp.CallToolRequ
 		d := cfg.UpdateConfig.DedupeThreshold
 		s.overrides.dedup = &d
 	}
+	if cfg.Evaporation != nil {
+		s.applyEvaporationOverride(cfg.Evaporation)
+	}
 
 	type result struct {
 		Status  string       `json:"status"`
@@ -114,6 +141,43 @@ func (s *Server) handleApplyConfig(ctx context.Context, request mcp.CallToolRequ
 	}
 	data, _ := json.Marshal(result{Status: "applied", Applied: cfg})
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+// applyEvaporationOverride partial-updates the server's evaporation config from
+// the provided input, keeping current values for omitted keys. Must be called
+// with s.overrides.mu held.
+func (s *Server) applyEvaporationOverride(in *EvaporationConfigInput) {
+	// Start from the current effective config (existing override or server default).
+	base := s.evapCfg
+	if s.overrides.evap != nil {
+		base = *s.overrides.evap
+	}
+	// Deep-copy the map so we never mutate the shared base config.
+	hl := make(map[memory.MemoryType]float64, len(base.HalfLifeDays))
+	for k, v := range base.HalfLifeDays {
+		hl[k] = v
+	}
+	base.HalfLifeDays = hl
+
+	if in.Enabled != nil {
+		base.Enabled = *in.Enabled
+	}
+	for k, v := range in.HalfLifeDays {
+		hl[memory.MemoryType(k)] = v
+	}
+	if in.AccessBoostAlpha != nil {
+		base.AccessBoostAlpha = *in.AccessBoostAlpha
+	}
+	if in.EvictionThreshold != nil {
+		base.EvictionThreshold = *in.EvictionThreshold
+	}
+	if in.SweepIntervalH != nil {
+		base.SweepIntervalH = *in.SweepIntervalH
+	}
+	if in.SweepBatchLimit != nil {
+		base.SweepBatchLimit = *in.SweepBatchLimit
+	}
+	s.overrides.evap = &base
 }
 
 // =============================================================================

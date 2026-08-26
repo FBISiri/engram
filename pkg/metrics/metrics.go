@@ -29,6 +29,14 @@ type Metrics struct {
 	// DedupHits counts deduplication hits, labelled by collection and
 	// dedup_type ("server_side_092"|"client_side_078").
 	DedupHits *prometheus.CounterVec // engram_dedup_hits_total
+	// EvaporationSweepTotal counts evaporation sweep executions.
+	EvaporationSweepTotal prometheus.Counter // engram_evaporation_sweep_total
+	// EvaporationDeprecatedTotal counts memories deprecated by evaporation, by type.
+	EvaporationDeprecatedTotal *prometheus.CounterVec // engram_evaporation_deprecated_total
+	// EvaporationSweepDuration observes sweep durations.
+	EvaporationSweepDuration prometheus.Histogram // engram_evaporation_sweep_duration_seconds
+	// EvaporationEffectiveImportance samples query-time effective_importance, by type.
+	EvaporationEffectiveImportance *prometheus.HistogramVec // engram_evaporation_effective_importance
 }
 
 // New creates a Metrics instance and registers all metrics into a fresh Registry.
@@ -70,6 +78,26 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"collection", "dedup_type"})
 	reg.MustRegister(memoryOps, dedupHits)
 
+	evaporationSweepTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "engram_evaporation_sweep_total",
+		Help: "Total evaporation sweep executions.",
+	})
+	evaporationDeprecatedTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_evaporation_deprecated_total",
+		Help: "Total memories deprecated by evaporation, by type.",
+	}, []string{"type"})
+	evaporationSweepDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "engram_evaporation_sweep_duration_seconds",
+		Help:    "Duration of evaporation sweep runs.",
+		Buckets: prometheus.DefBuckets,
+	})
+	evaporationEffectiveImportance := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "engram_evaporation_effective_importance",
+		Help:    "Distribution of query-time effective_importance, by type.",
+		Buckets: prometheus.LinearBuckets(0, 1, 11),
+	}, []string{"type"})
+	reg.MustRegister(evaporationSweepTotal, evaporationDeprecatedTotal, evaporationSweepDuration, evaporationEffectiveImportance)
+
 	if embedCache != nil {
 		reg.MustRegister(newEmbedCacheCollector(embedCache))
 	}
@@ -78,13 +106,17 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}
 
 	return &Metrics{
-		Registry:                  reg,
-		SearchDuration:            searchDur,
-		EmbedDuration:             embedDur,
-		ReflectionRuns:            reflectionRuns,
-		ReflectionInsightsCreated: reflectionInsightsCreated,
-		MemoryOps:                 memoryOps,
-		DedupHits:                 dedupHits,
+		Registry:                       reg,
+		SearchDuration:                 searchDur,
+		EmbedDuration:                  embedDur,
+		ReflectionRuns:                 reflectionRuns,
+		ReflectionInsightsCreated:      reflectionInsightsCreated,
+		MemoryOps:                      memoryOps,
+		DedupHits:                      dedupHits,
+		EvaporationSweepTotal:          evaporationSweepTotal,
+		EvaporationDeprecatedTotal:     evaporationDeprecatedTotal,
+		EvaporationSweepDuration:       evaporationSweepDuration,
+		EvaporationEffectiveImportance: evaporationEffectiveImportance,
 	}
 }
 

@@ -147,7 +147,7 @@ func (h *HTTPServer) handleCrossSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for i := range results {
-			results[i].Score = memory.Score(&results[i].Memory, results[i].Score, h.srv.weights, h.srv.decay)
+			results[i].Score = memory.Score(&results[i].Memory, results[i].Score, h.srv.weights, h.srv.decay, h.srv.evaporationConfig())
 			all = append(all, crossSearchHit{
 				Memory:     results[i].Memory,
 				Score:      results[i].Score,
