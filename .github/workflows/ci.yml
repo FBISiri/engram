@@ -190,9 +190,10 @@ jobs:
           # repo "FBISiri/engram" becomes ghcr.io/fbisiri/engram (GHCR requires
           # a lowercase path).
           images: ghcr.io/${{ github.repository }}
+          # Tags: :latest on master, :sha-<short> on every build
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}   # :latest only on master
-            type=sha,format=short                                 # :sha-<short> on every build
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
 
       - name: Build and push
         uses: docker/build-push-action@v6
