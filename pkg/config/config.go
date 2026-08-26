@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/memory"
@@ -50,10 +51,11 @@ type Config struct {
 	ReflectionTrigger  string // "count", "cron", "manual"
 	ReflectionCount    int
 	ReflectionModel    string
-	ReflectionMode     string   // ENGRAM_REFLECTION_MODE: "v1" | "v2" (focal point)
-	RequireProvenance  bool     // ENGRAM_REQUIRE_PROVENANCE
-	AllowedProvenances []string // ENGRAM_ALLOWED_PROVENANCES (comma-separated)
-	ProvenanceMode     string   // ENGRAM_PROVENANCE_MODE: "warn" (default) | "strict" | "default"
+	ReflectionMode     string        // ENGRAM_REFLECTION_MODE: "v1" | "v2" (focal point)
+	DialecticTimeout   time.Duration // ENGRAM_DIALECTIC_TIMEOUT
+	RequireProvenance  bool          // ENGRAM_REQUIRE_PROVENANCE
+	AllowedProvenances []string      // ENGRAM_ALLOWED_PROVENANCES (comma-separated)
+	ProvenanceMode     string        // ENGRAM_PROVENANCE_MODE: "warn" (default) | "strict" | "default"
 }
 
 // ProvenanceFilterConfig builds a reflection.ProvenanceFilterConfig from the
@@ -117,6 +119,7 @@ func Load() *Config {
 		ReflectionCount:    envInt("ENGRAM_REFLECTION_COUNT", 10),
 		ReflectionModel:    envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
 		ReflectionMode:     envStr("ENGRAM_REFLECTION_MODE", ""),
+		DialecticTimeout:   envDuration("ENGRAM_DIALECTIC_TIMEOUT", 0),
 		RequireProvenance:  envBool("ENGRAM_REQUIRE_PROVENANCE", false),
 		AllowedProvenances: parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
 		ProvenanceMode:     provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),
@@ -206,6 +209,19 @@ func envFloat(key string, defaultVal float64) float64 {
 		}
 	}
 	return defaultVal
+}
+
+func envDuration(key string, defaultVal time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Printf("WARN: invalid duration for %s=%q, using default %v", key, v, defaultVal)
+		return defaultVal
+	}
+	return d
 }
 
 func envBool(key string, defaultVal bool) bool {

@@ -1363,6 +1363,9 @@ func (s *Server) reflectionConfig() reflection.Config {
 		if s.cfg.ReflectionMode != "" {
 			c.Mode = s.cfg.ReflectionMode
 		}
+		if s.cfg.DialecticTimeout > 0 {
+			c.DialecticTimeout = s.cfg.DialecticTimeout
+		}
 	}
 	return c
 }
