@@ -37,6 +37,10 @@ type Metrics struct {
 	EvaporationSweepDuration prometheus.Histogram // engram_evaporation_sweep_duration_seconds
 	// EvaporationEffectiveImportance samples query-time effective_importance, by type.
 	EvaporationEffectiveImportance *prometheus.HistogramVec // engram_evaporation_effective_importance
+	// ImportanceMean/ImportanceP90 export the CP2 importance-monitor rolling
+	// statistics per collection.
+	ImportanceMean *prometheus.GaugeVec // engram_importance_mean{collection}
+	ImportanceP90  *prometheus.GaugeVec // engram_importance_p90{collection}
 }
 
 // New creates a Metrics instance and registers all metrics into a fresh Registry.
@@ -98,6 +102,16 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"type"})
 	reg.MustRegister(evaporationSweepTotal, evaporationDeprecatedTotal, evaporationSweepDuration, evaporationEffectiveImportance)
 
+	importanceMean := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "engram_importance_mean",
+		Help: "Rolling mean importance of recent writes per collection (CP2 monitor).",
+	}, []string{"collection"})
+	importanceP90 := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "engram_importance_p90",
+		Help: "Rolling p90 importance of recent writes per collection (CP2 monitor).",
+	}, []string{"collection"})
+	reg.MustRegister(importanceMean, importanceP90)
+
 	if embedCache != nil {
 		reg.MustRegister(newEmbedCacheCollector(embedCache))
 	}
@@ -117,6 +131,8 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		EvaporationDeprecatedTotal:     evaporationDeprecatedTotal,
 		EvaporationSweepDuration:       evaporationSweepDuration,
 		EvaporationEffectiveImportance: evaporationEffectiveImportance,
+		ImportanceMean:                 importanceMean,
+		ImportanceP90:                  importanceP90,
 	}
 }
 

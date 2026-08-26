@@ -37,6 +37,16 @@ type Config struct {
 	// Evaporation (importance runtime decay). Feature-flagged off by default.
 	Evaporation memory.EvaporationConfig
 
+	// A-MAC (Adaptive Memory Admission Control) — spec v1. All gated behind
+	// AMACEnabled (ENGRAM_AMAC_ENABLED, default false). When disabled the
+	// server uses the legacy uniform policy (global dedup threshold, default
+	// importance 5 clamped [1,10], no rate limiting).
+	AMACEnabled        bool
+	DedupThresholds    map[memory.MemoryType]float64    // per-type dedup thresholds
+	ImportanceDefaults map[memory.MemoryType]float64    // per-type importance defaults
+	ImportanceBounds   map[memory.MemoryType][2]float64 // per-type [min,max] bounds
+	RateLimits         map[memory.MemoryType]int        // per-type hourly write limits
+
 	// Server
 	Transport string // "stdio", "http", "both"
 	HTTPPort  int
@@ -59,6 +69,30 @@ type Config struct {
 	RequireProvenance  bool          // ENGRAM_REQUIRE_PROVENANCE
 	AllowedProvenances []string      // ENGRAM_ALLOWED_PROVENANCES (comma-separated)
 	ProvenanceMode     string        // ENGRAM_PROVENANCE_MODE: "warn" (default) | "strict" | "default"
+
+	// Write Checkpoints (soft advisory feedback). All gated behind
+	// WriteCheckpointsEnabled (ENGRAM_WRITE_CHECKPOINTS_ENABLED, default false).
+	WriteCheckpointsEnabled bool
+
+	// CP1: Dedup Advisory
+	CPDedupAdvisoryEnabled  bool
+	CPDedupAdvisoryMinScore float64
+
+	// CP2: Importance Monitor
+	CPImportanceMonitorEnabled bool
+	CPImportanceWindow         int
+	CPImportanceThreshold      float64
+
+	// CP3: Rate Limit Warning
+	CPRateLimitWarningEnabled  bool
+	CPRateLimitWarningFraction float64
+
+	// CP4: Content Check
+	CPContentCheckEnabled bool
+	CPContentMinLength    int
+	CPContentMaxLength    int
+	CPRequireTags         bool
+	CPRequireSourceType   bool
 }
 
 // ProvenanceFilterConfig builds a reflection.ProvenanceFilterConfig from the
@@ -112,6 +146,13 @@ func Load() *Config {
 
 		Evaporation: loadEvaporationConfig(),
 
+		// A-MAC
+		AMACEnabled:        envBool("ENGRAM_AMAC_ENABLED", false),
+		DedupThresholds:    loadTypeDedupThresholds(),
+		ImportanceDefaults: DefaultImportanceDefaults(),
+		ImportanceBounds:   DefaultImportanceBounds(),
+		RateLimits:         loadRateLimits(),
+
 		// Server
 		Transport:     envStr("ENGRAM_TRANSPORT", "stdio"),
 		HTTPPort:      envInt("ENGRAM_HTTP_PORT", 8080),
@@ -128,6 +169,36 @@ func Load() *Config {
 		RequireProvenance:  envBool("ENGRAM_REQUIRE_PROVENANCE", false),
 		AllowedProvenances: parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
 		ProvenanceMode:     provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),
+
+		// Write Checkpoints
+		WriteCheckpointsEnabled: envBool("ENGRAM_WRITE_CHECKPOINTS_ENABLED", false),
+		// CP1
+		CPDedupAdvisoryEnabled:  envBool("ENGRAM_CP_DEDUP_ADVISORY_ENABLED", true),
+		CPDedupAdvisoryMinScore: envFloat("ENGRAM_CP_DEDUP_ADVISORY_MIN_SCORE", 0.70),
+		// CP2
+		CPImportanceMonitorEnabled: envBool("ENGRAM_CP_IMPORTANCE_MONITOR_ENABLED", true),
+		CPImportanceWindow:         envInt("ENGRAM_CP_IMPORTANCE_WINDOW", 50),
+		CPImportanceThreshold:      envFloat("ENGRAM_CP_IMPORTANCE_THRESHOLD", 7.0),
+		// CP3
+		CPRateLimitWarningEnabled:  envBool("ENGRAM_CP_RATE_LIMIT_WARNING_ENABLED", true),
+		CPRateLimitWarningFraction: envFloat("ENGRAM_CP_RATE_LIMIT_WARNING_FRACTION", 0.80),
+		// CP4
+		CPContentCheckEnabled: envBool("ENGRAM_CP_CONTENT_CHECK_ENABLED", true),
+		CPContentMinLength:    envInt("ENGRAM_CP_CONTENT_MIN_LENGTH", 20),
+		CPContentMaxLength:    envInt("ENGRAM_CP_CONTENT_MAX_LENGTH", 2000),
+		CPRequireTags:         envBool("ENGRAM_CP_REQUIRE_TAGS", true),
+		CPRequireSourceType:   envBool("ENGRAM_CP_REQUIRE_SOURCE_TYPE", true),
+	}
+}
+
+// DefaultImportanceDefaults returns the A-MAC per-type importance defaults
+// (spec v1 §3.2). directive defaults highest, event lowest.
+func DefaultImportanceDefaults() map[memory.MemoryType]float64 {
+	return map[memory.MemoryType]float64{
+		memory.TypeIdentity:  envFloat("ENGRAM_IMPORTANCE_DEFAULT_IDENTITY", 6),
+		memory.TypeDirective: envFloat("ENGRAM_IMPORTANCE_DEFAULT_DIRECTIVE", 7),
+		memory.TypeInsight:   envFloat("ENGRAM_IMPORTANCE_DEFAULT_INSIGHT", 5),
+		memory.TypeEvent:     envFloat("ENGRAM_IMPORTANCE_DEFAULT_EVENT", 4),
 	}
 }
 
@@ -145,6 +216,44 @@ func loadEvaporationConfig() memory.EvaporationConfig {
 	c.SweepIntervalH = envInt("ENGRAM_EVAPORATION_SWEEP_INTERVAL_H", c.SweepIntervalH)
 	c.SweepBatchLimit = envInt("ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT", c.SweepBatchLimit)
 	return c
+}
+
+// DefaultImportanceBounds returns the A-MAC per-type [min,max] importance
+// bounds (spec v1 §3.2). Values outside are clamped silently.
+func DefaultImportanceBounds() map[memory.MemoryType][2]float64 {
+	return map[memory.MemoryType][2]float64{
+		memory.TypeIdentity:  {envFloat("ENGRAM_IMPORTANCE_MIN_IDENTITY", 5), envFloat("ENGRAM_IMPORTANCE_MAX_IDENTITY", 9)},
+		memory.TypeDirective: {envFloat("ENGRAM_IMPORTANCE_MIN_DIRECTIVE", 5), envFloat("ENGRAM_IMPORTANCE_MAX_DIRECTIVE", 10)},
+		memory.TypeInsight:   {envFloat("ENGRAM_IMPORTANCE_MIN_INSIGHT", 3), envFloat("ENGRAM_IMPORTANCE_MAX_INSIGHT", 8)},
+		memory.TypeEvent:     {envFloat("ENGRAM_IMPORTANCE_MIN_EVENT", 1), envFloat("ENGRAM_IMPORTANCE_MAX_EVENT", 7)},
+	}
+}
+
+// DefaultRateLimits returns the A-MAC per-type hourly write limits (spec v1
+// §3.3), overridable via ENGRAM_RATE_LIMIT_{TYPE}.
+func DefaultRateLimits() map[memory.MemoryType]int {
+	return map[memory.MemoryType]int{
+		memory.TypeIdentity:  envInt("ENGRAM_RATE_LIMIT_IDENTITY", 5),
+		memory.TypeDirective: envInt("ENGRAM_RATE_LIMIT_DIRECTIVE", 10),
+		memory.TypeInsight:   envInt("ENGRAM_RATE_LIMIT_INSIGHT", 20),
+		memory.TypeEvent:     envInt("ENGRAM_RATE_LIMIT_EVENT", 50),
+	}
+}
+
+func loadRateLimits() map[memory.MemoryType]int { return DefaultRateLimits() }
+
+// loadTypeDedupThresholds builds the per-type dedup threshold map. Precedence
+// (spec R1/§3.1/§4.3): per-type env ENGRAM_DEDUP_THRESHOLD_{TYPE} > global env
+// ENGRAM_DEDUP_THRESHOLD > A-MAC hard-coded default (memory.TypeDedupThresholds).
+func loadTypeDedupThresholds() map[memory.MemoryType]float64 {
+	out := map[memory.MemoryType]float64{}
+	for t, amacDefault := range memory.TypeDedupThresholds {
+		// Global env overrides the A-MAC default; per-type env then overrides that.
+		effectiveDefault := envFloat("ENGRAM_DEDUP_THRESHOLD", amacDefault)
+		key := "ENGRAM_DEDUP_THRESHOLD_" + strings.ToUpper(string(t))
+		out[t] = envFloat(key, effectiveDefault)
+	}
+	return out
 }
 
 // provenanceMode validates the ENGRAM_PROVENANCE_MODE value. Valid values are

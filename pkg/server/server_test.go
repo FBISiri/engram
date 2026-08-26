@@ -2140,3 +2140,401 @@ func TestProvenanceMerge_HistoryCap(t *testing.T) {
 		t.Errorf("provenance_history should stay capped at %d, got %d", memory.MaxProvenanceHistory, len(h))
 	}
 }
+
+// =============================================================================
+// A-MAC (Adaptive Memory Admission Control) tests
+// =============================================================================
+
+// newAMACServer builds a server with A-MAC enabled and the per-type policy
+// maps populated (mirrors what config.Load() produces).
+func newAMACServer() (*Server, *mockStore) {
+	store := newMockStore()
+	embedder := newMockEmbedder()
+	cfg := &config.Config{
+		Weights:            memory.DefaultScoringWeights(),
+		Decay:              memory.DefaultDecayConfig(),
+		MMRLambda:          0.5,
+		DedupThreshold:     0.92,
+		AMACEnabled:        true,
+		DedupThresholds:    memory.TypeDedupThresholds,
+		ImportanceDefaults: config.DefaultImportanceDefaults(),
+		ImportanceBounds:   config.DefaultImportanceBounds(),
+		RateLimits:         config.DefaultRateLimits(),
+	}
+	return NewServer(store, embedder, cfg), store
+}
+
+// TestImportanceClamp verifies A-MAC per-type importance clamping:
+// event importance 9 → 7, directive importance 3 → 5, both flagged clamped.
+func TestImportanceClamp(t *testing.T) {
+	srv, _ := newAMACServer()
+
+	res, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "routine event observed at 9am today",
+		"type":        "event",
+		"importance":  float64(9),
+		"source_type": "reflection",
+	})
+	if err != nil {
+		t.Fatalf("add event failed: %v", err)
+	}
+	mem := parseAddMemory(t, res)
+	if mem.Importance != 7 {
+		t.Errorf("event importance = %v, want 7 (clamped into [1,7])", mem.Importance)
+	}
+	if c, _ := mem.Metadata["importance_clamped"].(bool); !c {
+		t.Errorf("expected metadata.importance_clamped=true, got %v", mem.Metadata["importance_clamped"])
+	}
+
+	// Fresh server so the directive cannot cross-dedup against the event above
+	// (the toy mock embedder collides most English sentences).
+	srvD, _ := newAMACServer()
+	res2, err := callTool(srvD, "memory_add", map[string]any{
+		"content":     "always back up the database before migrations",
+		"type":        "directive",
+		"importance":  float64(3),
+		"source_type": "reflection", // not user_input → no +1 governance boost
+	})
+	if err != nil {
+		t.Fatalf("add directive failed: %v", err)
+	}
+	mem2 := parseAddMemory(t, res2)
+	if mem2.Importance != 5 {
+		t.Errorf("directive importance = %v, want 5 (clamped into [5,10])", mem2.Importance)
+	}
+	if c, _ := mem2.Metadata["importance_clamped"].(bool); !c {
+		t.Errorf("expected metadata.importance_clamped=true for directive")
+	}
+}
+
+// TestAMACDisabledFallback verifies that with A-MAC off, the legacy uniform
+// policy holds: importance is not per-type clamped and the global dedup gate
+// applies.
+func TestAMACDisabledFallback(t *testing.T) {
+	srv, _ := newTestServer() // A-MAC disabled by default
+
+	res, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "routine event observed at 9am today",
+		"type":        "event",
+		"importance":  float64(9),
+		"source_type": "reflection",
+	})
+	if err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	mem := parseAddMemory(t, res)
+	if mem.Importance != 9 {
+		t.Errorf("disabled: event importance = %v, want 9 (no per-type clamp)", mem.Importance)
+	}
+	if _, ok := mem.Metadata["importance_clamped"]; ok {
+		t.Errorf("disabled: importance_clamped must not be set")
+	}
+
+	// Global 0.92 dedup gate: identical content is a duplicate.
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": "identity fact about the user for dedup", "type": "identity", "source_type": "reflection",
+	}); err != nil {
+		t.Fatalf("first identity add failed: %v", err)
+	}
+	dupRes, err := callTool(srv, "memory_add", map[string]any{
+		"content": "identity fact about the user for dedup", "type": "identity", "source_type": "reflection",
+	})
+	if err != nil {
+		t.Fatalf("second identity add failed: %v", err)
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(extractText(dupRes)), &resp)
+	if resp.Status != "duplicate" && resp.Status != "duplicate_provenance_merged" {
+		t.Errorf("disabled: identical identity should dedup at global 0.92, got status %q", resp.Status)
+	}
+}
+
+// TestAMACDisabledIgnoresRuntimeOverride verifies that a memory_apply_config
+// per-type dedup override (type_dedupe_thresholds) does NOT affect dedup when
+// ENGRAM_AMAC_ENABLED=false — the flag gates all A-MAC behavior as a unit (R4).
+func TestAMACDisabledIgnoresRuntimeOverride(t *testing.T) {
+	srv, _ := newTestServer() // A-MAC disabled
+
+	// Inject a per-type runtime override that would change directive dedup.
+	cfgJSON := `{"update_config":{"type_dedupe_thresholds":{"directive":0.10}}}`
+	if _, err := callTool2(srv, "memory_apply_config", map[string]any{"config": cfgJSON}); err != nil {
+		t.Fatalf("apply_config failed: %v", err)
+	}
+
+	// With A-MAC off, resolveDedupThreshold must return the legacy global 0.92,
+	// ignoring both the per-type override and the A-MAC default.
+	if got := srv.resolveDedupThreshold(memory.TypeDirective); got != 0.92 {
+		t.Errorf("disabled: directive threshold = %v, want 0.92 (override ignored)", got)
+	}
+	if got := srv.resolveDedupThreshold(memory.TypeInsight); got != 0.92 {
+		t.Errorf("disabled: insight threshold = %v, want 0.92 (A-MAC default ignored)", got)
+	}
+
+	// When A-MAC is on, the same override IS honored.
+	amac, _ := newAMACServer()
+	if _, err := callTool2(amac, "memory_apply_config", map[string]any{"config": cfgJSON}); err != nil {
+		t.Fatalf("apply_config (amac) failed: %v", err)
+	}
+	if got := amac.resolveDedupThreshold(memory.TypeDirective); got != 0.10 {
+		t.Errorf("enabled: directive threshold = %v, want 0.10 (override honored)", got)
+	}
+}
+
+// callTool2 dispatches tools not covered by callTool (e.g. memory_apply_config).
+func callTool2(srv *Server, toolName string, args map[string]any) (*mcp.CallToolResult, error) {
+	ctx := context.Background()
+	request := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: toolName, Arguments: args}}
+	if toolName == "memory_apply_config" {
+		return srv.handleApplyConfig(ctx, request)
+	}
+	return callTool(srv, toolName, args)
+}
+
+// =============================================================================
+// Write Discipline Checkpoints (spec v1) — integration cases
+// =============================================================================
+
+// checkpointConfig builds a config with all checkpoints enabled (defaults).
+func checkpointConfig() *config.Config {
+	return &config.Config{
+		Weights:                    memory.DefaultScoringWeights(),
+		Decay:                      memory.DefaultDecayConfig(),
+		MMRLambda:                  0.5,
+		DedupThreshold:             0.92,
+		WriteCheckpointsEnabled:    true,
+		CPDedupAdvisoryEnabled:     true,
+		CPDedupAdvisoryMinScore:    0.70,
+		CPImportanceMonitorEnabled: true,
+		CPImportanceWindow:         50,
+		CPImportanceThreshold:      7.0,
+		CPRateLimitWarningEnabled:  true,
+		CPRateLimitWarningFraction: 0.80,
+		CPContentCheckEnabled:      true,
+		CPContentMinLength:         20,
+		CPContentMaxLength:         2000,
+		CPRequireTags:              true,
+		CPRequireSourceType:        true,
+	}
+}
+
+// parseAdvisories extracts the advisories field from a tool response.
+func parseAdvisories(t *testing.T, result *mcp.CallToolResult) []Advisory {
+	t.Helper()
+	var resp struct {
+		Advisories []Advisory `json:"advisories"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (%s)", err, extractText(result))
+	}
+	return resp.Advisories
+}
+
+// TestHandleAdd_CheckpointsDisabled: feature flag off → no advisories key.
+func TestHandleAdd_CheckpointsDisabled(t *testing.T) {
+	srv, _ := newTestServer() // checkpoints off
+	result, err := callTool(srv, "memory_add", map[string]any{"content": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(extractText(result), "advisories") {
+		t.Errorf("disabled checkpoints must not emit advisories: %s", extractText(result))
+	}
+}
+
+// TestHandleAdd_CP1_SimilarMemory: cp1 helper emits similar_memory in the band.
+func TestHandleAdd_CP1_SimilarMemory(t *testing.T) {
+	srv := NewServer(newMockStore(), newMockEmbedder(), checkpointConfig())
+	cands := []memory.ScoredMemory{
+		{Memory: memory.Memory{ID: "a", Content: "near duplicate memory"}, Score: 0.78},
+		{Memory: memory.Memory{ID: "b", Content: "actual duplicate"}, Score: 0.95}, // above threshold → excluded
+	}
+	a := srv.cp1DedupAdvisory(cands, memory.TypeEvent)
+	if a == nil || a.Type != "similar_memory" {
+		t.Fatalf("expected similar_memory advisory, got %+v", a)
+	}
+	sims := a.Data["similar_memories"].([]map[string]any)
+	if len(sims) != 1 || sims[0]["id"] != "a" {
+		t.Errorf("expected only in-band candidate a, got %+v", sims)
+	}
+}
+
+// TestHandleAdd_CP1_NoSimilar: brand-new content, empty store → no advisory.
+func TestHandleAdd_CP1_NoSimilar(t *testing.T) {
+	srv := NewServer(newMockStore(), newMockEmbedder(), checkpointConfig())
+	a := srv.cp1DedupAdvisory(nil, memory.TypeEvent)
+	if a != nil {
+		t.Errorf("no candidates → no advisory, got %+v", a)
+	}
+	// Below floor is also excluded.
+	if a := srv.cp1DedupAdvisory([]memory.ScoredMemory{{Score: 0.5}}, memory.TypeEvent); a != nil {
+		t.Errorf("below floor → no advisory, got %+v", a)
+	}
+}
+
+// TestHandleAdd_CP2_ImportanceInflation: high importance → inflation advisory.
+func TestHandleAdd_CP2_ImportanceInflation(t *testing.T) {
+	cfg := checkpointConfig()
+	cfg.CPImportanceWindow = 2 // window/2 == 1 sample suffices
+	srv := NewServer(newMockStore(), newMockEmbedder(), cfg)
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "a routine event with sufficient content length here",
+		"type":        "event",
+		"importance":  float64(8),
+		"tags":        []interface{}{"routine"},
+		"source_type": "user_input",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasType(parseAdvisories(t, result), "importance_inflation") {
+		t.Errorf("expected importance_inflation, got %+v", parseAdvisories(t, result))
+	}
+}
+
+// TestHandleAdd_CP4_ShortContent: content < 20 chars → advisory.
+func TestHandleAdd_CP4_ShortContent(t *testing.T) {
+	srv := NewServer(newMockStore(), newMockEmbedder(), checkpointConfig())
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "short",
+		"type":        "event",
+		"tags":        []interface{}{"t"},
+		"source_type": "user_input",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasType(parseAdvisories(t, result), "content_too_short") {
+		t.Errorf("expected content_too_short, got %+v", parseAdvisories(t, result))
+	}
+}
+
+// TestHandleAdd_CP4_MissingTags: no tags → advisory.
+func TestHandleAdd_CP4_MissingTags(t *testing.T) {
+	srv := NewServer(newMockStore(), newMockEmbedder(), checkpointConfig())
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content":     "this content is definitely long enough for the checker",
+		"type":        "event",
+		"source_type": "user_input",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasType(parseAdvisories(t, result), "tags_missing") {
+		t.Errorf("expected tags_missing, got %+v", parseAdvisories(t, result))
+	}
+}
+
+// TestHandleAdd_MultipleAdvisories: short + no tags + no source_type → 3 advisories.
+func TestHandleAdd_MultipleAdvisories(t *testing.T) {
+	srv := NewServer(newMockStore(), newMockEmbedder(), checkpointConfig())
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content": "short",
+		"type":    "event",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advs := parseAdvisories(t, result)
+	for _, want := range []string{"content_too_short", "tags_missing", "source_type_missing"} {
+		if !hasType(advs, want) {
+			t.Errorf("expected %s in %+v", want, advs)
+		}
+	}
+}
+
+// TestHandleUpdate_Advisories: CP2/CP4 apply on the update path.
+func TestHandleUpdate_Advisories(t *testing.T) {
+	cfg := checkpointConfig()
+	cfg.CPImportanceWindow = 2
+	srv := NewServer(newMockStore(), newMockEmbedder(), cfg)
+	// Seed a memory to update.
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": "the original memory content that is long enough", "type": "event",
+		"importance": float64(8),
+		"tags":       []interface{}{"t"}, "source_type": "user_input",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := callTool(srv, "memory_update", map[string]any{
+		"old_content":          "the original memory content that is long enough",
+		"new_content":          "short",
+		"type":                 "event",
+		"importance":           float64(8),
+		"similarity_threshold": float64(0.85),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advs := parseAdvisories(t, result)
+	if !hasType(advs, "content_too_short") {
+		t.Errorf("expected content_too_short on update, got %+v", advs)
+	}
+	if !hasType(advs, "importance_inflation") {
+		t.Errorf("expected importance_inflation on update, got %+v", advs)
+	}
+}
+
+// TestHandleAdd_CP3_RateLimitWarning: driving writes to >=80% of a type's rate
+// limit (A-MAC + checkpoints enabled) emits a rate_limit_warning advisory.
+func TestHandleAdd_CP3_RateLimitWarning(t *testing.T) {
+	cfg := checkpointConfig()
+	cfg.AMACEnabled = true
+	cfg.RateLimits = map[memory.MemoryType]int{memory.TypeEvent: 5}              // 80% == 4 writes
+	cfg.DedupThresholds = map[memory.MemoryType]float64{memory.TypeEvent: 0.999} // avoid dedup skips
+	srv := NewServer(newMockStore(), newMockEmbedder(), cfg)
+
+	contents := []string{
+		"alpha distinct memory about the weather in tokyo today",
+		"bravo unrelated note regarding quarterly financial planning",
+		"charlie observation on kubernetes pod scheduling behavior",
+		"delta reflection concerning the history of jazz improvisation",
+	}
+	var last *mcp.CallToolResult
+	for i, c := range contents {
+		result, err := callTool(srv, "memory_add", map[string]any{
+			"content":     c,
+			"type":        "event",
+			"tags":        []interface{}{"t"},
+			"source_type": "user_input",
+		})
+		if err != nil {
+			t.Fatalf("add %d: %v", i, err)
+		}
+		last = result
+	}
+	if !hasType(parseAdvisories(t, last), "rate_limit_warning") {
+		t.Errorf("expected rate_limit_warning at 4/5 utilization, got %+v", parseAdvisories(t, last))
+	}
+}
+
+// TestHandleAdd_CP1_SimilarMemory_E2E: inserting a near-duplicate (score in the
+// [min_score, threshold) band) then adding via handleAdd yields a
+// similar_memory advisory in addResult.Advisories.
+func TestHandleAdd_CP1_SimilarMemory_E2E(t *testing.T) {
+	cfg := checkpointConfig()
+	// Keep near-duplicates out of the hard-dedup band so CP1 can advise on them.
+	cfg.DedupThreshold = 0.9999
+	srv := NewServer(newMockStore(), newMockEmbedder(), cfg)
+
+	// Seed a memory.
+	if _, err := callTool(srv, "memory_add", map[string]any{
+		"content": "Frank prefers concise technical answers in English",
+		"type":    "event", "tags": []interface{}{"pref"}, "source_type": "user_input",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Add a near-duplicate.
+	result, err := callTool(srv, "memory_add", map[string]any{
+		"content": "Frank likes short technical replies written in English",
+		"type":    "event", "tags": []interface{}{"pref"}, "source_type": "user_input",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advs := parseAdvisories(t, result)
+	if !hasType(advs, "similar_memory") {
+		t.Fatalf("expected similar_memory advisory, got %+v (raw: %s)", advs, extractText(result))
+	}
+}

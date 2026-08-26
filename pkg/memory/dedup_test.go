@@ -51,3 +51,28 @@ func TestHasSourceType(t *testing.T) {
 		t.Error("did not expect HasSourceType to find anything in nil history")
 	}
 }
+
+// TestPerTypeDedupThreshold verifies the A-MAC per-type dedup thresholds:
+// a candidate at cosine 0.87 is a duplicate for insight (thr 0.85) but not for
+// directive (thr 0.95).
+func TestPerTypeDedupThreshold(t *testing.T) {
+	cand := []ScoredMemory{{Score: 0.87}}
+
+	if IsDuplicateForType(cand, TypeInsight) == nil {
+		t.Errorf("insight: score 0.87 >= 0.85 should be a duplicate")
+	}
+	if IsDuplicateForType(cand, TypeDirective) != nil {
+		t.Errorf("directive: score 0.87 < 0.95 should NOT be a duplicate")
+	}
+	if IsDuplicateForType(cand, TypeIdentity) != nil {
+		t.Errorf("identity: score 0.87 < 0.95 should NOT be a duplicate")
+	}
+	if IsDuplicateForType(cand, TypeEvent) != nil {
+		t.Errorf("event: score 0.87 < 0.88 should NOT be a duplicate")
+	}
+
+	// DedupThresholdForType falls back to the global default for unknown types.
+	if got := DedupThresholdForType(MemoryType("bogus")); got != DefaultDedupThreshold {
+		t.Errorf("unknown type threshold = %v, want %v", got, DefaultDedupThreshold)
+	}
+}

@@ -4,6 +4,31 @@ package memory
 // is considered a duplicate of an existing one and will be skipped.
 const DefaultDedupThreshold = 0.92
 
+// TypeDedupThresholds holds the A-MAC per-type dedup thresholds (spec v1 §3.1).
+// identity/directive are protected with a high (0.95) threshold so similar-but-
+// distinct high-value memories coexist; insight is tightened to 0.85 to catch
+// reflection paraphrases; event to 0.88 to catch routine-event variants.
+var TypeDedupThresholds = map[MemoryType]float64{
+	TypeIdentity:  0.95,
+	TypeDirective: 0.95,
+	TypeInsight:   0.85,
+	TypeEvent:     0.88,
+}
+
+// DedupThresholdForType returns the A-MAC per-type dedup threshold, falling back
+// to the global DefaultDedupThreshold for unrecognized types.
+func DedupThresholdForType(t MemoryType) float64 {
+	if v, ok := TypeDedupThresholds[t]; ok {
+		return v
+	}
+	return DefaultDedupThreshold
+}
+
+// IsDuplicateForType is IsDuplicate using the A-MAC per-type threshold for t.
+func IsDuplicateForType(candidates []ScoredMemory, t MemoryType) *ScoredMemory {
+	return IsDuplicate(candidates, DedupThresholdForType(t))
+}
+
 // ProvenanceEntry records a single provenance merge event: when a content
 // duplicate arrives with a different source_type, the additional source is
 // appended to the existing memory's provenance_history.

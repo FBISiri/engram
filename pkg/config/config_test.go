@@ -426,3 +426,34 @@ func TestEvaporationConfigFromEnv(t *testing.T) {
 		t.Errorf("scalars not loaded: %+v", c)
 	}
 }
+
+// TestLoad_DedupThresholdGlobalFallback verifies per-type dedup thresholds fall
+// back to the GLOBAL env ENGRAM_DEDUP_THRESHOLD when the per-type var is unset,
+// while a per-type var still overrides the global (spec R1 precedence).
+func TestLoad_DedupThresholdGlobalFallback(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_DEDUP_THRESHOLD", "0.80")
+	t.Setenv("ENGRAM_DEDUP_THRESHOLD_INSIGHT", "0.70")
+	c := Load()
+
+	// identity/directive/event: no per-type var → global 0.80 wins over A-MAC default.
+	for _, ty := range []memory.MemoryType{memory.TypeIdentity, memory.TypeDirective, memory.TypeEvent} {
+		if got := c.DedupThresholds[ty]; got != 0.80 {
+			t.Errorf("%s threshold = %v, want 0.80 (global fallback)", ty, got)
+		}
+	}
+	// insight: per-type var overrides the global.
+	if got := c.DedupThresholds[memory.TypeInsight]; got != 0.70 {
+		t.Errorf("insight threshold = %v, want 0.70 (per-type override)", got)
+	}
+
+	// With no env at all, A-MAC hard-coded defaults apply.
+	clearEngramEnv(t)
+	c2 := Load()
+	if got := c2.DedupThresholds[memory.TypeInsight]; got != 0.85 {
+		t.Errorf("insight default = %v, want 0.85 (A-MAC default)", got)
+	}
+	if got := c2.DedupThresholds[memory.TypeIdentity]; got != 0.95 {
+		t.Errorf("identity default = %v, want 0.95 (A-MAC default)", got)
+	}
+}

@@ -38,6 +38,10 @@ type UpdateConfig struct {
 	DedupeThreshold float64 `json:"dedupe_threshold,omitempty"`
 	MaxEntries      int     `json:"max_entries,omitempty"`
 	EvictionPolicy  string  `json:"eviction_policy,omitempty"`
+	// TypeDedupThresholds hot-reloads A-MAC per-type dedup thresholds (spec v1
+	// R5). Keys are memory types (identity, event, insight, directive). Setting
+	// a type's threshold to 0 reverts it to the global/default.
+	TypeDedupThresholds map[string]float64 `json:"type_dedupe_thresholds,omitempty"`
 }
 
 // EvaporationConfigInput holds hot-reloadable evaporation settings. Pointer/
@@ -61,11 +65,12 @@ type MemoryConfig struct {
 // runtimeOverrides stores active config overrides under a RWMutex.
 // nil pointer fields mean "use server default".
 type runtimeOverrides struct {
-	mu      sync.RWMutex
-	weights *memory.ScoringWeights
-	dedup   *float64
-	topK    *int
-	evap    *memory.EvaporationConfig
+	mu        sync.RWMutex
+	weights   *memory.ScoringWeights
+	dedup     *float64
+	topK      *int
+	evap      *memory.EvaporationConfig
+	typeDedup map[memory.MemoryType]float64 // per-type dedup overrides (A-MAC R5)
 }
 
 func (o *runtimeOverrides) getWeights(def memory.ScoringWeights) memory.ScoringWeights {
@@ -95,6 +100,18 @@ func (o *runtimeOverrides) getEvaporation(def memory.EvaporationConfig) memory.E
 		return *o.evap
 	}
 	return def
+}
+
+// getTypeDedupThreshold returns the runtime per-type dedup override for t and
+// whether one is set.
+func (o *runtimeOverrides) getTypeDedupThreshold(t memory.MemoryType) (float64, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	if o.typeDedup == nil {
+		return 0, false
+	}
+	v, ok := o.typeDedup[t]
+	return v, ok
 }
 
 // =============================================================================
@@ -133,6 +150,21 @@ func (s *Server) handleApplyConfig(ctx context.Context, request mcp.CallToolRequ
 	}
 	if cfg.Evaporation != nil {
 		s.applyEvaporationOverride(cfg.Evaporation)
+	}
+	for k, v := range cfg.UpdateConfig.TypeDedupThresholds {
+		mt := memory.MemoryType(k)
+		if !memory.ValidTypes[mt] {
+			continue
+		}
+		if s.overrides.typeDedup == nil {
+			s.overrides.typeDedup = map[memory.MemoryType]float64{}
+		}
+		if v == 0 {
+			// 0 reverts this type to the global/default threshold.
+			delete(s.overrides.typeDedup, mt)
+		} else {
+			s.overrides.typeDedup[mt] = v
+		}
 	}
 
 	type result struct {

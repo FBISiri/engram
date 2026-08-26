@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -36,24 +37,30 @@ const strictProvenanceRejectMsg = "source_type not permitted (ENGRAM_PROVENANCE_
 
 // Server wraps the MCP server with Engram's memory operations.
 type Server struct {
-	store          memory.Store
-	embedder       embedding.Embedder
-	weights        memory.ScoringWeights
-	decay          memory.DecayConfig
-	evapCfg        memory.EvaporationConfig
-	mmrLambda      float64
-	dedupThreshold float64
-	mcpServer      *mcpserver.MCPServer
-	embedCache     memory.EmbedCache      // optional; set via SetEmbedCache
-	metrics        *engrammetrics.Metrics // optional; set via SetMetrics
-	traj           *trajectory.Logger     // optional; set via SetTrajectoryLogger
-	overrides      runtimeOverrides       // hot-reloadable config
-	cfg            *config.Config         // full loaded config
+	store             memory.Store
+	embedder          embedding.Embedder
+	weights           memory.ScoringWeights
+	decay             memory.DecayConfig
+	evapCfg           memory.EvaporationConfig
+	mmrLambda         float64
+	dedupThreshold    float64
+	mcpServer         *mcpserver.MCPServer
+	embedCache        memory.EmbedCache      // optional; set via SetEmbedCache
+	metrics           *engrammetrics.Metrics // optional; set via SetMetrics
+	traj              *trajectory.Logger     // optional; set via SetTrajectoryLogger
+	overrides         runtimeOverrides       // hot-reloadable config
+	cfg               *config.Config         // full loaded config
+	rateLimiter       *RateLimiter           // A-MAC per-type write limiter
+	importanceMonitor *ImportanceMonitor     // CP2 monitor; nil unless write checkpoints enabled
+	contentChecker    *ContentChecker        // CP4 checker; nil unless write checkpoints enabled
 }
 
 // SetMetrics registers prometheus metrics so handlers can record latency.
 func (s *Server) SetMetrics(m *engrammetrics.Metrics) {
 	s.metrics = m
+	if s.importanceMonitor != nil {
+		s.importanceMonitor.SetMetrics(m)
+	}
 }
 
 // evaporationConfig returns the server's effective evaporation config, honoring
@@ -104,6 +111,24 @@ func NewServer(store memory.Store, embedder embedding.Embedder, cfg *config.Conf
 		mmrLambda:      cfg.MMRLambda,
 		dedupThreshold: cfg.DedupThreshold,
 		cfg:            cfg,
+	}
+
+	rateLimits := cfg.RateLimits
+	if rateLimits == nil {
+		rateLimits = config.DefaultRateLimits()
+	}
+	s.rateLimiter = NewRateLimiter(rateLimits)
+
+	// Write Discipline Checkpoints (spec v1): allocate monitor/checker only when
+	// the master switch is enabled — zero overhead otherwise (R11).
+	if cfg.WriteCheckpointsEnabled {
+		s.importanceMonitor = NewImportanceMonitor(cfg.CPImportanceWindow, cfg.CPImportanceThreshold)
+		s.contentChecker = &ContentChecker{
+			MinContentLength:  cfg.CPContentMinLength,
+			MaxContentLength:  cfg.CPContentMaxLength,
+			RequireTags:       cfg.CPRequireTags,
+			RequireSourceType: cfg.CPRequireSourceType,
+		}
 	}
 
 	s.mcpServer = mcpserver.NewMCPServer(
@@ -565,12 +590,27 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(fmt.Sprintf("invalid memory type: %s", memType)), nil
 	}
 
-	importance := request.GetFloat("importance", 5.0)
-	if importance < 1 {
-		importance = 1
-	}
-	if importance > 10 {
-		importance = 10
+	sourceType := request.GetString("source_type", "")
+
+	var importance float64
+	var importanceClamped bool
+	if s.amacEnabled() {
+		importance, importanceClamped = s.amacImportance(memType, request.GetFloat("importance", 0))
+		// R6 governance: a directive from Frank (user_input) gets a +1 boost.
+		if memType == memory.TypeDirective && sourceType == "user_input" {
+			importance++
+			if importance > 10 {
+				importance = 10
+			}
+		}
+	} else {
+		importance = request.GetFloat("importance", 5.0)
+		if importance < 1 {
+			importance = 1
+		}
+		if importance > 10 {
+			importance = 10
+		}
 	}
 
 	source := request.GetString("source", "agent")
@@ -604,12 +644,34 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 
 	// C1 provenance: soft-require source_type (shared helper). sourceType is
 	// also consumed by checkDedup below for source_type-aware merging (C2).
-	sourceType := request.GetString("source_type", "")
 	if mem.Metadata == nil {
 		mem.Metadata = map[string]any{}
 	}
 	if err := s.applyProvenance(mem.Metadata, sourceType, sourceType != "", "memory_add"); err != nil {
 		return mcp.NewToolResultError(provenanceMCPMsg(err)), nil
+	}
+
+	// A-MAC (R2/R6): annotate importance clamp + identity governance flag, then
+	// enforce the per-type write-frequency limit before spending an embedding.
+	if s.amacEnabled() {
+		if importanceClamped {
+			mem.Metadata["importance_clamped"] = true
+		}
+		if memType == memory.TypeIdentity && sourceType == "reflection" {
+			mem.Metadata["needs_review"] = true
+		}
+		if err := s.rateLimiter.Allow(mem.Collection, memType); err != nil {
+			var rle *RateLimitError
+			if errors.As(err, &rle) {
+				data, _ := json.Marshal(map[string]any{
+					"status":              "rate_limited",
+					"type":                string(memType),
+					"retry_after_seconds": rle.RetryAfterSeconds,
+					"message":             rle.Error(),
+				})
+				return mcp.NewToolResultText(string(data)), nil
+			}
+		}
 	}
 
 	// Embed content
@@ -625,14 +687,14 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	}
 
 	// Check for duplicates (child span)
-	dupData, dupFound, dupErr := s.checkDedup(ctx, vec, content, sourceType)
+	dedupResult, dupErr := s.checkDedup(ctx, vec, content, sourceType, memType)
 	if dupErr != nil {
 		span.RecordError(dupErr)
 		span.SetStatus(codes.Error, "dedup check error")
 		log.Printf("[ERROR] engram memory_add: dedup check failed: %v", dupErr)
 		return mcp.NewToolResultError(fmt.Sprintf("dedup check error: %v", dupErr)), nil
 	}
-	if dupFound {
+	if dedupResult.DupFound {
 		span.SetAttributes(attribute.Bool("dedup.hit", true))
 		if s.metrics != nil {
 			s.metrics.DedupHits.WithLabelValues(mem.Collection, "server_side_092").Inc()
@@ -650,7 +712,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 				Caller:    CallerTypeFromContext(ctx),
 			})
 		}
-		return mcp.NewToolResultText(string(dupData)), nil
+		return mcp.NewToolResultText(string(dedupResult.DupData)), nil
 	}
 
 	span.SetAttributes(attribute.Bool("dedup.hit", false))
@@ -664,12 +726,31 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 
 	// Return the created memory
 	type addResult struct {
-		Status string         `json:"status"`
-		Memory *memory.Memory `json:"memory"`
+		Status     string         `json:"status"`
+		Memory     *memory.Memory `json:"memory"`
+		Advisories []Advisory     `json:"advisories,omitempty"`
+	}
+	// Write Discipline Checkpoints (advisory-only, non-blocking): CP1→CP4.
+	var advisories []Advisory
+	if s.writeCheckpointsEnabled() {
+		if a := s.cp1DedupAdvisory(dedupResult.Candidates, memType); a != nil {
+			advisories = append(advisories, *a)
+		}
+		if a := s.cp2Importance(mem.Collection, importance); a != nil {
+			advisories = append(advisories, *a)
+		}
+		if a := s.cp3RateLimitAdvisory(mem.Collection, memType); a != nil {
+			advisories = append(advisories, *a)
+		}
+		advisories = append(advisories, s.cp4Content(content, tags, sourceType)...)
+		for _, a := range advisories {
+			logAdvisory(a)
+		}
 	}
 	result := addResult{
-		Status: "created",
-		Memory: mem,
+		Status:     "created",
+		Memory:     mem,
+		Advisories: advisories,
 	}
 	data, err := json.Marshal(result)
 	if err != nil {
@@ -697,17 +778,29 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-// checkDedup runs deduplication check as a child span. Returns (json bytes, true) if duplicate found.
+// DedupResult carries the outcome of a dedup check. When DupFound is true,
+// DupData holds the JSON response for the duplicate case. Candidates holds the
+// top-3 candidates from the dedup search (reused by CP1 for the near-duplicate
+// advisory — zero extra search cost).
+type DedupResult struct {
+	DupFound   bool
+	DupData    []byte
+	Candidates []memory.ScoredMemory
+}
+
+// checkDedup runs deduplication check as a child span. Returns a *DedupResult;
+// DupFound is true when a content duplicate was found.
 // incomingSourceType is the source_type of the memory being added; it drives
 // source_type-aware provenance merging (C2) when a content duplicate is found.
-func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, incomingSourceType string) ([]byte, bool, error) {
+func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, incomingSourceType string, memType memory.MemoryType) (*DedupResult, error) {
 	ctx, span := tracer.Start(ctx, "engram.memory.dedup_check")
 	defer span.End()
 	start := time.Now()
 
+	threshold := s.resolveDedupThreshold(memType)
 	span.SetAttributes(
 		attribute.Int("query.length", len(content)),
-		attribute.Float64("threshold", s.dedupThreshold),
+		attribute.Float64("threshold", threshold),
 	)
 
 	resolvedCol := CollectionFromContext(ctx)
@@ -723,7 +816,7 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 			attribute.Float64("top_score", 0),
 			attribute.Int64("latency_ms", time.Since(start).Milliseconds()),
 		)
-		return nil, false, err
+		return nil, err
 	}
 
 	topScore := 0.0
@@ -731,7 +824,7 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 		topScore = dupeResults[0].Score
 	}
 
-	dup := memory.IsDuplicate(dupeResults, s.overrides.getDedupThreshold(s.dedupThreshold))
+	dup := memory.IsDuplicate(dupeResults, threshold)
 
 	decision := "add"
 	if dup != nil {
@@ -795,10 +888,10 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 		}
 
 		data, _ := json.Marshal(result)
-		return data, true, nil
+		return &DedupResult{DupFound: true, DupData: data, Candidates: dupeResults}, nil
 	}
 
-	return nil, false, nil
+	return &DedupResult{DupFound: false, Candidates: dupeResults}, nil
 }
 
 // provenanceMerge updates an existing memory's provenance metadata when a
@@ -1062,6 +1155,12 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(provenanceMCPMsg(err)), nil
 	}
 
+	// R6 governance: when replacing an identity/directive, record the old
+	// content on the new memory for audit (best-effort; only the top match).
+	if s.amacEnabled() && (memType == memory.TypeIdentity || memType == memory.TypeDirective) && len(deletedMemories) > 0 {
+		mem.Metadata["superseded_content"] = deletedMemories[0].Content
+	}
+
 	if err := s.store.Insert(ctx, mem, newVec); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
 	}
@@ -1075,6 +1174,20 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		DeletedCount int            `json:"deleted_count"`
 		Deleted      []deletedItem  `json:"deleted"`
 		NewMemory    *memory.Memory `json:"new_memory"`
+		Advisories   []Advisory     `json:"advisories,omitempty"`
+	}
+
+	// Write Discipline Checkpoints (R9): CP2 (importance trend) and CP4
+	// (content quality) apply on update; CP1/CP3 do not.
+	var advisories []Advisory
+	if s.writeCheckpointsEnabled() {
+		if a := s.cp2Importance(mem.Collection, importance); a != nil {
+			advisories = append(advisories, *a)
+		}
+		advisories = append(advisories, s.cp4Content(newContent, tags, sourceTypeU)...)
+		for _, a := range advisories {
+			logAdvisory(a)
+		}
 	}
 
 	result := updateResult{
@@ -1082,6 +1195,7 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		DeletedCount: deletedCount,
 		Deleted:      deleted,
 		NewMemory:    mem,
+		Advisories:   advisories,
 	}
 
 	data, _ := json.Marshal(result)
@@ -1447,4 +1561,73 @@ func getStringSlice(request mcp.CallToolRequest, key string) []string {
 		return nil
 	}
 	return result
+}
+
+// =============================================================================
+// A-MAC helpers (Adaptive Memory Admission Control, spec v1)
+// =============================================================================
+
+// amacEnabled reports whether A-MAC admission control is active.
+func (s *Server) amacEnabled() bool {
+	return s.cfg != nil && s.cfg.AMACEnabled
+}
+
+// importanceDefaults returns the configured A-MAC per-type importance defaults,
+// falling back to package defaults when the config lacks them (e.g. in tests).
+func (s *Server) importanceDefaults() map[memory.MemoryType]float64 {
+	if s.cfg != nil && s.cfg.ImportanceDefaults != nil {
+		return s.cfg.ImportanceDefaults
+	}
+	return config.DefaultImportanceDefaults()
+}
+
+// importanceBounds returns the configured A-MAC per-type [min,max] bounds,
+// falling back to package defaults when absent.
+func (s *Server) importanceBounds() map[memory.MemoryType][2]float64 {
+	if s.cfg != nil && s.cfg.ImportanceBounds != nil {
+		return s.cfg.ImportanceBounds
+	}
+	return config.DefaultImportanceBounds()
+}
+
+// amacImportance applies the A-MAC per-type importance default (when the caller
+// omitted importance, i.e. provided <= 0) and clamps into the per-type bounds.
+// Returns the resolved importance and whether a clamp occurred.
+func (s *Server) amacImportance(memType memory.MemoryType, provided float64) (float64, bool) {
+	imp := provided
+	if imp <= 0 {
+		imp = s.importanceDefaults()[memType]
+	}
+	b := s.importanceBounds()[memType]
+	lo, hi := b[0], b[1]
+	clamped := false
+	if lo > 0 && imp < lo {
+		imp, clamped = lo, true
+	}
+	if hi > 0 && imp > hi {
+		imp, clamped = hi, true
+	}
+	return imp, clamped
+}
+
+// resolveDedupThreshold returns the dedup threshold for memType. A runtime
+// per-type override (memory_apply_config) wins; otherwise when A-MAC is enabled
+// the per-type config/default applies; otherwise the legacy global threshold
+// (with its runtime override) is used.
+func (s *Server) resolveDedupThreshold(memType memory.MemoryType) float64 {
+	// R4/§4.3: ALL A-MAC behavior (per-type config AND the memory_apply_config
+	// runtime override) is gated by the flag as a unit. With A-MAC off, this
+	// returns exactly the legacy global threshold (incl. its runtime override).
+	if !s.amacEnabled() {
+		return s.overrides.getDedupThreshold(s.dedupThreshold)
+	}
+	if v, ok := s.overrides.getTypeDedupThreshold(memType); ok {
+		return v
+	}
+	if s.cfg.DedupThresholds != nil {
+		if v, ok := s.cfg.DedupThresholds[memType]; ok && v > 0 {
+			return v
+		}
+	}
+	return memory.DedupThresholdForType(memType)
 }

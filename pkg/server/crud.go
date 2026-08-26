@@ -55,15 +55,33 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	importance := body.Importance
-	if importance <= 0 {
-		importance = 5.0
+	var rawSourceType string
+	if body.Metadata != nil {
+		rawSourceType, _ = body.Metadata["source_type"].(string)
 	}
-	if importance < 1 {
-		importance = 1
-	}
-	if importance > 10 {
-		importance = 10
+
+	var importance float64
+	var importanceClamped bool
+	if h.srv.amacEnabled() {
+		importance, importanceClamped = h.srv.amacImportance(memType, body.Importance)
+		// R6 governance: a directive from Frank (user_input) gets a +1 boost.
+		if memType == memory.TypeDirective && rawSourceType == "user_input" {
+			importance++
+			if importance > 10 {
+				importance = 10
+			}
+		}
+	} else {
+		importance = body.Importance
+		if importance <= 0 {
+			importance = 5.0
+		}
+		if importance < 1 {
+			importance = 1
+		}
+		if importance > 10 {
+			importance = 10
+		}
 	}
 
 	source := body.Source
@@ -114,6 +132,29 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A-MAC (R2/R6): annotate importance clamp + identity governance flag, then
+	// enforce the per-type write-frequency limit before spending an embedding.
+	if h.srv.amacEnabled() {
+		if importanceClamped {
+			mem.Metadata["importance_clamped"] = true
+		}
+		if memType == memory.TypeIdentity && sourceType == "reflection" {
+			mem.Metadata["needs_review"] = true
+		}
+		if err := h.srv.rateLimiter.Allow(mem.Collection, memType); err != nil {
+			var rle *RateLimitError
+			if errors.As(err, &rle) {
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{
+					"status":              "rate_limited",
+					"type":                string(memType),
+					"retry_after_seconds": rle.RetryAfterSeconds,
+					"error":               rle.Error(),
+				})
+				return
+			}
+		}
+	}
+
 	embedStart := time.Now()
 	vec, err := h.srv.embedder.Embed(r.Context(), body.Content)
 	if h.srv.metrics != nil {
@@ -129,7 +170,27 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, mem)
+	// Write Discipline Checkpoints (R10): CP2/CP3/CP4 apply on REST create.
+	// CP1 is not run here (this path performs no dedup search).
+	var advisories []Advisory
+	if h.srv.writeCheckpointsEnabled() {
+		if a := h.srv.cp2Importance(mem.Collection, importance); a != nil {
+			advisories = append(advisories, *a)
+		}
+		if a := h.srv.cp3RateLimitAdvisory(mem.Collection, memType); a != nil {
+			advisories = append(advisories, *a)
+		}
+		advisories = append(advisories, h.srv.cp4Content(body.Content, tags, sourceType)...)
+		for _, a := range advisories {
+			logAdvisory(a)
+		}
+	}
+
+	type createResponse struct {
+		memory.Memory
+		Advisories []Advisory `json:"advisories,omitempty"`
+	}
+	writeJSON(w, http.StatusCreated, createResponse{Memory: *mem, Advisories: advisories})
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -480,7 +541,25 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, mem)
+	// Write Discipline Checkpoints (R10): PUT is an update, so CP2/CP4 apply
+	// (CP1/CP3 do not). Mirrors the POST createResponse wrap.
+	mem.Collection = CollectionFromContext(r.Context())
+	var advisories []Advisory
+	if h.srv.writeCheckpointsEnabled() {
+		if a := h.srv.cp2Importance(mem.Collection, importance); a != nil {
+			advisories = append(advisories, *a)
+		}
+		advisories = append(advisories, h.srv.cp4Content(body.Content, tags, sourceType)...)
+		for _, a := range advisories {
+			logAdvisory(a)
+		}
+	}
+
+	type putResponse struct {
+		memory.Memory
+		Advisories []Advisory `json:"advisories,omitempty"`
+	}
+	writeJSON(w, http.StatusOK, putResponse{Memory: *mem, Advisories: advisories})
 }
 
 // ─────────────────────────────────────────────────────────────
