@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	defaultDialecticTimeout = 15 * time.Second
-	maxDialecticTimeout     = 30 * time.Second
+	defaultDialecticTimeout = 30 * time.Second
+	maxDialecticTimeout     = 60 * time.Second
 )
 
 type dialecticStatus int

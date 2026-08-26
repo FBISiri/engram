@@ -85,7 +85,7 @@ type Config struct {
 	// EvidenceSearchTimeout is the per-question store.Search timeout. Default: 3s, hard max: 10s.
 	EvidenceSearchTimeout time.Duration
 
-	// DialecticTimeout is the per-question LLM call timeout for Part3. Default: 15s, hard max: 30s.
+	// DialecticTimeout is the per-question LLM call timeout for Part3. Default: 30s, hard max: 60s.
 	DialecticTimeout time.Duration
 
 	// MinInsightConfidence is the minimum confidence for a dialectic insight to
