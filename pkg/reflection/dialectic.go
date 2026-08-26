@@ -45,6 +45,9 @@ type DialecticStats struct {
 	DroppedLowConf     int      `json:"dropped_low_conf"`
 	LLMCalls           int      `json:"llm_calls"`
 	LLMMs              int64    `json:"llm_ms"`
+	LLMConfHighCount   int      `json:"llm_conf_high_count"`
+	LLMConfMidCount    int      `json:"llm_conf_mid_count"`
+	LLMConfLowCount    int      `json:"llm_conf_low_count"`
 	Errors             []string `json:"errors,omitempty"`
 }
 
@@ -129,10 +132,18 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 
 	_ = g.Wait()
 
-	for _, s := range statuses {
+	for i, s := range statuses {
 		switch s {
 		case dialecticStatusOk:
 			stats.OkCount++
+			conf := insights[i].Confidence
+			if conf >= 0.6 {
+				stats.LLMConfHighCount++
+			} else if conf > 0 {
+				stats.LLMConfMidCount++
+			} else {
+				stats.LLMConfLowCount++
+			}
 		case dialecticStatusFailed:
 			stats.FailedCount++
 		case dialecticStatusDroppedNoEvidence:

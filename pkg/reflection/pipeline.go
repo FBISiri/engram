@@ -87,6 +87,9 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 	result.DialecticDroppedLowConf = dStats.DroppedLowConf
 	result.DialecticLLMCalls = dStats.LLMCalls
 	result.DialecticLLMMs = dStats.LLMMs
+	result.LLMConfHighCount = dStats.LLMConfHighCount
+	result.LLMConfMidCount = dStats.LLMConfMidCount
+	result.LLMConfLowCount = dStats.LLMConfLowCount
 	result.Errors = append(result.Errors, dStats.Errors...)
 
 	if !e.cfg.DryRun {
