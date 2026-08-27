@@ -34,10 +34,11 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
+          # Tags: semver version, semver major.minor, :latest on stable releases (no -rc/-beta)
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}   # tag stable releases (no -rc/-beta) as :latest
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
