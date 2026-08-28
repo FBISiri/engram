@@ -12,6 +12,7 @@ Writes go through the Engram REST API. NOTE: the live server routes are
 auth and paths are configurable so this can adapt if the surface changes.
 """
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -168,6 +169,18 @@ class EngramClient:
         }
         url = self.base_url + "/collections/" + collection + "/memories"
         r = self.session.post(url, json=body, headers=self._headers(collection), timeout=self.timeout)
+        if r.status_code == 409:
+            try:
+                dedup = r.json()
+            except ValueError:
+                dedup = {}
+            existing_id = dedup.get("existing_id")
+            if existing_id:
+                logging.getLogger("consolidation.merge").info(
+                    "server-side dedup: reusing existing memory %s (similarity=%s)",
+                    existing_id, dedup.get("similarity"),
+                )
+                return str(existing_id)
         r.raise_for_status()
         data = r.json()
         new_id = str(data.get("id", ""))
