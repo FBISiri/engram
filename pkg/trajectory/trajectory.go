@@ -31,6 +31,12 @@ type Record struct {
 	Tags     []string `json:"tags,omitempty"`
 	DedupHit bool     `json:"dedup_hit,omitempty"`
 
+	// candidate-side fields (D4 pre-admission flow recording; omitempty keeps old JSONL parseable).
+	Importance        float64 `json:"importance,omitempty"`         // resolved importance (post-AMAC clamp if enabled)
+	SourceType        string  `json:"source_type,omitempty"`        // source_type provenance value
+	AdmissionDecision string  `json:"admission_decision,omitempty"` // admitted|dedup_rejected|rate_limited|error
+	GateDetails       string  `json:"gate_details,omitempty"`       // human-readable gate detail
+
 	// common
 	LatencyMs int64  `json:"latency_ms"`
 	Caller    string `json:"caller,omitempty"`

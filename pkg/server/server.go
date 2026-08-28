@@ -651,6 +651,31 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(provenanceMCPMsg(err)), nil
 	}
 
+	// D4: pre-admission candidate flow recording. Register a single deferred
+	// trajectory write that fires once per call at function exit, tagged with
+	// the admission decision reached by the gates below (rate-limit / embed /
+	// dedup / insert). Async + non-blocking; replaces the old per-branch
+	// update logs.
+	admissionDecision := "admitted"
+	gateDetails := ""
+	if s.traj != nil {
+		defer func() {
+			s.traj.Log(trajectory.Record{
+				Timestamp:         time.Now().UTC().Format(time.RFC3339),
+				Operation:         "candidate",
+				Content:           content,
+				Type:              string(memType),
+				Importance:        importance,
+				SourceType:        sourceType,
+				Tags:              tags,
+				AdmissionDecision: admissionDecision,
+				GateDetails:       gateDetails,
+				LatencyMs:         time.Since(addStart).Milliseconds(),
+				Caller:            CallerTypeFromContext(ctx),
+			})
+		}()
+	}
+
 	// A-MAC (R2/R6): annotate importance clamp + identity governance flag, then
 	// enforce the per-type write-frequency limit before spending an embedding.
 	if s.amacEnabled() {
@@ -663,6 +688,8 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		if err := s.rateLimiter.Allow(mem.Collection, memType); err != nil {
 			var rle *RateLimitError
 			if errors.As(err, &rle) {
+				admissionDecision = "rate_limited"
+				gateDetails = fmt.Sprintf("rate_limited: retry_after=%ds", rle.RetryAfterSeconds)
 				data, _ := json.Marshal(map[string]any{
 					"status":              "rate_limited",
 					"type":                string(memType),
@@ -683,6 +710,8 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "embedding error")
+		admissionDecision = "error"
+		gateDetails = fmt.Sprintf("embed_error: %v", err)
 		return mcp.NewToolResultError(fmt.Sprintf("embedding error: %v", err)), nil
 	}
 
@@ -692,6 +721,8 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		span.RecordError(dupErr)
 		span.SetStatus(codes.Error, "dedup check error")
 		log.Printf("[ERROR] engram memory_add: dedup check failed: %v", dupErr)
+		admissionDecision = "error"
+		gateDetails = fmt.Sprintf("dedup_error: %v", dupErr)
 		return mcp.NewToolResultError(fmt.Sprintf("dedup check error: %v", dupErr)), nil
 	}
 	if dedupResult.DupFound {
@@ -700,18 +731,15 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 			s.metrics.DedupHits.WithLabelValues(mem.Collection, "server_side_092").Inc()
 			s.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()
 		}
-		if s.traj != nil {
-			s.traj.Log(trajectory.Record{
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Operation: "update",
-				Content:   content,
-				Type:      string(memType),
-				Tags:      tags,
-				DedupHit:  true,
-				LatencyMs: time.Since(addStart).Milliseconds(),
-				Caller:    CallerTypeFromContext(ctx),
-			})
+		admissionDecision = "dedup_rejected"
+		var dup struct {
+			Existing struct {
+				ID    string  `json:"id"`
+				Score float64 `json:"score"`
+			} `json:"existing"`
 		}
+		_ = json.Unmarshal(dedupResult.DupData, &dup)
+		gateDetails = fmt.Sprintf("dedup score=%.4f against id=%s", dup.Existing.Score, dup.Existing.ID)
 		return mcp.NewToolResultText(string(dedupResult.DupData)), nil
 	}
 
@@ -721,6 +749,8 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	if err := s.store.Insert(ctx, mem, vec); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "insert error")
+		admissionDecision = "error"
+		gateDetails = fmt.Sprintf("insert_error: %v", err)
 		return mcp.NewToolResultError(fmt.Sprintf("insert error: %v", err)), nil
 	}
 
@@ -757,19 +787,8 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
 	}
 
-	// Trajectory logging (async, non-blocking)
-	if s.traj != nil {
-		s.traj.Log(trajectory.Record{
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Operation: "update",
-			Content:   content,
-			Type:      string(memType),
-			Tags:      tags,
-			DedupHit:  false,
-			LatencyMs: time.Since(addStart).Milliseconds(),
-			Caller:    CallerTypeFromContext(ctx),
-		})
-	}
+	// Trajectory logging happens via the deferred candidate record registered
+	// above (D4); admissionDecision remains "admitted" on this success path.
 
 	if s.metrics != nil {
 		s.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()

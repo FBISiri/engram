@@ -11,6 +11,7 @@ import (
 
 	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/trajectory"
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -22,6 +23,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use POST"})
 		return
 	}
+	createStart := time.Now()
 
 	var body struct {
 		Type       string         `json:"type"`
@@ -132,6 +134,29 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// D4: pre-admission candidate flow recording. Register a single deferred
+	// trajectory write that fires once at handler exit, tagged with the
+	// admission decision reached by the gates below. Async + non-blocking.
+	admissionDecision := "admitted"
+	gateDetails := ""
+	if h.srv.traj != nil {
+		defer func() {
+			h.srv.traj.Log(trajectory.Record{
+				Timestamp:         time.Now().UTC().Format(time.RFC3339),
+				Operation:         "candidate",
+				Content:           body.Content,
+				Type:              string(memType),
+				Importance:        importance,
+				SourceType:        sourceType,
+				Tags:              tags,
+				AdmissionDecision: admissionDecision,
+				GateDetails:       gateDetails,
+				LatencyMs:         time.Since(createStart).Milliseconds(),
+				Caller:            CallerTypeFromContext(r.Context()),
+			})
+		}()
+	}
+
 	// A-MAC (R2/R6): annotate importance clamp + identity governance flag, then
 	// enforce the per-type write-frequency limit before spending an embedding.
 	if h.srv.amacEnabled() {
@@ -144,6 +169,8 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		if err := h.srv.rateLimiter.Allow(mem.Collection, memType); err != nil {
 			var rle *RateLimitError
 			if errors.As(err, &rle) {
+				admissionDecision = "rate_limited"
+				gateDetails = fmt.Sprintf("rate_limited: retry_after=%ds", rle.RetryAfterSeconds)
 				writeJSON(w, http.StatusTooManyRequests, map[string]any{
 					"status":              "rate_limited",
 					"type":                string(memType),
@@ -161,6 +188,8 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		h.srv.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
 	}
 	if err != nil {
+		admissionDecision = "error"
+		gateDetails = fmt.Sprintf("embed_error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("embed error: %v", err)})
 		return
 	}
@@ -183,6 +212,8 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 			} `json:"existing"`
 		}
 		_ = json.Unmarshal(dedupResult.DupData, &dup)
+		admissionDecision = "dedup_rejected"
+		gateDetails = fmt.Sprintf("dedup score=%.4f against id=%s", dup.Existing.Score, dup.Existing.ID)
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"status":      "duplicate",
 			"existing_id": dup.Existing.ID,
@@ -192,6 +223,8 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := h.srv.store.Insert(r.Context(), mem, vec); err != nil {
+		admissionDecision = "error"
+		gateDetails = fmt.Sprintf("insert_error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("insert error: %v", err)})
 		return
 	}

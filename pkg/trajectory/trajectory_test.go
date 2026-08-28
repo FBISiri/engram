@@ -266,3 +266,59 @@ func TestRecord_Phase2Fields_OmitEmpty(t *testing.T) {
 		t.Errorf("omitempty failed, task fields present: %s", data)
 	}
 }
+
+// TestRecord_CandidateFields_RoundTrip verifies the D4 candidate-flow fields
+// (importance/source_type/admission_decision/gate_details) marshal and
+// unmarshal round-trip.
+func TestRecord_CandidateFields_RoundTrip(t *testing.T) {
+	in := Record{
+		Timestamp:         "2026-08-28T09:00:00Z",
+		Operation:         "candidate",
+		Content:           "the candidate memory content",
+		Type:              "insight",
+		Importance:        6.0,
+		SourceType:        "reflection",
+		Tags:              []string{"foo", "bar"},
+		AdmissionDecision: "admitted",
+		GateDetails:       "",
+		LatencyMs:         150,
+		Caller:            "user",
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Verify the on-wire field names match the JSONL contract.
+	for _, want := range []string{
+		`"operation":"candidate"`,
+		`"importance":6`,
+		`"source_type":"reflection"`,
+		`"admission_decision":"admitted"`,
+	} {
+		if !bytes.Contains(data, []byte(want)) {
+			t.Errorf("marshaled JSON missing %s: %s", want, data)
+		}
+	}
+	var out Record
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Importance != 6.0 || out.SourceType != "reflection" ||
+		out.AdmissionDecision != "admitted" {
+		t.Errorf("candidate fields lost: %+v", out)
+	}
+}
+
+// TestRecord_CandidateFields_OmitEmpty verifies omitempty drops the D4 fields
+// when unset, so pre-D4 records and non-candidate ops stay byte-compatible.
+func TestRecord_CandidateFields_OmitEmpty(t *testing.T) {
+	data, err := json.Marshal(Record{Timestamp: "2026-08-28T09:00:00Z", Operation: "update"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, absent := range []string{"importance", "source_type", "admission_decision", "gate_details"} {
+		if bytes.Contains(data, []byte(absent)) {
+			t.Errorf("omitempty failed, %q present: %s", absent, data)
+		}
+	}
+}
