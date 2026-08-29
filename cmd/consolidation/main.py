@@ -136,7 +136,7 @@ def _priority_key(cluster: Cluster, points: List[MemoryPoint]):
     return (-len(members), avg_imp)
 
 
-def run_pipeline(cfg: Config, mode: str, api_key: str) -> Dict[str, Any]:
+def run_pipeline(cfg: Config, mode: str) -> Dict[str, Any]:
     metrics = Metrics()
     run_id = uuid.uuid4().hex
     ts = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
@@ -235,7 +235,7 @@ def run_pipeline(cfg: Config, mode: str, api_key: str) -> Dict[str, Any]:
             continue
 
         ma, mb, s = _top_pair(c, points)
-        verdict = adj.adjudicate_pair(ma, mb, s, cfg, api_key=api_key)
+        verdict = adj.adjudicate_pair(ma, mb, s, cfg, api_key=cfg.llm_api_key)
         metrics.add_llm_usage(verdict.get("usage", {}))
         entry["decision"] = verdict["decision"]
         entry["reasoning"] = verdict.get("reasoning")
@@ -379,8 +379,6 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
     lock = PidLock()
     try:
         if mode == "live":
@@ -391,7 +389,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       file=sys.stderr)
                 return 2
             lock.acquire()
-        result = run_pipeline(cfg, mode, api_key)
+        result = run_pipeline(cfg, mode)
     except GateError as e:
         print(f"gate failed: {e}", file=sys.stderr)
         return 2

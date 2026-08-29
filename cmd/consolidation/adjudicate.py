@@ -6,7 +6,6 @@ spec §2.2, parses the JSON verdict, and enforces the confidence floor
 """
 
 import json
-import os
 import re
 from typing import Any, Callable, Dict, Optional
 
@@ -20,7 +19,6 @@ from .types import (
     DECISION_PARTIAL_MERGE,
 )
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
 PROMPT_TEMPLATE = """You are a memory consolidation assistant. Given two memories from an AI agent's
@@ -128,8 +126,12 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def anthropic_call(prompt: str, cfg: Config, api_key: str, timeout: int = 60) -> Dict[str, Any]:
-    """Raw Anthropic Messages API call. Returns {'text': str, 'usage': {...}}."""
+def anthropic_call(prompt: str, cfg: Config, api_key: str, base_url: str, timeout: int = 60) -> Dict[str, Any]:
+    """Raw Anthropic Messages API call. Returns {'text': str, 'usage': {...}}.
+
+    `base_url` is the Anthropic-compatible API base (e.g. OpenRouter's
+    https://openrouter.ai/api/v1); the endpoint is `base_url/messages`.
+    """
     headers = {
         "x-api-key": api_key,
         "anthropic-version": ANTHROPIC_VERSION,
@@ -141,7 +143,8 @@ def anthropic_call(prompt: str, cfg: Config, api_key: str, timeout: int = 60) ->
         "temperature": cfg.llm_temperature,
         "messages": [{"role": "user", "content": prompt}],
     }
-    r = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=timeout)
+    url = base_url.rstrip("/") + "/messages"
+    r = requests.post(url, headers=headers, json=body, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     parts = data.get("content", [])
@@ -168,11 +171,13 @@ def adjudicate_pair(
 
     `call_fn` is injectable for testing (defaults to anthropic_call).
     """
-    api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = api_key if api_key is not None else cfg.llm_api_key
     if not api_key:
-        return _keep_separate("no ANTHROPIC_API_KEY configured")
+        return _keep_separate("no LLM API key configured")
 
-    call_fn = call_fn or anthropic_call
+    if call_fn is None:
+        def call_fn(prompt_: str, cfg_: Config, key_: str) -> Dict[str, Any]:
+            return anthropic_call(prompt_, cfg_, key_, cfg.llm_base_url)
     prompt = build_prompt(mem_a, mem_b, similarity)
 
     try:

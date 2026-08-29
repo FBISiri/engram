@@ -47,6 +47,8 @@ DEFAULTS: Dict[str, Any] = {
     "llm_model": "claude-haiku-4-20250414",
     "llm_max_tokens": 1024,
     "llm_temperature": 0.0,
+    "llm_api_key": "",
+    "llm_base_url": "https://api.anthropic.com/v1",
 
     # Collections
     "collections": ["engram_user", "engram_reflection", "engram_pigo"],
@@ -94,6 +96,8 @@ class Config:
     llm_model: str
     llm_max_tokens: int
     llm_temperature: float
+    llm_api_key: str
+    llm_base_url: str
     collections: list
     undo_dir: str
     undo_retention_days: int
@@ -162,6 +166,10 @@ def _flatten_yaml(doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         out["llm_max_tokens"] = int(llm["max_tokens"])
     if "temperature" in llm:
         out["llm_temperature"] = float(llm["temperature"])
+    if "api_key" in llm:
+        out["llm_api_key"] = llm["api_key"]
+    if "base_url" in llm:
+        out["llm_base_url"] = llm["base_url"]
 
     if "collections" in root and root["collections"]:
         out["collections"] = list(root["collections"])
@@ -194,6 +202,16 @@ def _from_env(env: Dict[str, str]) -> Dict[str, Any]:
         out["llm_provider"] = env["ENGRAM_CONSOLIDATION_LLM_PROVIDER"]
     if env.get("ENGRAM_CONSOLIDATION_LLM_MODEL"):
         out["llm_model"] = env["ENGRAM_CONSOLIDATION_LLM_MODEL"]
+    elif env.get("ENGRAM_LLM_MODEL"):
+        out["llm_model"] = env["ENGRAM_LLM_MODEL"]
+    # LLM API key: consolidation-specific key has highest priority (backward
+    # compat), then fall back to the shared engram LLM key.
+    if env.get("ANTHROPIC_API_KEY"):
+        out["llm_api_key"] = env["ANTHROPIC_API_KEY"]
+    elif env.get("ENGRAM_LLM_API_KEY"):
+        out["llm_api_key"] = env["ENGRAM_LLM_API_KEY"]
+    if env.get("ENGRAM_LLM_BASE_URL"):
+        out["llm_base_url"] = env["ENGRAM_LLM_BASE_URL"]
     if env.get("QDRANT_URL"):
         out["qdrant_url"] = env["QDRANT_URL"]
     if env.get("ENGRAM_URL"):
