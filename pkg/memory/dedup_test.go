@@ -53,26 +53,67 @@ func TestHasSourceType(t *testing.T) {
 }
 
 // TestPerTypeDedupThreshold verifies the A-MAC per-type dedup thresholds:
-// a candidate at cosine 0.87 is a duplicate for insight (thr 0.85) but not for
-// directive (thr 0.95).
+// a candidate at cosine 0.91 is a duplicate for directive (thr 0.90) but not
+// for insight/event (thr 0.92) nor identity (thr 0.95).
 func TestPerTypeDedupThreshold(t *testing.T) {
-	cand := []ScoredMemory{{Score: 0.87}}
+	cand := []ScoredMemory{{Score: 0.91}}
 
-	if IsDuplicateForType(cand, TypeInsight) == nil {
-		t.Errorf("insight: score 0.87 >= 0.85 should be a duplicate")
+	if IsDuplicateForType(cand, TypeDirective) == nil {
+		t.Errorf("directive: score 0.91 >= 0.90 should be a duplicate")
 	}
-	if IsDuplicateForType(cand, TypeDirective) != nil {
-		t.Errorf("directive: score 0.87 < 0.95 should NOT be a duplicate")
-	}
-	if IsDuplicateForType(cand, TypeIdentity) != nil {
-		t.Errorf("identity: score 0.87 < 0.95 should NOT be a duplicate")
+	if IsDuplicateForType(cand, TypeInsight) != nil {
+		t.Errorf("insight: score 0.91 < 0.92 should NOT be a duplicate")
 	}
 	if IsDuplicateForType(cand, TypeEvent) != nil {
-		t.Errorf("event: score 0.87 < 0.88 should NOT be a duplicate")
+		t.Errorf("event: score 0.91 < 0.92 should NOT be a duplicate")
+	}
+	if IsDuplicateForType(cand, TypeIdentity) != nil {
+		t.Errorf("identity: score 0.91 < 0.95 should NOT be a duplicate")
 	}
 
 	// DedupThresholdForType falls back to the global default for unknown types.
 	if got := DedupThresholdForType(MemoryType("bogus")); got != DefaultDedupThreshold {
 		t.Errorf("unknown type threshold = %v, want %v", got, DefaultDedupThreshold)
+	}
+}
+
+// TestDedupThresholdForType verifies the A-MAC MVP per-type threshold values.
+func TestDedupThresholdForType(t *testing.T) {
+	cases := []struct {
+		t    MemoryType
+		want float64
+	}{
+		{TypeIdentity, 0.95},
+		{TypeDirective, 0.90},
+		{TypeInsight, 0.92},
+		{TypeEvent, 0.92},
+	}
+	for _, c := range cases {
+		if got := DedupThresholdForType(c.t); got != c.want {
+			t.Errorf("DedupThresholdForType(%s) = %v, want %v", c.t, got, c.want)
+		}
+	}
+}
+
+// TestDedupThreshold_MVP verifies the A-MAC MVP boundary behavior per type
+// (spec §5.2): a score at the threshold is a duplicate, just below is not.
+func TestDedupThreshold_MVP(t *testing.T) {
+	cases := []struct {
+		t        MemoryType
+		below    float64 // must NOT be a duplicate
+		atOrOver float64 // must BE a duplicate
+	}{
+		{TypeDirective, 0.89, 0.90},
+		{TypeInsight, 0.91, 0.92},
+		{TypeEvent, 0.91, 0.92},
+		{TypeIdentity, 0.94, 0.95},
+	}
+	for _, c := range cases {
+		if IsDuplicateForType([]ScoredMemory{{Score: c.below}}, c.t) != nil {
+			t.Errorf("%s: score %v should NOT be a duplicate", c.t, c.below)
+		}
+		if IsDuplicateForType([]ScoredMemory{{Score: c.atOrOver}}, c.t) == nil {
+			t.Errorf("%s: score %v should be a duplicate", c.t, c.atOrOver)
+		}
 	}
 }

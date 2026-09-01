@@ -4,15 +4,17 @@ package memory
 // is considered a duplicate of an existing one and will be skipped.
 const DefaultDedupThreshold = 0.92
 
-// TypeDedupThresholds holds the A-MAC per-type dedup thresholds (spec v1 §3.1).
-// identity/directive are protected with a high (0.95) threshold so similar-but-
-// distinct high-value memories coexist; insight is tightened to 0.85 to catch
-// reflection paraphrases; event to 0.88 to catch routine-event variants.
+// TypeDedupThresholds holds the A-MAC per-type dedup thresholds (A-MAC MVP).
+// Higher threshold = fewer merges = more memories coexist. identity stays
+// protective at 0.95 so similar-but-distinct identity facets coexist; directive
+// is aggressive at 0.90 to merge near-duplicate directives and prevent the
+// sycophancy flywheel; insight and event use the standard 0.92 to balance
+// coexistence against redundancy (0.92 matches the global default).
 var TypeDedupThresholds = map[MemoryType]float64{
-	TypeIdentity:  0.95,
-	TypeDirective: 0.95,
-	TypeInsight:   0.85,
-	TypeEvent:     0.88,
+	TypeIdentity:  0.95, // protective: only near-identical merge
+	TypeDirective: 0.90, // aggressive: prevent sycophancy flywheel
+	TypeInsight:   0.92, // standard: balance coexistence vs redundancy
+	TypeEvent:     0.92, // standard: align with insight
 }
 
 // DedupThresholdForType returns the A-MAC per-type dedup threshold, falling back

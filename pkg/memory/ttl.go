@@ -15,22 +15,23 @@ type TTLConfig struct {
 // | identity  | permanent      | permanent      | permanent      |
 // | directive | 90d            | permanent      | permanent      |
 // | insight   | 30d            | 90d            | permanent      |
-// | event     | 3d             | 7d             | 30d            |
+// | event     | 90d            | 90d            | 90d            |
 func DefaultTTLConfig() TTLConfig {
 	return TTLConfig{
 		Rules: map[MemoryType][3]time.Duration{
-			TypeIdentity:  {0, 0, 0},                                                            // permanent
-			TypeDirective: {90 * 24 * time.Hour, 0, 0},                                          // 90d / perm / perm
-			TypeInsight:   {30 * 24 * time.Hour, 90 * 24 * time.Hour, 0},                        // 30d / 90d / perm
-			TypeEvent:     {3 * 24 * time.Hour, 7 * 24 * time.Hour, 30 * 24 * time.Hour},        // 3d / 7d / 30d
+			TypeIdentity:  {0, 0, 0},                                                       // permanent
+			TypeDirective: {90 * 24 * time.Hour, 0, 0},                                     // 90d / perm / perm
+			TypeInsight:   {30 * 24 * time.Hour, 90 * 24 * time.Hour, 0},                   // 30d / 90d / perm
+			TypeEvent:     {90 * 24 * time.Hour, 90 * 24 * time.Hour, 90 * 24 * time.Hour}, // uniform 90d (A-MAC MVP)
 		},
 	}
 }
 
 // importanceBand returns the index into the [3]Duration array:
-//   0 = low  (importance < 5)
-//   1 = mid  (5 <= importance < 8)
-//   2 = high (importance >= 8)
+//
+//	0 = low  (importance < 5)
+//	1 = mid  (5 <= importance < 8)
+//	2 = high (importance >= 8)
 func importanceBand(importance float64) int {
 	switch {
 	case importance >= 8:

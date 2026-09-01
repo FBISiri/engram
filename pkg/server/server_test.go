@@ -2165,7 +2165,7 @@ func newAMACServer() (*Server, *mockStore) {
 }
 
 // TestImportanceClamp verifies A-MAC per-type importance clamping:
-// event importance 9 → 7, directive importance 3 → 5, both flagged clamped.
+// event importance 9 → 7, directive importance 3 → 6, both flagged clamped.
 func TestImportanceClamp(t *testing.T) {
 	srv, _ := newAMACServer()
 
@@ -2180,7 +2180,7 @@ func TestImportanceClamp(t *testing.T) {
 	}
 	mem := parseAddMemory(t, res)
 	if mem.Importance != 7 {
-		t.Errorf("event importance = %v, want 7 (clamped into [1,7])", mem.Importance)
+		t.Errorf("event importance = %v, want 7 (clamped into [3,7])", mem.Importance)
 	}
 	if c, _ := mem.Metadata["importance_clamped"].(bool); !c {
 		t.Errorf("expected metadata.importance_clamped=true, got %v", mem.Metadata["importance_clamped"])
@@ -2199,11 +2199,47 @@ func TestImportanceClamp(t *testing.T) {
 		t.Fatalf("add directive failed: %v", err)
 	}
 	mem2 := parseAddMemory(t, res2)
-	if mem2.Importance != 5 {
-		t.Errorf("directive importance = %v, want 5 (clamped into [5,10])", mem2.Importance)
+	if mem2.Importance != 6 {
+		t.Errorf("directive importance = %v, want 6 (clamped into [6,10])", mem2.Importance)
 	}
 	if c, _ := mem2.Metadata["importance_clamped"].(bool); !c {
 		t.Errorf("expected metadata.importance_clamped=true for directive")
+	}
+}
+
+// TestAMACImportanceBounds_MVP verifies the A-MAC MVP per-type importance
+// floors and identity default via amacImportance (spec §5.2).
+func TestAMACImportanceBounds_MVP(t *testing.T) {
+	srv, _ := newAMACServer()
+
+	cases := []struct {
+		ty       memory.MemoryType
+		provided float64
+		want     float64
+	}{
+		{memory.TypeIdentity, 5, 7},  // clamps up to 7
+		{memory.TypeDirective, 4, 6}, // clamps up to 6
+		{memory.TypeInsight, 2, 5},   // clamps up to 5
+		{memory.TypeEvent, 1, 3},     // clamps up to 3
+	}
+	for _, c := range cases {
+		got, clamped := srv.amacImportance(c.ty, c.provided)
+		if got != c.want {
+			t.Errorf("%s importance %v = %v, want %v", c.ty, c.provided, got, c.want)
+		}
+		if !clamped {
+			t.Errorf("%s importance %v should set clamped flag", c.ty, c.provided)
+		}
+	}
+
+	// identity default is 7 (not 6): caller provides <= 0 → default applied.
+	if got, _ := srv.amacImportance(memory.TypeIdentity, 0); got != 7 {
+		t.Errorf("identity default = %v, want 7", got)
+	}
+
+	// A value inside bounds is not clamped.
+	if got, clamped := srv.amacImportance(memory.TypeInsight, 6); got != 6 || clamped {
+		t.Errorf("insight importance 6 = %v clamped=%v, want 6 clamped=false", got, clamped)
 	}
 }
 

@@ -70,6 +70,22 @@ func TestLoad_Defaults(t *testing.T) {
 	if len(c.AllowedProvenances) != 0 {
 		t.Errorf("AllowedProvenances default = %v, want empty", c.AllowedProvenances)
 	}
+
+	// A-MAC MVP per-type importance bounds [min,max] and defaults.
+	wantBounds := map[memory.MemoryType][2]float64{
+		memory.TypeIdentity:  {7, 9},
+		memory.TypeDirective: {6, 10},
+		memory.TypeInsight:   {5, 8},
+		memory.TypeEvent:     {3, 7},
+	}
+	for ty, want := range wantBounds {
+		if got := c.ImportanceBounds[ty]; got != want {
+			t.Errorf("ImportanceBounds[%s] = %v, want %v", ty, got, want)
+		}
+	}
+	if got := c.ImportanceDefaults[memory.TypeIdentity]; got != 7 {
+		t.Errorf("ImportanceDefaults[identity] = %v, want 7", got)
+	}
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
@@ -450,8 +466,8 @@ func TestLoad_DedupThresholdGlobalFallback(t *testing.T) {
 	// With no env at all, A-MAC hard-coded defaults apply.
 	clearEngramEnv(t)
 	c2 := Load()
-	if got := c2.DedupThresholds[memory.TypeInsight]; got != 0.85 {
-		t.Errorf("insight default = %v, want 0.85 (A-MAC default)", got)
+	if got := c2.DedupThresholds[memory.TypeInsight]; got != 0.92 {
+		t.Errorf("insight default = %v, want 0.92 (A-MAC default)", got)
 	}
 	if got := c2.DedupThresholds[memory.TypeIdentity]; got != 0.95 {
 		t.Errorf("identity default = %v, want 0.95 (A-MAC default)", got)

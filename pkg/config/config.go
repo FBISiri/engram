@@ -195,7 +195,7 @@ func Load() *Config {
 // (spec v1 §3.2). directive defaults highest, event lowest.
 func DefaultImportanceDefaults() map[memory.MemoryType]float64 {
 	return map[memory.MemoryType]float64{
-		memory.TypeIdentity:  envFloat("ENGRAM_IMPORTANCE_DEFAULT_IDENTITY", 6),
+		memory.TypeIdentity:  envFloat("ENGRAM_IMPORTANCE_DEFAULT_IDENTITY", 7),
 		memory.TypeDirective: envFloat("ENGRAM_IMPORTANCE_DEFAULT_DIRECTIVE", 7),
 		memory.TypeInsight:   envFloat("ENGRAM_IMPORTANCE_DEFAULT_INSIGHT", 5),
 		memory.TypeEvent:     envFloat("ENGRAM_IMPORTANCE_DEFAULT_EVENT", 4),
@@ -222,10 +222,10 @@ func loadEvaporationConfig() memory.EvaporationConfig {
 // bounds (spec v1 §3.2). Values outside are clamped silently.
 func DefaultImportanceBounds() map[memory.MemoryType][2]float64 {
 	return map[memory.MemoryType][2]float64{
-		memory.TypeIdentity:  {envFloat("ENGRAM_IMPORTANCE_MIN_IDENTITY", 5), envFloat("ENGRAM_IMPORTANCE_MAX_IDENTITY", 9)},
-		memory.TypeDirective: {envFloat("ENGRAM_IMPORTANCE_MIN_DIRECTIVE", 5), envFloat("ENGRAM_IMPORTANCE_MAX_DIRECTIVE", 10)},
-		memory.TypeInsight:   {envFloat("ENGRAM_IMPORTANCE_MIN_INSIGHT", 3), envFloat("ENGRAM_IMPORTANCE_MAX_INSIGHT", 8)},
-		memory.TypeEvent:     {envFloat("ENGRAM_IMPORTANCE_MIN_EVENT", 1), envFloat("ENGRAM_IMPORTANCE_MAX_EVENT", 7)},
+		memory.TypeIdentity:  {envFloat("ENGRAM_IMPORTANCE_MIN_IDENTITY", 7), envFloat("ENGRAM_IMPORTANCE_MAX_IDENTITY", 9)},
+		memory.TypeDirective: {envFloat("ENGRAM_IMPORTANCE_MIN_DIRECTIVE", 6), envFloat("ENGRAM_IMPORTANCE_MAX_DIRECTIVE", 10)},
+		memory.TypeInsight:   {envFloat("ENGRAM_IMPORTANCE_MIN_INSIGHT", 5), envFloat("ENGRAM_IMPORTANCE_MAX_INSIGHT", 8)},
+		memory.TypeEvent:     {envFloat("ENGRAM_IMPORTANCE_MIN_EVENT", 3), envFloat("ENGRAM_IMPORTANCE_MAX_EVENT", 7)},
 	}
 }
 

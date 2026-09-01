@@ -10,9 +10,9 @@ func TestImportanceBand(t *testing.T) {
 		importance float64
 		want       int
 	}{
-		{1, 0}, {3, 0}, {4.9, 0},  // low
-		{5, 1}, {6, 1}, {7.9, 1},  // mid
-		{8, 2}, {9, 2}, {10, 2},   // high
+		{1, 0}, {3, 0}, {4.9, 0}, // low
+		{5, 1}, {6, 1}, {7.9, 1}, // mid
+		{8, 2}, {9, 2}, {10, 2}, // high
 	}
 	for _, tt := range tests {
 		got := importanceBand(tt.importance)
@@ -45,25 +45,53 @@ func TestComputeValidUntil_EventTTL(t *testing.T) {
 	cfg := DefaultTTLConfig()
 	now := time.Now()
 
-	// Low importance event → 3 days
-	got := ComputeValidUntil(cfg, TypeEvent, 3, nil, 0)
-	expected := float64(now.Add(3 * 24 * time.Hour).Unix())
-	if abs(got-expected) > 2 {
-		t.Errorf("low-importance event: got %v, want ~%v", got, expected)
+	// A-MAC MVP: all event bands → uniform 90 days
+	for _, imp := range []float64{3, 6, 9} {
+		got := ComputeValidUntil(cfg, TypeEvent, imp, nil, 0)
+		expected := float64(now.Add(90 * 24 * time.Hour).Unix())
+		if abs(got-expected) > 2 {
+			t.Errorf("event importance=%v: got %v, want ~%v (90d)", imp, got, expected)
+		}
+	}
+}
+
+// TestEventUniformTTL verifies the A-MAC MVP uniform 90-day event TTL and its
+// overrides, and that other types are unaffected (spec §5.2).
+func TestEventUniformTTL(t *testing.T) {
+	cfg := DefaultTTLConfig()
+	now := time.Now()
+	ninetyDays := float64(now.Add(90 * 24 * time.Hour).Unix())
+
+	// Each importance band → 90d.
+	for _, imp := range []float64{2, 6, 9} {
+		got := ComputeValidUntil(cfg, TypeEvent, imp, nil, 0)
+		if abs(got-ninetyDays) > 2 {
+			t.Errorf("event importance=%v: got %v, want ~%v (90d)", imp, got, ninetyDays)
+		}
 	}
 
-	// Mid importance event → 7 days
-	got = ComputeValidUntil(cfg, TypeEvent, 6, nil, 0)
-	expected = float64(now.Add(7 * 24 * time.Hour).Unix())
-	if abs(got-expected) > 2 {
-		t.Errorf("mid-importance event: got %v, want ~%v", got, expected)
+	// Explicit valid_until overrides 90d.
+	explicit := float64(now.Add(24 * time.Hour).Unix())
+	if got := ComputeValidUntil(cfg, TypeEvent, 2, nil, explicit); got != explicit {
+		t.Errorf("explicit override: got %v, want %v", got, explicit)
 	}
 
-	// High importance event → 30 days
-	got = ComputeValidUntil(cfg, TypeEvent, 9, nil, 0)
-	expected = float64(now.Add(30 * 24 * time.Hour).Unix())
-	if abs(got-expected) > 2 {
-		t.Errorf("high-importance event: got %v, want ~%v", got, expected)
+	// permanent tag → 0 (no expiry).
+	if got := ComputeValidUntil(cfg, TypeEvent, 2, []string{"permanent"}, 0); got != 0 {
+		t.Errorf("permanent-tagged event: got %v, want 0", got)
+	}
+
+	// Other types unaffected: identity permanent, directive mid permanent,
+	// insight low → 30d.
+	if got := ComputeValidUntil(cfg, TypeIdentity, 3, nil, 0); got != 0 {
+		t.Errorf("identity should stay permanent, got %v", got)
+	}
+	if got := ComputeValidUntil(cfg, TypeDirective, 6, nil, 0); got != 0 {
+		t.Errorf("mid directive should stay permanent, got %v", got)
+	}
+	insight30d := float64(now.Add(30 * 24 * time.Hour).Unix())
+	if got := ComputeValidUntil(cfg, TypeInsight, 3, nil, 0); abs(got-insight30d) > 2 {
+		t.Errorf("low insight should stay 30d: got %v, want ~%v", got, insight30d)
 	}
 }
 
@@ -136,11 +164,11 @@ func TestComputeValidUntil_TimeSensitiveTag(t *testing.T) {
 		t.Errorf("time-sensitive insight: got %v, want ~%v (7d)", got, expected)
 	}
 
-	// Low-importance event → 3d, time-sensitive doesn't shorten it further
+	// Event now has uniform 90d TTL; location tag caps it to 7d.
 	got = ComputeValidUntil(cfg, TypeEvent, 2, []string{"location"}, 0)
-	expected = float64(now.Add(3 * 24 * time.Hour).Unix())
+	expected = float64(now.Add(7 * 24 * time.Hour).Unix())
 	if abs(got-expected) > 2 {
-		t.Errorf("location-tagged event with 3d TTL: got %v, want ~%v", got, expected)
+		t.Errorf("location-tagged event capped to 7d: got %v, want ~%v", got, expected)
 	}
 }
 
