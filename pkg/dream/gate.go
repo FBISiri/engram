@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/statedir"
 )
 
 const (
-	siriDir          = ".siri"
 	lastRunFile      = "dream_last_run"
 	pidFile          = "dream.pid"
 
@@ -38,17 +38,9 @@ type GateResult struct {
 	Gate3Pid                bool    `json:"gate3_pid"`
 }
 
-// siriDirPath returns ~/.siri, creating it if needed.
+// siriDirPath returns the Siri state dir, creating it if needed.
 func siriDirPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
-	}
-	dir := filepath.Join(home, siriDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("create %s: %w", dir, err)
-	}
-	return dir, nil
+	return statedir.Dir()
 }
 
 // CheckGates evaluates the Triple Gate and returns a JSON-serializable result.

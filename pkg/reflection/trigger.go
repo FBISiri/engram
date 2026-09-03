@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/statedir"
 )
 
 const (
@@ -16,17 +17,9 @@ const (
 	reflectionDailyFile   = "reflection_daily_count"
 )
 
-// siriDirPath returns ~/.siri, creating it if needed.
+// siriDirPath returns the Siri state dir, creating it if needed.
 func siriDirPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home dir: %w", err)
-	}
-	dir := filepath.Join(home, ".siri")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("create .siri dir: %w", err)
-	}
-	return dir, nil
+	return statedir.Dir()
 }
 
 // CheckResult is the output of a trigger check.
