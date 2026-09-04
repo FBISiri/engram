@@ -865,7 +865,7 @@ func (h *HTTPServer) handleSearchMemories(w http.ResponseWriter, r *http.Request
 	}
 	output := make([]result, len(results))
 	for i, r := range results {
-		effImp := memory.EffectiveImportance(&results[i].Memory, evapCfg)
+		effImp := memory.EffectiveImportance(&results[i].Memory, evapCfg, time.Now())
 		if h.srv.metrics != nil {
 			h.srv.metrics.EvaporationEffectiveImportance.WithLabelValues(string(r.Type)).Observe(effImp)
 		}
@@ -1026,7 +1026,7 @@ func (h *HTTPServer) reviveIfEvaporated(prev memory.Memory, m *memory.Memory) bo
 		return false
 	}
 	cfg := h.srv.evaporationConfig()
-	if memory.EffectiveImportance(m, cfg) < cfg.EvictionThreshold {
+	if memory.EffectiveImportance(m, cfg, time.Now()) < cfg.EvictionThreshold {
 		return false
 	}
 	m.LifecycleStatus = memory.LifecycleActive

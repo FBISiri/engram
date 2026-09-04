@@ -449,7 +449,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 
 	output := make([]searchResult, len(results))
 	for i, r := range results {
-		effImp := memory.EffectiveImportance(&results[i].Memory, evapCfg)
+		effImp := memory.EffectiveImportance(&results[i].Memory, evapCfg, time.Now())
 		if s.metrics != nil {
 			s.metrics.EvaporationEffectiveImportance.WithLabelValues(string(r.Type)).Observe(effImp)
 		}

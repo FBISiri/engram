@@ -109,7 +109,7 @@ func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.Eva
 			if mem.LifecycleStatus != "" && mem.LifecycleStatus != memory.LifecycleActive {
 				continue
 			}
-			eff := memory.EffectiveImportance(mem, cfg)
+			eff := memory.EffectiveImportance(mem, cfg, time.Now())
 			if eff >= cfg.EvictionThreshold {
 				continue
 			}

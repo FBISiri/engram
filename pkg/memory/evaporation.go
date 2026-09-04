@@ -42,7 +42,7 @@ func DefaultEvaporationConfig() EvaporationConfig {
 // where λ = ln(2)/half_life and Δt is days since creation. When evaporation is
 // disabled, or the type has no (or non-positive) half-life (e.g. identity), the
 // raw importance is returned unchanged.
-func EffectiveImportance(m *Memory, cfg EvaporationConfig) float64 {
+func EffectiveImportance(m *Memory, cfg EvaporationConfig, now time.Time) float64 {
 	if !cfg.Enabled {
 		return m.Importance
 	}
@@ -53,7 +53,7 @@ func EffectiveImportance(m *Memory, cfg EvaporationConfig) float64 {
 	}
 
 	lambda := math.Ln2 / halfLife
-	daysPassed := math.Max(0, (float64(time.Now().Unix())-m.CreatedAt)/86400.0)
+	daysPassed := math.Max(0, (float64(now.Unix())-m.CreatedAt)/86400.0)
 
 	decayFactor := math.Exp(-lambda * daysPassed)
 	accessBoost := 1.0 + cfg.AccessBoostAlpha*math.Log(1.0+float64(m.AccessCount))

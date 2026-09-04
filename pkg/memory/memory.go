@@ -205,7 +205,7 @@ func Score(m *Memory, cosineSim float64, weights ScoringWeights, decay DecayConf
 	recency := math.Pow(decayFactor, hoursPassed)
 
 	// S_importance: normalized to [0, 1], with evaporation applied.
-	importance := EffectiveImportance(m, evapCfg) / 10.0
+	importance := EffectiveImportance(m, evapCfg, time.Now()) / 10.0
 
 	base := weights.Relevance*relevance + weights.Recency*recency + weights.Importance*importance
 
