@@ -97,6 +97,7 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 		wbStats := e.writeDialecticInsights(ctx, dialectics, evidenceList, e.cfg)
 		result.InsightsWritten = wbStats.Written
 		result.InsightsSkipped = wbStats.Skipped
+		result.InsightsDedupSkipped = wbStats.DedupSkipped
 		result.InsightsWriteFailed = wbStats.Failed
 		result.DraftsWritten = wbStats.Drafts
 		result.WriteBackMs = wbStats.Ms
@@ -110,10 +111,13 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 		}
 		setValidUntilFields(result, storedTTLs)
 
-		// Stage 5: Source-marking — only if at least one insight was produced.
-		// Guards against marking sources as "reflected" when all write-back calls
-		// failed (e.g. transient embedding error), which would lose those memories.
-		if wbStats.Written > 0 || wbStats.Drafts > 0 {
+		// Stage 5: Source-marking — mark when the batch produced any output,
+		// including pre-write dedup skips (the insight already exists, so leaving
+		// sources unreflected would livelock: the next run re-fetches the same
+		// batch → same insights → dedup again forever). Guards against marking
+		// sources when all write-back calls failed for genuine reasons (LLM/
+		// dialectic/embed/insert error, no embedder), which would lose them.
+		if shouldMarkSources(wbStats) {
 			reflectedTimestamp := float64(time.Now().Unix())
 			sourceIDs := make([]string, len(batch))
 			for i, m := range batch {
@@ -149,7 +153,7 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 			}
 		} else {
 			result.Errors = append(result.Errors,
-				"no insights produced — sources not marked to allow retry")
+				"no insights produced (all failed) — sources not marked to allow retry")
 		}
 	} else {
 		result.InsightsWritten = 0

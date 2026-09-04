@@ -109,6 +109,12 @@ v1.1 Reflection upgrade (confidence, evidence grounding, event-driven trigger).
   (`6808739`).
 
 ### Fixed
+- **Reflection V2 write-back livelock** — a v2-focal run whose insights were all
+  caught by pre-write dedup marked zero sources reflected, so the next run
+  re-fetched the same batch → same insights → dedup again forever. Stage 5 now
+  marks sources when `Written>0 || Drafts>0 || DedupSkipped>0`, and dedup hits
+  are counted in a new `insights_dedup_skipped` counter on the V2 path (split
+  out of the generic `insights_skipped`).
 - Removed hardcoded 1536-dimension zero-vector fallback in Dream and
   Reflection (`629102d`).
 - Gate2 now uses `new_memories_since_last_run` instead of `session_count`;

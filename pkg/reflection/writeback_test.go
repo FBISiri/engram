@@ -358,8 +358,11 @@ func TestWriteDialecticInsights_DedupSkip(t *testing.T) {
 	if stats.Written != 0 {
 		t.Errorf("expected Written=0, got %d", stats.Written)
 	}
-	if stats.Skipped != 1 {
-		t.Errorf("expected Skipped=1, got %d", stats.Skipped)
+	if stats.DedupSkipped != 1 {
+		t.Errorf("expected DedupSkipped=1, got %d", stats.DedupSkipped)
+	}
+	if stats.Skipped != 0 {
+		t.Errorf("expected Skipped=0 (dedup is not a generic skip), got %d", stats.Skipped)
 	}
 }
 

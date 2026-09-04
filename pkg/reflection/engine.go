@@ -154,7 +154,7 @@ type RunResult struct {
 	SkipReason           string   `json:"skip_reason,omitempty"`
 	InputCount           int      `json:"input_count"`
 	InsightsCreated      int      `json:"insights_created"`
-	InsightsDedupSkipped int      `json:"insights_dedup_skipped"` // pre-write dedup skips (V1 batch + single-event)
+	InsightsDedupSkipped int      `json:"insights_dedup_skipped"` // pre-write dedup skips (V1 batch + single-event + V2 focal)
 	DraftsWritten        int      `json:"drafts_written"`         // W17 v1.1: confidence<0.6 → Obsidian draft
 	SourcesMarked        int      `json:"sources_marked"`
 	SourcesOrphaned      int      `json:"sources_orphaned,omitempty"` // IDs deleted between fetch and mark (TOCTOU)

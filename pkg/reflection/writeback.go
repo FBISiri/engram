@@ -16,12 +16,23 @@ const (
 )
 
 type writeBackStats struct {
-	Written int
-	Skipped int
-	Failed  int
-	Drafts  int
-	Ms      int64
-	Errors  []string
+	Written      int
+	Skipped      int
+	DedupSkipped int
+	Failed       int
+	Drafts       int
+	Ms           int64
+	Errors       []string
+}
+
+// shouldMarkSources reports whether the run produced enough output that its
+// source memories should be marked reflected. A pre-write dedup skip counts as
+// productive output: the insight already exists, so re-processing the same
+// sources forever (livelock) is pointless. Only mark-and-move-on is skipped
+// when the batch produced nothing for genuine failure reasons (LLM/dialectic/
+// embed/insert error, no embedder) — i.e. Written==Drafts==DedupSkipped==0.
+func shouldMarkSources(stats writeBackStats) bool {
+	return stats.Written > 0 || stats.Drafts > 0 || stats.DedupSkipped > 0
 }
 
 func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []DialecticInsight, evidenceList []PerQuestionEvidence, cfg Config) writeBackStats {
@@ -147,7 +158,7 @@ func (e *Engine) writeDialecticInsights(ctx context.Context, dialectics []Dialec
 
 		// Pre-write dedup: skip if a semantically similar reflection insight already exists.
 		if e.isDedupDuplicate(ctx, vec) {
-			stats.Skipped++
+			stats.DedupSkipped++
 			continue
 		}
 
