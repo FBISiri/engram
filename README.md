@@ -507,7 +507,8 @@ export ENGRAM_OPENAI_API_KEY=sk-...         # required
 ```
 
 Full env var reference (storage / embedding / scoring weights / dedup thresholds /
-reflection / OTel / TTL / multi-collection) → [`docs/configuration.md`](docs/configuration.md).
+reflection / lifecycle flags — evaporation, A-MAC admission, write checkpoints / OTel / TTL /
+multi-collection) → [`docs/configuration.md`](docs/configuration.md).
 
 ---
 

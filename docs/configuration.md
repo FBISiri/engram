@@ -10,6 +10,7 @@ All Engram configuration is done via environment variables. No config files are 
 - [Deduplication](#deduplication)
 - [Server / Transport](#server--transport)
 - [Reflection Engine](#reflection-engine)
+- [Lifecycle & Admission (Evaporation / A-MAC / Write Checkpoints)](#lifecycle--admission-evaporation--a-mac--write-checkpoints)
 - [Observability (OpenTelemetry)](#observability-opentelemetry)
 - [TTL Auto-Calculator](#ttl-auto-calculator)
 - [Multi-Collection Architecture](#multi-collection-architecture)
@@ -209,6 +210,8 @@ The Reflection Engine periodically synthesizes high-level insights from unreflec
 | `ENGRAM_REFLECTION_TRIGGER` | `string` | `count` | Trigger mode. `count` = trigger when unreflected memory count reaches threshold. `cron` = time-based schedule. `manual` = only via explicit `reflection_run` calls. |
 | `ENGRAM_REFLECTION_COUNT` | `int` | `10` | Minimum number of unreflected memories required to trigger reflection (only applies when `ENGRAM_REFLECTION_TRIGGER=count`). |
 | `ENGRAM_REFLECTION_MODEL` | `string` | `claude-sonnet-4-20250514` | LLM model used for synthesis. Must be accessible via Anthropic API. |
+| `ENGRAM_REFLECTION_MODE` | `string` | `v1` | Reflection algorithm. `v1` = flat synthesis (default). `v2` = 4-stage focal-point pipeline (focal selection → evidence gathering → dialectic → synthesis). See [`docs/reflection.md`](reflection.md). |
+| `ENGRAM_DIALECTIC_TIMEOUT` | `duration` | `45s` | V2 only. Per-call timeout for the dialectic LLM stage. Values above `90s` are clamped to `90s`. |
 
 ### Guardrails
 
@@ -228,6 +231,86 @@ export ENGRAM_REFLECTION_COUNT=15
 
 # Use a lighter model for reflection
 export ENGRAM_REFLECTION_MODEL=claude-haiku-4-20250514
+```
+
+---
+
+## Lifecycle & Admission (Evaporation / A-MAC / Write Checkpoints)
+
+Three feature-flagged subsystems govern what gets *into* the store and how long it stays *relevant*.
+All three default **off** (except the individual checkpoint sub-flags, which are only consulted when the
+parent flag is on), so a fresh install behaves exactly like a plain vector store with dedup.
+
+### Evaporation — runtime importance decay
+
+Evaporation lowers a memory's stored `importance` over time (per-type half-life) and evicts it once
+importance falls below the threshold. It is distinct from the *search-time* recency decay in
+[Scoring & Retrieval](#scoring--retrieval): evaporation mutates the record, recency decay only affects ranking.
+Recent reads boost the memory (`AccessBoostAlpha`), so memories that keep getting recalled survive.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENGRAM_EVAPORATION_ENABLED` | `bool` | `false` | Enable the background sweep. |
+| `ENGRAM_EVAPORATION_HALF_LIFE_EVENT` | `float64` (days) | `30` | Half-life for `event` memories. |
+| `ENGRAM_EVAPORATION_HALF_LIFE_INSIGHT` | `float64` (days) | `180` | Half-life for `insight` memories. |
+| `ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE` | `float64` (days) | `365` | Half-life for `directive` memories. |
+| `ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY` | `float64` (days) | `0` | Half-life for `identity` memories. `0` = never decays. |
+| `ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA` | `float64` | `0.15` | Importance boost applied on each recall (counteracts decay for actively-used memories). |
+| `ENGRAM_EVAPORATION_EVICTION_THRESHOLD` | `float64` | `1.0` | Memories whose decayed importance drops below this are evicted by the sweep. |
+| `ENGRAM_EVAPORATION_SWEEP_INTERVAL_H` | `int` (hours) | `6` | How often the sweep runs. |
+| `ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT` | `int` | `100` | Max memories processed per sweep. |
+
+### A-MAC — type-aware admission control
+
+A-MAC (Agent Memory Admission Control) replaces the single global dedup threshold with per-type
+policy: per-type dedup thresholds, importance defaults and clamping bounds, and a 1-hour
+sliding-window write rate limit per (collection, type). When `ENGRAM_AMAC_ENABLED=false` the
+global `ENGRAM_DEDUP_THRESHOLD` and caller-supplied importance are used unchanged.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENGRAM_AMAC_ENABLED` | `bool` | `false` | Enable per-type admission policy. |
+| `ENGRAM_DEDUP_THRESHOLD_IDENTITY` | `float64` | `0.95` | Per-type dedup threshold (protective — only near-identical merge). |
+| `ENGRAM_DEDUP_THRESHOLD_DIRECTIVE` | `float64` | `0.90` | Per-type dedup threshold (aggressive — prevents directive pile-up). |
+| `ENGRAM_DEDUP_THRESHOLD_INSIGHT` | `float64` | `0.92` | Per-type dedup threshold. |
+| `ENGRAM_DEDUP_THRESHOLD_EVENT` | `float64` | `0.92` | Per-type dedup threshold. |
+| `ENGRAM_IMPORTANCE_DEFAULT_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | `float64` | `7` / `7` / `5` / `4` | Importance applied when the caller omits it. |
+| `ENGRAM_IMPORTANCE_MIN_{TYPE}` / `ENGRAM_IMPORTANCE_MAX_{TYPE}` | `float64` | identity `7–9`, directive `6–10`, insight `5–8`, event `3–7` | Per-type importance bounds; out-of-range values are clamped silently. |
+| `ENGRAM_RATE_LIMIT_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | `int` (writes/hour) | `5` / `10` / `20` / `50` | Sliding-window write cap per (collection, type). Counters reset on restart. |
+
+Precedence for dedup thresholds: per-type env `ENGRAM_DEDUP_THRESHOLD_{TYPE}` > global
+`ENGRAM_DEDUP_THRESHOLD` > A-MAC built-in default.
+
+### Write Checkpoints — advisory signals on the write path
+
+Write Checkpoints attach non-blocking advisory warnings to `memory_add` responses (they never reject a
+write). Four checkpoints exist; each has its own switch that is only consulted when the parent flag is on.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENGRAM_WRITE_CHECKPOINTS_ENABLED` | `bool` | `false` | Master switch for all checkpoints. |
+| `ENGRAM_CP_DEDUP_ADVISORY_ENABLED` | `bool` | `true` | CP1: warn when a near-duplicate exists above `MIN_SCORE` but below the hard dedup threshold. |
+| `ENGRAM_CP_DEDUP_ADVISORY_MIN_SCORE` | `float64` | `0.70` | CP1 lower bound of the advisory band. |
+| `ENGRAM_CP_IMPORTANCE_MONITOR_ENABLED` | `bool` | `true` | CP2: warn on importance inflation (rolling average over the last N writes exceeds the threshold). |
+| `ENGRAM_CP_IMPORTANCE_WINDOW` | `int` | `50` | CP2 rolling window size. |
+| `ENGRAM_CP_IMPORTANCE_THRESHOLD` | `float64` | `7.0` | CP2 average-importance threshold. |
+| `ENGRAM_CP_RATE_LIMIT_WARNING_ENABLED` | `bool` | `true` | CP3: warn when a (collection, type) approaches its A-MAC rate limit. |
+| `ENGRAM_CP_RATE_LIMIT_WARNING_FRACTION` | `float64` | `0.80` | CP3 fraction of the limit at which to warn. |
+| `ENGRAM_CP_CONTENT_CHECK_ENABLED` | `bool` | `true` | CP4: warn on content-shape issues (length, missing tags, missing `source_type`). |
+| `ENGRAM_CP_CONTENT_MIN_LENGTH` | `int` | `20` | CP4 minimum content length. |
+| `ENGRAM_CP_CONTENT_MAX_LENGTH` | `int` | `2000` | CP4 maximum content length. |
+| `ENGRAM_CP_REQUIRE_TAGS` | `bool` | `true` | CP4 warn when `tags` is empty. |
+| `ENGRAM_CP_REQUIRE_SOURCE_TYPE` | `bool` | `true` | CP4 warn when `source_type` is missing. |
+
+### Usage Example
+
+```bash
+# Production-style lifecycle: all three on, shorter event half-life
+export ENGRAM_EVAPORATION_ENABLED=true
+export ENGRAM_EVAPORATION_HALF_LIFE_EVENT=14
+export ENGRAM_AMAC_ENABLED=true
+export ENGRAM_WRITE_CHECKPOINTS_ENABLED=true
+export ENGRAM_REFLECTION_MODE=v2
 ```
 
 ---
@@ -402,3 +485,18 @@ export ENGRAM_DEDUP_THRESHOLD=0.85  # more aggressive dedup for testing
 | 24 | `ENGRAM_OTEL_FILE_DIR` | string | `/tmp/siri-state/engram-traces` | Observability |
 | 25 | `ENGRAM_OTEL_FILE_ROTATION` | string | `daily` | Observability |
 | 26 | `ENGRAM_OTEL_SAMPLE_RATIO` | float64 | `1.0` | Observability |
+| 27 | `ENGRAM_REFLECTION_MODE` | string | `v1` | Reflection |
+| 28 | `ENGRAM_DIALECTIC_TIMEOUT` | duration | `45s` | Reflection |
+| 29 | `ENGRAM_EVAPORATION_ENABLED` | bool | `false` | Lifecycle |
+| 30 | `ENGRAM_EVAPORATION_HALF_LIFE_{EVENT,INSIGHT,DIRECTIVE,IDENTITY}` | float64 | `30`/`180`/`365`/`0` | Lifecycle |
+| 31 | `ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA` | float64 | `0.15` | Lifecycle |
+| 32 | `ENGRAM_EVAPORATION_EVICTION_THRESHOLD` | float64 | `1.0` | Lifecycle |
+| 33 | `ENGRAM_EVAPORATION_SWEEP_INTERVAL_H` | int | `6` | Lifecycle |
+| 34 | `ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT` | int | `100` | Lifecycle |
+| 35 | `ENGRAM_AMAC_ENABLED` | bool | `false` | Lifecycle |
+| 36 | `ENGRAM_DEDUP_THRESHOLD_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | float64 | `0.95`/`0.90`/`0.92`/`0.92` | Lifecycle |
+| 37 | `ENGRAM_IMPORTANCE_DEFAULT_{TYPE}` | float64 | `7`/`7`/`5`/`4` | Lifecycle |
+| 38 | `ENGRAM_IMPORTANCE_MIN_{TYPE}` / `ENGRAM_IMPORTANCE_MAX_{TYPE}` | float64 | per-type | Lifecycle |
+| 39 | `ENGRAM_RATE_LIMIT_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | int | `5`/`10`/`20`/`50` | Lifecycle |
+| 40 | `ENGRAM_WRITE_CHECKPOINTS_ENABLED` | bool | `false` | Lifecycle |
+| 41 | `ENGRAM_CP_*` (13 sub-flags, see section) | mixed | see section | Lifecycle |
