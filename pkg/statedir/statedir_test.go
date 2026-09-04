@@ -46,7 +46,13 @@ func TestDirHomeUnsetFallback(t *testing.T) {
 	t.Setenv("ENGRAM_STATE_DIR", "")
 	t.Setenv("SIRI_HOME", "")
 	t.Setenv("HOME", "")
-	os.Unsetenv("HOME")
+	if err := os.Unsetenv("HOME"); err != nil {
+		t.Fatalf("unset HOME: %v", err)
+	}
+
+	if os.Geteuid() != 0 {
+		t.Skip("fallback path /root/.siri requires root to create; skipping on non-root runner")
+	}
 
 	// Sanity: verify os.UserHomeDir actually errors with HOME unset on linux.
 	if _, err := os.UserHomeDir(); err == nil {
