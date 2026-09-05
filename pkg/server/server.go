@@ -406,6 +406,10 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultText("[]"), nil
 	}
 
+	if s.metrics != nil {
+		s.metrics.SearchTopScore.WithLabelValues(results[0].Collection).Observe(results[0].Score)
+	}
+
 	// Apply 3-component scoring + MMR rerank (shared with REST search).
 	weights := s.overrides.getWeights(s.weights)
 	evapCfg := s.evaporationConfig()
@@ -841,6 +845,9 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 	topScore := 0.0
 	if len(dupeResults) > 0 {
 		topScore = dupeResults[0].Score
+		if s.metrics != nil {
+			s.metrics.SearchTopScore.WithLabelValues(resolvedCol).Observe(topScore)
+		}
 	}
 
 	dup := memory.IsDuplicate(dupeResults, threshold)

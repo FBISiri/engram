@@ -245,6 +245,36 @@ func TestNew_RegistersOptionalCollectors(t *testing.T) {
 	}
 }
 
+func TestSearchTopScoreHistogram(t *testing.T) {
+	m := New(nil, nil)
+	if m.SearchTopScore == nil {
+		t.Fatal("SearchTopScore not initialized")
+	}
+	m.SearchTopScore.WithLabelValues("default").Observe(0.93)
+
+	metrics := collect(t, m.SearchTopScore)
+	if len(metrics) != 1 {
+		t.Fatalf("Collect emitted %d metrics, want 1", len(metrics))
+	}
+	h := metrics[0].GetHistogram()
+	if got := h.GetSampleCount(); got != 1 {
+		t.Errorf("SampleCount = %d, want 1", got)
+	}
+	if got := h.GetSampleSum(); got < 0.929 || got > 0.931 {
+		t.Errorf("SampleSum = %v, want ~0.93", got)
+	}
+	buckets := h.GetBucket()
+	if len(buckets) != 11 {
+		t.Fatalf("explicit bucket count = %d, want 11", len(buckets))
+	}
+	if got := buckets[0].GetUpperBound(); got < 0.499 || got > 0.501 {
+		t.Errorf("first bucket upper bound = %v, want 0.50", got)
+	}
+	if got := buckets[len(buckets)-1].GetUpperBound(); got < 0.999 || got > 1.001 {
+		t.Errorf("last bucket upper bound = %v, want 1.00", got)
+	}
+}
+
 func TestMemoryCountCollector_EmptyStats(t *testing.T) {
 	// A stats fn returning no collections must not emit any metric or panic.
 	c := newMemoryCountCollector(func(context.Context) map[string]uint64 { return nil })

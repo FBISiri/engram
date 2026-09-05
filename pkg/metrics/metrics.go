@@ -41,6 +41,8 @@ type Metrics struct {
 	// statistics per collection.
 	ImportanceMean *prometheus.GaugeVec // engram_importance_mean{collection}
 	ImportanceP90  *prometheus.GaugeVec // engram_importance_p90{collection}
+	// SearchTopScore samples the top similarity score of vector searches, by collection.
+	SearchTopScore *prometheus.HistogramVec // engram_search_top_score{collection}
 }
 
 // New creates a Metrics instance and registers all metrics into a fresh Registry.
@@ -112,6 +114,13 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"collection"})
 	reg.MustRegister(importanceMean, importanceP90)
 
+	searchTopScore := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "engram_search_top_score",
+		Help:    "top similarity score of vector search results, by collection (observed on memory_search and dedup paths)",
+		Buckets: prometheus.LinearBuckets(0.50, 0.05, 11),
+	}, []string{"collection"})
+	reg.MustRegister(searchTopScore)
+
 	if embedCache != nil {
 		reg.MustRegister(newEmbedCacheCollector(embedCache))
 	}
@@ -133,6 +142,7 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		EvaporationEffectiveImportance: evaporationEffectiveImportance,
 		ImportanceMean:                 importanceMean,
 		ImportanceP90:                  importanceP90,
+		SearchTopScore:                 searchTopScore,
 	}
 }
 
