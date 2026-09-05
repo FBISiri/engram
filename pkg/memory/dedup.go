@@ -40,6 +40,23 @@ type ProvenanceEntry struct {
 	ContentScore float64 `json:"content_score"`
 }
 
+// ProvenanceHistoryToAny converts a slice of ProvenanceEntry into a []any of
+// map[string]any using the same keys getProvenanceHistory reads
+// (source_type/merged_at/content_score). This avoids passing a struct slice to
+// the qdrant client, which panics on unsupported types. The result is always
+// non-nil (possibly empty).
+func ProvenanceHistoryToAny(history []ProvenanceEntry) []any {
+	out := make([]any, 0, len(history))
+	for _, e := range history {
+		out = append(out, map[string]any{
+			"source_type":   e.SourceType,
+			"merged_at":     e.MergedAt,
+			"content_score": e.ContentScore,
+		})
+	}
+	return out
+}
+
 // sourceTypeTrust returns the trust rank of a source_type (lower = more
 // trusted). Follows the MemIR evidence hierarchy: external/human-authoritative
 // sources outrank agent-synthesized ones.

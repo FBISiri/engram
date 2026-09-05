@@ -953,7 +953,7 @@ func (s *Server) provenanceMerge(ctx context.Context, existing *memory.ScoredMem
 	primary := memory.HighestTrustSource(sources)
 
 	fields := map[string]any{
-		"metadata.provenance_history": history,
+		"metadata.provenance_history": memory.ProvenanceHistoryToAny(history),
 		"metadata.source_type":        primary,
 		"updated_at":                  float64(time.Now().Unix()),
 	}

@@ -169,11 +169,15 @@ func (s *Store) EnsureCollection(ctx context.Context) error {
 
 // Insert stores a memory with its embedding vector.
 func (s *Store) Insert(ctx context.Context, mem *memory.Memory, vector []float32) error {
+	point, err := memoryToPoint(mem, vector)
+	if err != nil {
+		return err
+	}
 	wait := true
-	_, err := s.client.Upsert(ctx, &qdrant.UpsertPoints{
+	_, err = s.client.Upsert(ctx, &qdrant.UpsertPoints{
 		CollectionName: s.collection,
 		Wait:           &wait,
-		Points:         []*qdrant.PointStruct{memoryToPoint(mem, vector)},
+		Points:         []*qdrant.PointStruct{point},
 	})
 	if err != nil {
 		return fmt.Errorf("qdrant: insert: %w", err)
@@ -277,15 +281,100 @@ func (s *Store) Delete(ctx context.Context, ids []string) (int, error) {
 	return len(ids), nil
 }
 
+// normalizePayload recursively converts a payload map into forms accepted by
+// qdrant.NewValueMap (which panics on unsupported types). Struct slices such as
+// []memory.ProvenanceEntry and typed primitive slices are converted to
+// []interface{}; nested maps are recursed. Supported leaf primitives are left
+// as-is.
+func normalizePayload(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = normalizeValue(v)
+	}
+	return out
+}
+
+func normalizeValue(v any) any {
+	switch t := v.(type) {
+	case []memory.ProvenanceEntry:
+		return memory.ProvenanceHistoryToAny(t)
+	case map[string]any:
+		return normalizePayload(t)
+	case []any:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = normalizeValue(e)
+		}
+		return res
+	case []string:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = e
+		}
+		return res
+	case []int64:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = e
+		}
+		return res
+	case []int:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = e
+		}
+		return res
+	case []float64:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = e
+		}
+		return res
+	case []float32:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = e
+		}
+		return res
+	case []bool:
+		res := make([]any, len(t))
+		for i, e := range t {
+			res[i] = e
+		}
+		return res
+	default:
+		return v
+	}
+}
+
+// safeNewValueMap wraps qdrant.NewValueMap and recovers any panic (which the
+// client raises on unsupported value types) into a returned error.
+func safeNewValueMap(fields map[string]any) (payload map[string]*qdrant.Value, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			payload = nil
+			err = fmt.Errorf("qdrant: payload: %v", r)
+		}
+	}()
+	payload = qdrant.NewValueMap(fields)
+	return payload, nil
+}
+
 // Update modifies payload fields of an existing memory without re-embedding.
 func (s *Store) Update(ctx context.Context, id string, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
 	}
 
-	payload := qdrant.NewValueMap(fields)
+	payload, err := safeNewValueMap(normalizePayload(fields))
+	if err != nil {
+		return err
+	}
 	wait := true
-	_, err := s.client.SetPayload(ctx, &qdrant.SetPayloadPoints{
+	_, err = s.client.SetPayload(ctx, &qdrant.SetPayloadPoints{
 		CollectionName: s.collection,
 		Wait:           &wait,
 		Payload:        payload,
@@ -668,8 +757,10 @@ func filterToCondition(f memory.Filter) *qdrant.Condition {
 	return nil
 }
 
-// memoryToPoint converts a Memory + vector into a Qdrant PointStruct.
-func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
+// memoryToPoint converts a Memory + vector into a Qdrant PointStruct. It uses
+// qdrant.TryValueMap so an unsupported payload value yields an error instead of
+// panicking the process (R2: Insert path must be panic-safe).
+func memoryToPoint(mem *memory.Memory, vector []float32) (*qdrant.PointStruct, error) {
 	// Build tags as []any for NewValueMap compatibility.
 	tags := make([]any, len(mem.Tags))
 	for i, t := range mem.Tags {
@@ -688,7 +779,7 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 		fieldAccessCount: mem.AccessCount,
 	}
 	if len(mem.Metadata) > 0 {
-		payload[fieldMetadata] = mem.Metadata
+		payload[fieldMetadata] = normalizePayload(mem.Metadata)
 	}
 	if mem.ValidUntil > 0 {
 		payload[fieldValidUntil] = mem.ValidUntil
@@ -721,11 +812,15 @@ func memoryToPoint(mem *memory.Memory, vector []float32) *qdrant.PointStruct {
 		payload[fieldCollection] = mem.Collection
 	}
 
+	values, err := qdrant.TryValueMap(normalizePayload(payload))
+	if err != nil {
+		return nil, fmt.Errorf("qdrant: payload: %w", err)
+	}
 	return &qdrant.PointStruct{
 		Id:      qdrant.NewID(mem.ID),
 		Vectors: qdrant.NewVectors(vector...),
-		Payload: qdrant.NewValueMap(payload),
-	}
+		Payload: values,
+	}, nil
 }
 
 // pointToMemory converts a Qdrant point (ID + payload) into a Memory.

@@ -23,7 +23,7 @@ func TestMemoryToPointAndBack(t *testing.T) {
 		vector[i] = float32(i) * 0.1
 	}
 
-	pt := memoryToPoint(mem, vector)
+	pt, _ := memoryToPoint(mem, vector)
 
 	// Verify point ID matches memory ID.
 	if pt.Id.GetUuid() != mem.ID {
@@ -341,7 +341,7 @@ func TestMemoryToPoint_ValidUntil(t *testing.T) {
 			memory.WithType(memory.TypeDirective),
 			memory.WithValidUntil(expiry),
 		)
-		pt := memoryToPoint(mem, []float32{0.1, 0.2})
+		pt, _ := memoryToPoint(mem, []float32{0.1, 0.2})
 		val, ok := pt.Payload[fieldValidUntil]
 		if !ok {
 			t.Fatal("expected valid_until in payload, got absent")
@@ -355,7 +355,7 @@ func TestMemoryToPoint_ValidUntil(t *testing.T) {
 		mem := memory.New("permanent insight",
 			memory.WithType(memory.TypeInsight),
 		)
-		pt := memoryToPoint(mem, []float32{0.1, 0.2})
+		pt, _ := memoryToPoint(mem, []float32{0.1, 0.2})
 		if _, ok := pt.Payload[fieldValidUntil]; ok {
 			t.Error("expected valid_until absent for zero value, but it was set")
 		}
@@ -369,7 +369,7 @@ func TestPointToMemory_ValidUntil(t *testing.T) {
 		memory.WithType(memory.TypeDirective),
 		memory.WithValidUntil(expiry),
 	)
-	pt := memoryToPoint(mem, []float32{0.1})
+	pt, _ := memoryToPoint(mem, []float32{0.1})
 	restored := pointToMemory(pt.Id, pt.Payload)
 	if restored.ValidUntil != expiry {
 		t.Errorf("ValidUntil round-trip: got %f, want %f", restored.ValidUntil, expiry)
@@ -492,7 +492,7 @@ func TestMemoryReflectedAtQdrantRoundtrip(t *testing.T) {
 		mem.ReflectedAt = reflectedTs
 
 		vector := make([]float32, 4)
-		pt := memoryToPoint(mem, vector)
+		pt, _ := memoryToPoint(mem, vector)
 
 		// Payload must carry the reflected_at field.
 		if v, ok := pt.Payload["reflected_at"]; !ok {
@@ -515,7 +515,7 @@ func TestMemoryReflectedAtQdrantRoundtrip(t *testing.T) {
 		// ReflectedAt defaults to 0.
 
 		vector := make([]float32, 4)
-		pt := memoryToPoint(mem, vector)
+		pt, _ := memoryToPoint(mem, vector)
 
 		if _, ok := pt.Payload["reflected_at"]; ok {
 			t.Error("payload should NOT contain reflected_at when zero")

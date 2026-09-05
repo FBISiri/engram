@@ -1936,11 +1936,16 @@ func storedProvenance(t *testing.T, m memory.Memory) []memory.ProvenanceEntry {
 	if !ok || raw == nil {
 		return nil
 	}
-	h, ok := raw.([]memory.ProvenanceEntry)
-	if !ok {
+	// After the qdrant-safe fix, provenance_history is stored as the
+	// []any-of-map[string]any form; getProvenanceHistory handles both that and
+	// the legacy []memory.ProvenanceEntry form.
+	switch raw.(type) {
+	case []memory.ProvenanceEntry, []any:
+		return getProvenanceHistory(m.Metadata)
+	default:
 		t.Fatalf("provenance_history has unexpected type %T", raw)
+		return nil
 	}
-	return h
 }
 
 func TestProvenanceMerge_DifferentSource(t *testing.T) {
