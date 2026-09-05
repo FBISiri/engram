@@ -69,7 +69,7 @@ func TestProvenanceMerge_UpdateFieldsNormalized(t *testing.T) {
 				},
 				Score: 0.95,
 			}
-			if err := cap.mockStore.Insert(context.Background(), &existing.Memory, []float32{1}); err != nil {
+			if err := cap.Insert(context.Background(), &existing.Memory, []float32{1}); err != nil {
 				t.Fatalf("seed insert: %v", err)
 			}
 
