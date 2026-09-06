@@ -105,6 +105,17 @@ Replace the example memories with your agent's real data as it accumulates.
 
 ---
 
+## Config drift test
+
+`config_validate_test.go` (run via `go test ./examples/...`) parses every example
+env file here (`lifecycle.env` and `*/.env.example`) and asserts each `ENGRAM_*`
+key is (1) documented in [docs/configuration.md](../docs/configuration.md),
+(2) actually read by a Go env parser, and (3) carries a value that parses as the
+type its config helper expects. This catches drift between the examples, the
+docs, and the code automatically in CI.
+
+---
+
 ## Related docs
 
 - [Main README](../README.md) — problem statement, core concepts, architecture

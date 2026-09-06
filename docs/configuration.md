@@ -500,3 +500,4 @@ export ENGRAM_DEDUP_THRESHOLD=0.85  # more aggressive dedup for testing
 | 39 | `ENGRAM_RATE_LIMIT_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | int | `5`/`10`/`20`/`50` | Lifecycle |
 | 40 | `ENGRAM_WRITE_CHECKPOINTS_ENABLED` | bool | `false` | Lifecycle |
 | 41 | `ENGRAM_CP_*` (13 sub-flags, see section) | mixed | see section | Lifecycle |
+| 42 | `ENGRAM_STATE_DIR` | string | _(resolved: `$SIRI_HOME/.siri` > `$HOME/.siri` > `/root/.siri`)_ | Statedir |
