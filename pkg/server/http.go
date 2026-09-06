@@ -48,22 +48,22 @@ import (
 	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // HTTPServer wraps the Engram Server with an HTTP interface.
 type HTTPServer struct {
-	srv       *Server
-	port      int
-	apiKey    string
+	srv    *Server
+	port   int
+	apiKey string
 	// principalKeys maps caller type → dedicated API key. A request that
 	// authenticates with one of these keys gets its caller type from the
 	// key (header ignored). See config.PrincipalKeys.
 	principalKeys map[string]string
-	mux       *http.ServeMux
-	httpSrv   *http.Server
-	startTime time.Time
+	mux           *http.ServeMux
+	httpSrv       *http.Server
+	startTime     time.Time
 }
 
 // NewHTTPServer creates an HTTPServer bound to the given port.
@@ -233,6 +233,7 @@ type healthResponse struct {
 	UptimeSeconds    float64                 `json:"uptime_seconds,omitempty"`
 	MemoryCount      map[string]uint64       `json:"memory_count,omitempty"`
 	LastReflection   *reflection.CheckResult `json:"last_reflection,omitempty"`
+	ReflectionRunner *reflectionStatus       `json:"reflection_runner,omitempty"`
 	EmbeddingLatency *embeddingLatency       `json:"embedding_latency,omitempty"`
 }
 
@@ -285,6 +286,11 @@ func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	eng := reflection.NewEngine(h.srv.store, h.srv.embedder, reflection.DefaultConfig())
 	if checkResult, err := eng.Check(ctx); err == nil {
 		resp.LastReflection = checkResult
+	}
+
+	if h.srv.reflectionRunner != nil {
+		st := h.srv.reflectionRunner.status()
+		resp.ReflectionRunner = &st
 	}
 
 	if h.srv.metrics != nil {

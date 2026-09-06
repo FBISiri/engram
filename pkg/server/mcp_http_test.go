@@ -277,6 +277,15 @@ func TestMCPHTTP_ReflectionRun_RejectedForPigo(t *testing.T) {
 	}
 }
 
+func TestMCPHTTP_ReflectionStatus_RejectedForPigo(t *testing.T) {
+	ts, _ := buildMCPTestServer(t)
+	c := newMCPClient(t, ts.URL, testPigoKey)
+	res := callMCP(t, c, "reflection_status", map[string]any{})
+	if !res.IsError {
+		t.Fatalf("reflection_status should be rejected for pigo, got: %s", extractText(res))
+	}
+}
+
 // ─────────────────────────────────────────────────────────────
 // stdio / ctx-less sanity: non-isolated default caller still fans out.
 // ─────────────────────────────────────────────────────────────

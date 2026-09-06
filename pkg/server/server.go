@@ -53,6 +53,7 @@ type Server struct {
 	rateLimiter       *RateLimiter           // A-MAC per-type write limiter
 	importanceMonitor *ImportanceMonitor     // CP2 monitor; nil unless write checkpoints enabled
 	contentChecker    *ContentChecker        // CP4 checker; nil unless write checkpoints enabled
+	reflectionRunner  *reflectionRunner      // single-flight async reflection runner
 }
 
 // SetMetrics registers prometheus metrics so handlers can record latency.
@@ -103,14 +104,15 @@ func (s *Server) SetTrajectoryLogger(l *trajectory.Logger) {
 // NewServer creates a new Engram MCP server with all tools registered.
 func NewServer(store memory.Store, embedder embedding.Embedder, cfg *config.Config) *Server {
 	s := &Server{
-		store:          store,
-		embedder:       embedder,
-		weights:        cfg.Weights,
-		decay:          cfg.Decay,
-		evapCfg:        cfg.Evaporation,
-		mmrLambda:      cfg.MMRLambda,
-		dedupThreshold: cfg.DedupThreshold,
-		cfg:            cfg,
+		store:            store,
+		embedder:         embedder,
+		weights:          cfg.Weights,
+		decay:            cfg.Decay,
+		evapCfg:          cfg.Evaporation,
+		mmrLambda:        cfg.MMRLambda,
+		dedupThreshold:   cfg.DedupThreshold,
+		cfg:              cfg,
+		reflectionRunner: &reflectionRunner{},
 	}
 
 	rateLimits := cfg.RateLimits
@@ -222,9 +224,15 @@ func (s *Server) registerTools() {
 	)
 	s.mcpServer.AddTool(reflectionCheckTool, s.handleReflectionCheck)
 
+	// Tool 5b: reflection_status
+	reflectionStatusTool := mcp.NewTool("reflection_status",
+		mcp.WithDescription("Report the status of the asynchronous reflection runner: whether a run is in flight (running, run_id, started_at) and the last completed run's results (insights_created, duration, triggered, skip_reason, mode, errors). Poll this after reflection_run."),
+	)
+	s.mcpServer.AddTool(reflectionStatusTool, s.handleReflectionStatus)
+
 	// Tool 6: reflection_run
 	reflectionRunTool := mcp.NewTool("reflection_run",
-		mcp.WithDescription("Run one Reflection Engine cycle. Synthesizes insights from unreflected memories using an LLM. Respects min-interval (2h) and daily limit (3x/day). Returns RunResult with insights_created, sources_marked, and errors."),
+		mcp.WithDescription("Run one Reflection Engine cycle. Synthesizes insights from unreflected memories using an LLM. Respects min-interval (2h) and daily limit (3x/day). Runs asynchronously: returns immediately with a run_id (or already_running if a run is in flight) — poll reflection_status for progress/results. dry_run=true is a synchronous preview that returns the RunResult directly."),
 		mcp.WithBoolean("dry_run", mcp.Description("If true, simulate the run without writing any changes. Default: false.")),
 	)
 	s.mcpServer.AddTool(reflectionRunTool, s.handleReflectionRun)
@@ -1397,21 +1405,53 @@ func (s *Server) handleReflectionRun(ctx context.Context, request mcp.CallToolRe
 	cfg := s.reflectionConfig()
 	cfg.DryRun = dryRun
 
-	eng := reflection.NewEngine(s.store, s.embedder, cfg)
-	result, err := eng.Run(ctx)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("reflection run error: %v", err)), nil
+	// dry_run stays synchronous: a preview must return the RunResult directly.
+	if dryRun {
+		eng := reflection.NewEngine(s.store, s.embedder, cfg)
+		result, err := eng.Run(ctx)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("reflection run error: %v", err)), nil
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(data)), nil
 	}
-	if s.metrics != nil && result.Triggered {
-		s.metrics.ReflectionRuns.WithLabelValues(result.Mode, "default").Inc()
-		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "high").Add(float64(result.LLMConfHighCount))
-		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "mid").Add(float64(result.LLMConfMidCount))
-		s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "low").Add(float64(result.LLMConfLowCount))
+
+	// Real runs are launched asynchronously via the single-flight runner so the
+	// 30s MCP bridge timeout cannot kill a minutes-long LLM cycle.
+	defaultRun := func(rctx context.Context) (*reflection.RunResult, error) {
+		rcfg := s.reflectionConfig()
+		rcfg.DryRun = false
+		eng := reflection.NewEngine(s.store, s.embedder, rcfg)
+		return eng.Run(rctx)
 	}
-	data, err := json.Marshal(result)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	recordMetrics := func(result *reflection.RunResult) {
+		if s.metrics != nil && result.Triggered {
+			s.metrics.ReflectionRuns.WithLabelValues(result.Mode, "default").Inc()
+			s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "high").Add(float64(result.LLMConfHighCount))
+			s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "mid").Add(float64(result.LLMConfMidCount))
+			s.metrics.ReflectionInsightsCreated.WithLabelValues(result.Mode, "low").Add(float64(result.LLMConfLowCount))
+		}
 	}
+
+	started, runID, startedAt := s.reflectionRunner.start(defaultRun, recordMetrics)
+	if !started {
+		resp := map[string]any{
+			"already_running": true,
+			"run_id":          runID,
+			"started_at":      startedAt.Format(time.RFC3339),
+		}
+		data, _ := json.Marshal(resp)
+		return mcp.NewToolResultText(string(data)), nil
+	}
+	resp := map[string]any{
+		"started": true,
+		"run_id":  runID,
+		"dry_run": false,
+	}
+	data, _ := json.Marshal(resp)
 	return mcp.NewToolResultText(string(data)), nil
 }
 

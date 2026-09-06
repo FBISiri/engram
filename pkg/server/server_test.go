@@ -16,6 +16,7 @@ import (
 	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/config"
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/reflection"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -424,6 +425,8 @@ func callTool(srv *Server, toolName string, args map[string]any) (*mcp.CallToolR
 		return srv.handleDelete(ctx, request)
 	case "reflection_check":
 		return srv.handleReflectionCheck(ctx, request)
+	case "reflection_status":
+		return srv.handleReflectionStatus(ctx, request)
 	case "reflection_run":
 		return srv.handleReflectionRun(ctx, request)
 	default:
@@ -1309,7 +1312,13 @@ func TestReflectionRun_DryRun(t *testing.T) {
 // TestReflectionRun_InvalidDryRunArg verifies that a non-boolean dry_run arg
 // is handled gracefully (defaults to false, does not panic).
 func TestReflectionRun_InvalidDryRunArg(t *testing.T) {
+	t.Setenv("ENGRAM_STATE_DIR", t.TempDir())
 	srv, _ := newTestServer()
+	// dry_run="yes" defaults to false => async path; stub the runner so the test
+	// neither hits the real engine/LLM nor leaks a goroutine.
+	srv.reflectionRunner.runFn = func(context.Context) (*reflection.RunResult, error) {
+		return &reflection.RunResult{}, nil
+	}
 
 	// Pass string instead of bool — should be ignored, defaults to false (no panic).
 	result, err := callTool(srv, "reflection_run", map[string]any{
