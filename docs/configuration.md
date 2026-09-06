@@ -10,6 +10,7 @@ All Engram configuration is done via environment variables. No config files are 
 - [Deduplication](#deduplication)
 - [Server / Transport](#server--transport)
 - [Reflection Engine](#reflection-engine)
+- [State Directory](#state-directory)
 - [Lifecycle & Admission (Evaporation / A-MAC / Write Checkpoints)](#lifecycle--admission-evaporation--a-mac--write-checkpoints)
 - [Observability (OpenTelemetry)](#observability-opentelemetry)
 - [TTL Auto-Calculator](#ttl-auto-calculator)
@@ -231,6 +232,32 @@ export ENGRAM_REFLECTION_COUNT=15
 
 # Use a lighter model for reflection
 export ENGRAM_REFLECTION_MODEL=claude-haiku-4-20250514
+```
+
+---
+
+## State Directory
+
+The Reflection Engine trigger (`pkg/reflection/trigger.go`) and the dream-engine gate (`pkg/dream/gate.go`) persist their run-state (last-run timestamps, daily counters) on local disk so cadence survives restarts. Both resolve the directory through `pkg/statedir`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ENGRAM_STATE_DIR` | `string` | _(empty — see resolution order)_ | Explicit state directory. When set, the value is used **as-is** (no `.siri` suffix appended). Directory is created automatically (`0755`) if missing. Introduced in the 2026-09-04 hotfix (`a62c256`, "tolerate missing $HOME") so root/systemd units without `$HOME` still keep reflection & dream cadence. |
+
+### Resolution Order
+
+1. `$ENGRAM_STATE_DIR` — used directly as the state dir
+2. `$SIRI_HOME` → `$SIRI_HOME/.siri`
+3. `os.UserHomeDir()` → `$HOME/.siri`
+4. Fallback → `/root/.siri` (logs a `[WARN]`)
+
+Resolution never hard-fails because `$HOME` is missing; the only error path is a failed `MkdirAll`.
+
+### Usage Example
+
+```bash
+# systemd unit without $HOME: pin state explicitly
+export ENGRAM_STATE_DIR=/var/lib/engram/state
 ```
 
 ---
@@ -500,4 +527,4 @@ export ENGRAM_DEDUP_THRESHOLD=0.85  # more aggressive dedup for testing
 | 39 | `ENGRAM_RATE_LIMIT_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | int | `5`/`10`/`20`/`50` | Lifecycle |
 | 40 | `ENGRAM_WRITE_CHECKPOINTS_ENABLED` | bool | `false` | Lifecycle |
 | 41 | `ENGRAM_CP_*` (13 sub-flags, see section) | mixed | see section | Lifecycle |
-| 42 | `ENGRAM_STATE_DIR` | string | _(resolved: `$SIRI_HOME/.siri` > `$HOME/.siri` > `/root/.siri`)_ | Statedir |
+| 42 | `ENGRAM_STATE_DIR` | string | _(empty; falls back to `$SIRI_HOME/.siri` > `$HOME/.siri` > `/root/.siri`)_ | State Directory |
