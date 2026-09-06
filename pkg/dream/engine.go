@@ -519,39 +519,67 @@ func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory
 	return insight, sourceIDs, nil
 }
 
+// pruneMinAge is the minimum age a memory must reach before prune may delete
+// it. Freshly written memories are born with access_count=0, so without an age
+// floor any low-importance memory written today (e.g. an inbound email record)
+// would be deleted at the very next dream run. The gather phase already applies
+// age floors; prune must too. See the 2026-09-05 8980c8a1 incident.
+const pruneMinAge = 7 * 24 * time.Hour
+
 // prune cleans up low-value memories.
 func (e *Engine) prune(ctx context.Context) ([]string, error) {
 	var items []string
 
-	// Find memories with importance <= 3 AND access_count = 0.
+	now := time.Now()
+	cutoff := float64(now.Add(-pruneMinAge).Unix())
+
+	// Find memories with importance <= 3 AND access_count = 0 AND age >= 7d.
 	candidates, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
 		Limit: 200,
 		Filters: []memory.Filter{
 			{Field: "importance", Op: memory.OpLte, Value: 3.0},
 			{Field: "access_count", Op: memory.OpEq, Value: int64(0)},
+			{Field: "created_at", Op: memory.OpLte, Value: cutoff},
 		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scroll prune candidates: %w", err)
 	}
 
-	items = append(items, fmt.Sprintf("prune candidates (importance<=3, access_count=0): %d", len(candidates)))
-
-	if len(candidates) > 0 {
-		ids := make([]string, 0, len(candidates))
-		for i, m := range candidates {
-			ids = append(ids, m.ID)
-			if i < 10 {
-				summary := m.Content
-				if len(summary) > 60 {
-					summary = summary[:60] + "..."
-				}
-				items = append(items, fmt.Sprintf("  - [%s] %s (type=%s, importance=%.0f)",
-					m.ID[:8], summary, m.Type, m.Importance))
-			}
+	// Defense in depth: a store whose filter support is incomplete must still
+	// never delete a <7d memory. Re-filter in memory with the same cutoff.
+	eligible := make([]memory.Memory, 0, len(candidates))
+	skipped := 0
+	for _, m := range candidates {
+		if m.CreatedAt <= cutoff {
+			eligible = append(eligible, m)
+		} else {
+			skipped++
 		}
-		if len(candidates) > 10 {
-			items = append(items, fmt.Sprintf("  ... and %d more", len(candidates)-10))
+	}
+
+	items = append(items, fmt.Sprintf("prune candidates (importance<=3, access_count=0, age>=7d): %d", len(eligible)))
+	if skipped > 0 {
+		items = append(items, fmt.Sprintf("prune skipped (age<7d): %d", skipped))
+	}
+
+	if len(eligible) > 0 {
+		verb := "deleted"
+		if e.cfg.DryRun {
+			verb = "would-delete"
+		}
+		ids := make([]string, 0, len(eligible))
+		for _, m := range eligible {
+			ids = append(ids, m.ID)
+			// Truncate content by runes (not bytes) so a multibyte UTF-8
+			// character is never split.
+			summary := m.Content
+			if r := []rune(summary); len(r) > 60 {
+				summary = string(r[:60])
+			}
+			ageDays := int(now.Sub(time.Unix(int64(m.CreatedAt), 0)).Hours() / 24)
+			items = append(items, fmt.Sprintf("  - %s [%s] %s... (type=%s, importance=%.0f, age=%dd)",
+				verb, m.ID, summary, m.Type, m.Importance, ageDays))
 		}
 
 		if e.cfg.DryRun {

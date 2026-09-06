@@ -13,6 +13,7 @@ import (
 type fakeStore struct {
 	all       []memory.Memory
 	callCount int
+	deleted   []string
 }
 
 func (f *fakeStore) Insert(ctx context.Context, mem *memory.Memory, vector []float32) error {
@@ -24,7 +25,10 @@ func (f *fakeStore) Search(ctx context.Context, vector []float32, opts memory.Se
 func (f *fakeStore) SearchByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
 	return nil, nil
 }
-func (f *fakeStore) Delete(ctx context.Context, ids []string) (int, error) { return 0, nil }
+func (f *fakeStore) Delete(ctx context.Context, ids []string) (int, error) {
+	f.deleted = append(f.deleted, ids...)
+	return len(ids), nil
+}
 func (f *fakeStore) Update(ctx context.Context, id string, fields map[string]any) error {
 	return nil
 }
