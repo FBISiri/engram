@@ -8,6 +8,43 @@ releases begin.
 ## [Unreleased]
 
 ### Added
+- **Memory evaporation v2 — safety & gap closure** (spec
+  `Engram/spec-memory-evaporation.md` §4). Builds on the shipped evaporation v1
+  (`c170c0d`, `ca23b07`) to make the sweep *safe to enable*:
+  - Structural protection rules P1..P8 (`memory.EvaporationExempt`) evaluated
+    **before** any deprecation. P1 (protected types `identity`/`directive`) is
+    structural — it holds even if a half-life is misconfigured `> 0`, so a
+    config typo can never make identity/directive memories evaporable.
+  - Reinforcement clock (`ENGRAM_EVAPORATION_DECAY_BASIS=last_access`, new
+    default): decay now runs from `max(created_at, last_accessed_at)`, so a
+    memory that keeps getting read stays alive. `created` preserves the legacy
+    created-only basis.
+  - Observation window (`ENGRAM_EVAPORATION_OBSERVATION_DAYS`, default `30`)
+    between soft-deprecate and hard-delete eligibility.
+  - **G1 fix**: an evaporation-deprecated memory is now a hard-delete candidate
+    ONLY IF it is not exempt AND its observation window has elapsed — the
+    evaporation flag no longer bypasses the `importance>=8` / tag / type guards
+    in `isExpiryCandidate`.
+  - **G8 fix**: the expiry snapshot directory now resolves relative to the
+    state dir (`pkg/statedir`) instead of the non-existent hard-coded vault path.
+  - 10 new `ENGRAM_EVAPORATION_*` vars (#43–52 in the config reference) and 4
+    new Prometheus metrics (`engram_evaporation_scanned_total`,
+    `_exempted_total{type,rule}`, `_dry_run_candidates_total{type}`,
+    `_hard_deleted_total{type}`).
+
+### Changed
+- **BEHAVIOUR REDUCTION (fail-safe): `ENGRAM_EVAPORATION_DRY_RUN` now defaults
+  to `true`.** An operator who already set `ENGRAM_EVAPORATION_ENABLED=true`
+  (e.g. from `examples/lifecycle.env`) silently drops into **observe-only** mode
+  on upgrade — the sweep computes and reports candidates + metrics but performs
+  zero `store.Update` calls until `ENGRAM_EVAPORATION_DRY_RUN=false` is set
+  explicitly. This is intentional: it moves existing live deployments in the
+  fail-safe direction. Rollout order is now
+  `enabled=false` → `enabled=true, dry_run=true` (observe ≥1 week) → `dry_run=false`.
+- `ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE` default changed `365` → `0`
+  (directives never evaporate; blast radius ≫ storage saved). `examples/lifecycle.env`
+  also corrects `ENGRAM_EVAPORATION_HALF_LIFE_EVENT` `14` → `30` (G6).
+
 - **`pigo` caller-type + `engram_pigo` baseline collection** — pigo is now a
   first-class caller type (`X-Caller-Type: pigo`) that owns its own physically
   isolated collection `engram_pigo`, registered as a baseline store alongside

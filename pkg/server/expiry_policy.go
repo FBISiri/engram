@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/statedir"
 )
 
 // expiryPolicy defines the type-based deletion eligibility criteria.
@@ -48,13 +49,22 @@ func hasTag(tags []string, target string) bool {
 }
 
 // isExpiryCandidate returns true if m is eligible for policy-based deletion.
-func isExpiryCandidate(m *memory.Memory, now time.Time) bool {
-	// Evaporation-deprecated memories are always candidates, bypassing the
-	// normal importance/age checks — evaporation already made a finer-grained
-	// judgement (spec §5.4).
+func isExpiryCandidate(m *memory.Memory, cfg memory.EvaporationConfig, now time.Time) bool {
+	// Evaporation-deprecated memories are candidates ONLY once they have
+	// cleared BOTH the protection rules and the observation window (spec §4.4,
+	// G1 fix). An evaporation flag must never be a skeleton key past the
+	// importance/tag/type guards that exist for independent reasons.
 	if m.LifecycleStatus == memory.LifecycleDeprecated {
 		if reason, _ := m.Metadata["deprecated_reason"].(string); reason == "evaporation" {
-			return true
+			if exempt, _ := memory.EvaporationExempt(m, cfg, now); exempt {
+				return false
+			}
+			depAt, ok := deprecatedAt(m)
+			if !ok {
+				return false // cannot verify the observation window → do not delete
+			}
+			window := time.Duration(cfg.ObservationDays * 24 * float64(time.Hour))
+			return now.Sub(depAt) > window
 		}
 	}
 
@@ -83,6 +93,24 @@ func isExpiryCandidate(m *memory.Memory, now time.Time) bool {
 	return ageDays > ageThreshold
 }
 
+// deprecatedAt extracts metadata["deprecated_at"] (unix seconds) as a time.
+// Returns ok=false when the field is absent or not numeric.
+func deprecatedAt(m *memory.Memory) (time.Time, bool) {
+	if m.Metadata == nil {
+		return time.Time{}, false
+	}
+	switch v := m.Metadata["deprecated_at"].(type) {
+	case float64:
+		return time.Unix(int64(v), 0), true
+	case int64:
+		return time.Unix(v, 0), true
+	case int:
+		return time.Unix(int64(v), 0), true
+	default:
+		return time.Time{}, false
+	}
+}
+
 func contentPreview(s string) string {
 	const limit = 100
 	if len(s) <= limit {
@@ -108,7 +136,7 @@ func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate,
 		}
 
 		for _, m := range mems {
-			if !isExpiryCandidate(&m, now) {
+			if !isExpiryCandidate(&m, h.srv.evaporationConfig(), now) {
 				continue
 			}
 			ageDays := now.Sub(time.Unix(int64(m.CreatedAt), 0)).Hours() / 24
@@ -134,10 +162,20 @@ func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate,
 	return candidates, nil
 }
 
+// expirySnapshotDir resolves the snapshot directory relative to the resolved
+// state dir (spec §4.7 / G8), falling back to the historical literal only when
+// the state dir is unavailable.
+func expirySnapshotDir() string {
+	if sd, err := statedir.Dir(); err == nil {
+		return filepath.Join(sd, "Engram", "expiry-snapshots")
+	}
+	return "/data/armyoftheagent/siri-vault/Engram/expiry-snapshots"
+}
+
 // writeExpirySnapshot saves a markdown snapshot of the deletion candidates
-// to /data/armyoftheagent/siri-vault/Engram/expiry-snapshots/YYYY-MM-DD.md.
+// to <state-dir>/Engram/expiry-snapshots/YYYY-MM-DD.md.
 func writeExpirySnapshot(candidates []ExpiryCandidate) (string, error) {
-	dir := "/data/armyoftheagent/siri-vault/Engram/expiry-snapshots"
+	dir := expirySnapshotDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)
 	}
@@ -248,6 +286,12 @@ func (h *HTTPServer) handleDeleteExpired(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	if h.srv.metrics != nil {
+		for _, c := range candidates {
+			h.srv.metrics.EvaporationHardDeletedTotal.WithLabelValues(string(c.Type)).Inc()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, expireResult{

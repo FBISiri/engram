@@ -94,3 +94,126 @@ func TestEffectiveImportance_DecaysOverTime(t *testing.T) {
 		t.Errorf("decay over time: late=%f not < early=%f", late, early)
 	}
 }
+
+// TestEffectiveImportance_DecayBasis proves the reinforcement clock (spec §4.2):
+// under last_access, decay runs from max(created, last_accessed), so a recently
+// read memory decays less than the same memory under the legacy created basis.
+// TestEffectiveImportance_InvalidBasisFallsBack: an invalid DecayBasis behaves
+// like last_access (spec §4.2 / §6.7). The one-line stderr warning is emitted
+// once by referenceTime; here we assert behavioural equivalence.
+func TestEffectiveImportance_InvalidBasisFallsBack(t *testing.T) {
+	m := New("x", WithType(TypeEvent), WithImportance(6))
+	m.CreatedAt = daysAgo(60)
+	m.LastAccessedAt = daysAgo(5)
+
+	bogus := enabledEvapConfig()
+	bogus.DecayBasis = "nonsense"
+	lastAccess := enabledEvapConfig()
+	lastAccess.DecayBasis = "last_access"
+
+	if a, b := EffectiveImportance(m, bogus, base), EffectiveImportance(m, lastAccess, base); a != b {
+		t.Errorf("invalid basis (%f) should equal last_access (%f)", a, b)
+	}
+}
+
+func TestEffectiveImportance_DecayBasis(t *testing.T) {
+	m := New("x", WithType(TypeEvent), WithImportance(6))
+	m.CreatedAt = daysAgo(60)
+	m.LastAccessedAt = daysAgo(5) // read recently
+
+	created := enabledEvapConfig()
+	created.DecayBasis = "created"
+	lastAccess := enabledEvapConfig()
+	lastAccess.DecayBasis = "last_access"
+
+	gotCreated := EffectiveImportance(m, created, base)
+	gotLast := EffectiveImportance(m, lastAccess, base)
+	if !(gotLast > gotCreated) {
+		t.Errorf("last_access (%f) should exceed created (%f) for a recently-read memory", gotLast, gotCreated)
+	}
+
+	// Never accessed (last_accessed 0): both bases decay from created_at.
+	never := New("y", WithType(TypeEvent), WithImportance(6))
+	never.CreatedAt = daysAgo(60)
+	if a, b := EffectiveImportance(never, created, base), EffectiveImportance(never, lastAccess, base); a != b {
+		t.Errorf("never-accessed: created=%f last_access=%f should be equal", a, b)
+	}
+}
+
+// TestEvaporationExempt_EachRuleAlone asserts every protection rule P1..P8 is,
+// on its own, sufficient to exempt a memory (spec §4.1), and that a plain aged
+// low-value memory is NOT exempt.
+func TestEvaporationExempt_EachRuleAlone(t *testing.T) {
+	cfg := DefaultEvaporationConfig()
+
+	mk := func(mut func(*Memory)) *Memory {
+		m := New("x", WithType(TypeEvent), WithImportance(3))
+		m.CreatedAt = daysAgo(100)
+		mut(m)
+		return m
+	}
+
+	cases := []struct {
+		name string
+		m    *Memory
+		want string
+	}{
+		{"P1 type", mk(func(m *Memory) { m.Type = TypeIdentity }), "P1"},
+		{"P2 importance", mk(func(m *Memory) { m.Importance = 8 }), "P2"},
+		{"P3 access_count", mk(func(m *Memory) { m.AccessCount = 5 }), "P3"},
+		{"P4 recent access", mk(func(m *Memory) { m.LastAccessedAt = daysAgo(10) }), "P4"},
+		{"P5 tag", mk(func(m *Memory) { m.Tags = []string{"permanent"} }), "P5"},
+		{"P6 superseded", mk(func(m *Memory) { m.SupersededBy = "other-id" }), "P6"},
+		{"P7 corroborated", mk(func(m *Memory) { m.Metadata = map[string]any{"provenance_history": []any{"src"}} }), "P7"},
+		{"P8 young", mk(func(m *Memory) { m.CreatedAt = daysAgo(5) }), "P8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, rule := EvaporationExempt(tc.m, cfg, base)
+			if !got || rule != tc.want {
+				t.Errorf("EvaporationExempt = (%v, %q), want (true, %q)", got, rule, tc.want)
+			}
+		})
+	}
+
+	// Plain aged low-value event: no rule fires.
+	plain := mk(func(m *Memory) {})
+	if got, rule := EvaporationExempt(plain, cfg, base); got {
+		t.Errorf("plain aged event should not be exempt, got rule %q", rule)
+	}
+}
+
+// TestEvaporationExempt_P1Structural is the critical regression: an identity or
+// directive memory is exempt via P1 even under an adversarial config that sets
+// its half-life > 0. P1 must be structural, not configurational (spec §4.1).
+func TestEvaporationExempt_P1Structural(t *testing.T) {
+	cfg := DefaultEvaporationConfig()
+	cfg.Enabled = true
+	cfg.HalfLifeDays[TypeIdentity] = 1  // adversarial: 1-day half-life
+	cfg.HalfLifeDays[TypeDirective] = 1 // adversarial: 1-day half-life
+
+	for _, ty := range []MemoryType{TypeIdentity, TypeDirective} {
+		m := New("x", WithType(ty), WithImportance(3))
+		m.CreatedAt = daysAgo(3650) // 10 years old
+		if exempt, rule := EvaporationExempt(m, cfg, base); !exempt || rule != "P1" {
+			t.Errorf("%s: exempt=(%v,%q), want (true, P1) despite half-life=1", ty, exempt, rule)
+		}
+	}
+}
+
+// TestEvaporationExempt_CorroboratedToggle: P7 is gated by ProtectCorroborated.
+func TestEvaporationExempt_CorroboratedToggle(t *testing.T) {
+	m := New("x", WithType(TypeEvent), WithImportance(3))
+	m.CreatedAt = daysAgo(100)
+	m.Metadata = map[string]any{"provenance_history": []any{"src"}}
+
+	on := DefaultEvaporationConfig()
+	if exempt, rule := EvaporationExempt(m, on, base); !exempt || rule != "P7" {
+		t.Errorf("ProtectCorroborated on: got (%v,%q), want (true, P7)", exempt, rule)
+	}
+	off := DefaultEvaporationConfig()
+	off.ProtectCorroborated = false
+	if exempt, _ := EvaporationExempt(m, off, base); exempt {
+		t.Error("ProtectCorroborated off: memory should not be exempt via P7")
+	}
+}

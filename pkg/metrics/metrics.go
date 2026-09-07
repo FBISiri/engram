@@ -37,6 +37,14 @@ type Metrics struct {
 	EvaporationSweepDuration prometheus.Histogram // engram_evaporation_sweep_duration_seconds
 	// EvaporationEffectiveImportance samples query-time effective_importance, by type.
 	EvaporationEffectiveImportance *prometheus.HistogramVec // engram_evaporation_effective_importance
+	// EvaporationScannedTotal counts active memories scanned by the sweep.
+	EvaporationScannedTotal prometheus.Counter // engram_evaporation_scanned_total
+	// EvaporationExemptedTotal counts memories exempted from evaporation, by type and protection rule (P1..P8).
+	EvaporationExemptedTotal *prometheus.CounterVec // engram_evaporation_exempted_total
+	// EvaporationDryRunCandidatesTotal counts below-threshold, non-exempt candidates identified by the sweep, by type.
+	EvaporationDryRunCandidatesTotal *prometheus.CounterVec // engram_evaporation_dry_run_candidates_total
+	// EvaporationHardDeletedTotal counts memories hard-deleted via the expiry path, by type.
+	EvaporationHardDeletedTotal *prometheus.CounterVec // engram_evaporation_hard_deleted_total
 	// ImportanceMean/ImportanceP90 export the CP2 importance-monitor rolling
 	// statistics per collection.
 	ImportanceMean *prometheus.GaugeVec // engram_importance_mean{collection}
@@ -104,6 +112,24 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"type"})
 	reg.MustRegister(evaporationSweepTotal, evaporationDeprecatedTotal, evaporationSweepDuration, evaporationEffectiveImportance)
 
+	evaporationScannedTotal := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "engram_evaporation_scanned_total",
+		Help: "Total active memories scanned by the evaporation sweep.",
+	})
+	evaporationExemptedTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_evaporation_exempted_total",
+		Help: "Total memories exempted from evaporation, by type and protection rule (P1..P8).",
+	}, []string{"type", "rule"})
+	evaporationDryRunCandidatesTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_evaporation_dry_run_candidates_total",
+		Help: "Total below-threshold, non-exempt evaporation candidates identified by the sweep, by type.",
+	}, []string{"type"})
+	evaporationHardDeletedTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_evaporation_hard_deleted_total",
+		Help: "Total memories hard-deleted via the expiry path, by type.",
+	}, []string{"type"})
+	reg.MustRegister(evaporationScannedTotal, evaporationExemptedTotal, evaporationDryRunCandidatesTotal, evaporationHardDeletedTotal)
+
 	importanceMean := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "engram_importance_mean",
 		Help: "Rolling mean importance of recent writes per collection (CP2 monitor).",
@@ -129,20 +155,24 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}
 
 	return &Metrics{
-		Registry:                       reg,
-		SearchDuration:                 searchDur,
-		EmbedDuration:                  embedDur,
-		ReflectionRuns:                 reflectionRuns,
-		ReflectionInsightsCreated:      reflectionInsightsCreated,
-		MemoryOps:                      memoryOps,
-		DedupHits:                      dedupHits,
-		EvaporationSweepTotal:          evaporationSweepTotal,
-		EvaporationDeprecatedTotal:     evaporationDeprecatedTotal,
-		EvaporationSweepDuration:       evaporationSweepDuration,
-		EvaporationEffectiveImportance: evaporationEffectiveImportance,
-		ImportanceMean:                 importanceMean,
-		ImportanceP90:                  importanceP90,
-		SearchTopScore:                 searchTopScore,
+		Registry:                         reg,
+		SearchDuration:                   searchDur,
+		EmbedDuration:                    embedDur,
+		ReflectionRuns:                   reflectionRuns,
+		ReflectionInsightsCreated:        reflectionInsightsCreated,
+		MemoryOps:                        memoryOps,
+		DedupHits:                        dedupHits,
+		EvaporationSweepTotal:            evaporationSweepTotal,
+		EvaporationDeprecatedTotal:       evaporationDeprecatedTotal,
+		EvaporationSweepDuration:         evaporationSweepDuration,
+		EvaporationEffectiveImportance:   evaporationEffectiveImportance,
+		EvaporationScannedTotal:          evaporationScannedTotal,
+		EvaporationExemptedTotal:         evaporationExemptedTotal,
+		EvaporationDryRunCandidatesTotal: evaporationDryRunCandidatesTotal,
+		EvaporationHardDeletedTotal:      evaporationHardDeletedTotal,
+		ImportanceMean:                   importanceMean,
+		ImportanceP90:                    importanceP90,
+		SearchTopScore:                   searchTopScore,
 	}
 }
 

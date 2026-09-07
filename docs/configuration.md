@@ -280,12 +280,22 @@ Recent reads boost the memory (`AccessBoostAlpha`), so memories that keep gettin
 | `ENGRAM_EVAPORATION_ENABLED` | `bool` | `false` | Enable the background sweep. |
 | `ENGRAM_EVAPORATION_HALF_LIFE_EVENT` | `float64` (days) | `30` | Half-life for `event` memories. |
 | `ENGRAM_EVAPORATION_HALF_LIFE_INSIGHT` | `float64` (days) | `180` | Half-life for `insight` memories. |
-| `ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE` | `float64` (days) | `365` | Half-life for `directive` memories. |
+| `ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE` | `float64` (days) | `0` | Half-life for `directive` memories. `0` = never decays (v2: was `365`). |
 | `ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY` | `float64` (days) | `0` | Half-life for `identity` memories. `0` = never decays. |
 | `ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA` | `float64` | `0.15` | Importance boost applied on each recall (counteracts decay for actively-used memories). |
 | `ENGRAM_EVAPORATION_EVICTION_THRESHOLD` | `float64` | `1.0` | Memories whose decayed importance drops below this are evicted by the sweep. |
 | `ENGRAM_EVAPORATION_SWEEP_INTERVAL_H` | `int` (hours) | `6` | How often the sweep runs. |
 | `ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT` | `int` | `100` | Max memories processed per sweep. |
+| `ENGRAM_EVAPORATION_DRY_RUN` | `bool` | `true` | When true the sweep computes and reports candidates but performs **no** `store.Update` (observe-only, fail-safe). |
+| `ENGRAM_EVAPORATION_DECAY_BASIS` | `string` | `last_access` | Reinforcement clock: `last_access` decays from `max(created_at, last_accessed_at)`; `created` is the legacy created-only basis. Invalid values fall back to `last_access`. |
+| `ENGRAM_EVAPORATION_MIN_AGE_DAYS` | `float64` (days) | `14` | P8: never evaporate a memory younger than this, whatever the math says. |
+| `ENGRAM_EVAPORATION_OBSERVATION_DAYS` | `float64` (days) | `30` | Window between soft-deprecate and hard-delete eligibility. |
+| `ENGRAM_EVAPORATION_PROTECT_TYPES` | csv | `identity,directive` | P1: types that are structurally exempt from evaporation, regardless of half-life config. |
+| `ENGRAM_EVAPORATION_PROTECT_IMPORTANCE` | `float64` | `8` | P2: memories at or above this importance are exempt. |
+| `ENGRAM_EVAPORATION_PROTECT_ACCESS_COUNT` | `int` | `5` | P3: memories with at least this many accesses are exempt. |
+| `ENGRAM_EVAPORATION_PROTECT_RECENT_ACCESS_DAYS` | `float64` (days) | `30` | P4: memories accessed within this window are exempt. |
+| `ENGRAM_EVAPORATION_PROTECT_TAGS` | csv | `permanent,frank-feedback,directive,identity` | P5: memories carrying any of these tags are exempt. |
+| `ENGRAM_EVAPORATION_PROTECT_CORROBORATED` | `bool` | `true` | P7: memories with a non-empty `provenance_history` (dedup merge target) are exempt. |
 
 ### A-MAC — type-aware admission control
 
@@ -528,3 +538,13 @@ export ENGRAM_DEDUP_THRESHOLD=0.85  # more aggressive dedup for testing
 | 40 | `ENGRAM_WRITE_CHECKPOINTS_ENABLED` | bool | `false` | Lifecycle |
 | 41 | `ENGRAM_CP_*` (13 sub-flags, see section) | mixed | see section | Lifecycle |
 | 42 | `ENGRAM_STATE_DIR` | string | _(empty; falls back to `$SIRI_HOME/.siri` > `$HOME/.siri` > `/root/.siri`)_ | State Directory |
+| 43 | `ENGRAM_EVAPORATION_DRY_RUN` | bool | `true` | Lifecycle |
+| 44 | `ENGRAM_EVAPORATION_DECAY_BASIS` | string | `last_access` | Lifecycle |
+| 45 | `ENGRAM_EVAPORATION_MIN_AGE_DAYS` | float64 | `14` | Lifecycle |
+| 46 | `ENGRAM_EVAPORATION_OBSERVATION_DAYS` | float64 | `30` | Lifecycle |
+| 47 | `ENGRAM_EVAPORATION_PROTECT_TYPES` | csv | `identity,directive` | Lifecycle |
+| 48 | `ENGRAM_EVAPORATION_PROTECT_IMPORTANCE` | float64 | `8` | Lifecycle |
+| 49 | `ENGRAM_EVAPORATION_PROTECT_ACCESS_COUNT` | int | `5` | Lifecycle |
+| 50 | `ENGRAM_EVAPORATION_PROTECT_RECENT_ACCESS_DAYS` | float64 | `30` | Lifecycle |
+| 51 | `ENGRAM_EVAPORATION_PROTECT_TAGS` | csv | `permanent,frank-feedback,directive,identity` | Lifecycle |
+| 52 | `ENGRAM_EVAPORATION_PROTECT_CORROBORATED` | bool | `true` | Lifecycle |

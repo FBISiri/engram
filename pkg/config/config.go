@@ -215,7 +215,34 @@ func loadEvaporationConfig() memory.EvaporationConfig {
 	c.EvictionThreshold = envFloat("ENGRAM_EVAPORATION_EVICTION_THRESHOLD", c.EvictionThreshold)
 	c.SweepIntervalH = envInt("ENGRAM_EVAPORATION_SWEEP_INTERVAL_H", c.SweepIntervalH)
 	c.SweepBatchLimit = envInt("ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT", c.SweepBatchLimit)
+
+	// v2 safety vars (spec §4.8).
+	c.DryRun = envBool("ENGRAM_EVAPORATION_DRY_RUN", c.DryRun)
+	c.DecayBasis = envStr("ENGRAM_EVAPORATION_DECAY_BASIS", c.DecayBasis)
+	c.MinAgeDays = envFloat("ENGRAM_EVAPORATION_MIN_AGE_DAYS", c.MinAgeDays)
+	c.ObservationDays = envFloat("ENGRAM_EVAPORATION_OBSERVATION_DAYS", c.ObservationDays)
+	c.ProtectImportance = envFloat("ENGRAM_EVAPORATION_PROTECT_IMPORTANCE", c.ProtectImportance)
+	c.ProtectAccessCount = envInt("ENGRAM_EVAPORATION_PROTECT_ACCESS_COUNT", c.ProtectAccessCount)
+	c.ProtectRecentAccessDays = envFloat("ENGRAM_EVAPORATION_PROTECT_RECENT_ACCESS_DAYS", c.ProtectRecentAccessDays)
+	c.ProtectCorroborated = envBool("ENGRAM_EVAPORATION_PROTECT_CORROBORATED", c.ProtectCorroborated)
+	if raw := envStr("ENGRAM_EVAPORATION_PROTECT_TYPES", ""); raw != "" {
+		c.ProtectTypes = parseTypeCSV(raw)
+	}
+	if raw := envStr("ENGRAM_EVAPORATION_PROTECT_TAGS", ""); raw != "" {
+		c.ProtectTags = parseCommaList(raw)
+	}
 	return c
+}
+
+// parseTypeCSV splits a comma-separated memory-type list into []MemoryType,
+// trimming whitespace and dropping empty elements.
+func parseTypeCSV(raw string) []memory.MemoryType {
+	parts := parseCommaList(raw)
+	out := make([]memory.MemoryType, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, memory.MemoryType(p))
+	}
+	return out
 }
 
 // DefaultImportanceBounds returns the A-MAC per-type [min,max] importance

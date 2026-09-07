@@ -410,7 +410,7 @@ func TestEvaporationConfigDefaults(t *testing.T) {
 		t.Error("Evaporation.Enabled default should be false")
 	}
 	if c.HalfLifeDays[memory.TypeEvent] != 30 || c.HalfLifeDays[memory.TypeInsight] != 180 ||
-		c.HalfLifeDays[memory.TypeDirective] != 365 || c.HalfLifeDays[memory.TypeIdentity] != 0 {
+		c.HalfLifeDays[memory.TypeDirective] != 0 || c.HalfLifeDays[memory.TypeIdentity] != 0 {
 		t.Errorf("unexpected default half-lives: %+v", c.HalfLifeDays)
 	}
 	if c.AccessBoostAlpha != 0.15 || c.EvictionThreshold != 1.0 || c.SweepIntervalH != 6 || c.SweepBatchLimit != 100 {
@@ -440,6 +440,89 @@ func TestEvaporationConfigFromEnv(t *testing.T) {
 	}
 	if c.AccessBoostAlpha != 0.2 || c.EvictionThreshold != 1.5 || c.SweepIntervalH != 12 || c.SweepBatchLimit != 50 {
 		t.Errorf("scalars not loaded: %+v", c)
+	}
+}
+
+// TestEvaporationConfigV2Defaults covers the spec §4.8 v2 defaults.
+func TestEvaporationConfigV2Defaults(t *testing.T) {
+	clearEngramEnv(t)
+	c := Load().Evaporation
+	if !c.DryRun {
+		t.Error("DryRun default should be true")
+	}
+	if c.DecayBasis != "last_access" {
+		t.Errorf("DecayBasis default = %q, want last_access", c.DecayBasis)
+	}
+	if c.MinAgeDays != 14 || c.ObservationDays != 30 {
+		t.Errorf("MinAgeDays=%v ObservationDays=%v, want 14/30", c.MinAgeDays, c.ObservationDays)
+	}
+	if c.ProtectImportance != 8 || c.ProtectAccessCount != 5 || c.ProtectRecentAccessDays != 30 {
+		t.Errorf("protect scalars = %v/%v/%v, want 8/5/30", c.ProtectImportance, c.ProtectAccessCount, c.ProtectRecentAccessDays)
+	}
+	if !c.ProtectCorroborated {
+		t.Error("ProtectCorroborated default should be true")
+	}
+	if len(c.ProtectTypes) != 2 || c.ProtectTypes[0] != memory.TypeIdentity || c.ProtectTypes[1] != memory.TypeDirective {
+		t.Errorf("ProtectTypes = %v, want [identity directive]", c.ProtectTypes)
+	}
+	wantTags := []string{"permanent", "frank-feedback", "directive", "identity"}
+	if len(c.ProtectTags) != len(wantTags) {
+		t.Fatalf("ProtectTags = %v, want %v", c.ProtectTags, wantTags)
+	}
+	for i, w := range wantTags {
+		if c.ProtectTags[i] != w {
+			t.Errorf("ProtectTags[%d] = %q, want %q", i, c.ProtectTags[i], w)
+		}
+	}
+}
+
+// TestEvaporationConfigV2FromEnv covers csv parsing and scalar overrides.
+func TestEvaporationConfigV2FromEnv(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_EVAPORATION_DRY_RUN", "false")
+	t.Setenv("ENGRAM_EVAPORATION_DECAY_BASIS", "created")
+	t.Setenv("ENGRAM_EVAPORATION_MIN_AGE_DAYS", "7")
+	t.Setenv("ENGRAM_EVAPORATION_OBSERVATION_DAYS", "45")
+	t.Setenv("ENGRAM_EVAPORATION_PROTECT_IMPORTANCE", "9")
+	t.Setenv("ENGRAM_EVAPORATION_PROTECT_ACCESS_COUNT", "3")
+	t.Setenv("ENGRAM_EVAPORATION_PROTECT_RECENT_ACCESS_DAYS", "14")
+	t.Setenv("ENGRAM_EVAPORATION_PROTECT_CORROBORATED", "false")
+	t.Setenv("ENGRAM_EVAPORATION_PROTECT_TYPES", " identity , insight ")
+	t.Setenv("ENGRAM_EVAPORATION_PROTECT_TAGS", "pinned, keep")
+
+	c := Load().Evaporation
+	if c.DryRun {
+		t.Error("DryRun should be false")
+	}
+	if c.DecayBasis != "created" {
+		t.Errorf("DecayBasis = %q, want created", c.DecayBasis)
+	}
+	if c.MinAgeDays != 7 || c.ObservationDays != 45 {
+		t.Errorf("MinAgeDays=%v ObservationDays=%v, want 7/45", c.MinAgeDays, c.ObservationDays)
+	}
+	if c.ProtectImportance != 9 || c.ProtectAccessCount != 3 || c.ProtectRecentAccessDays != 14 {
+		t.Errorf("protect scalars = %v/%v/%v, want 9/3/14", c.ProtectImportance, c.ProtectAccessCount, c.ProtectRecentAccessDays)
+	}
+	if c.ProtectCorroborated {
+		t.Error("ProtectCorroborated should be false")
+	}
+	if len(c.ProtectTypes) != 2 || c.ProtectTypes[0] != memory.TypeIdentity || c.ProtectTypes[1] != memory.TypeInsight {
+		t.Errorf("ProtectTypes = %v, want [identity insight] (trimmed csv)", c.ProtectTypes)
+	}
+	if len(c.ProtectTags) != 2 || c.ProtectTags[0] != "pinned" || c.ProtectTags[1] != "keep" {
+		t.Errorf("ProtectTags = %v, want [pinned keep]", c.ProtectTags)
+	}
+}
+
+// TestEvaporationDecayBasis_InvalidFallsBack: an invalid DECAY_BASIS is loaded
+// verbatim (config layer) but EffectiveImportance falls back to last_access
+// with a stderr warning (memory layer). Here we assert the config carries the
+// raw value; the fallback behaviour is covered in the memory package.
+func TestEvaporationDecayBasis_InvalidLoaded(t *testing.T) {
+	clearEngramEnv(t)
+	t.Setenv("ENGRAM_EVAPORATION_DECAY_BASIS", "bogus")
+	if got := Load().Evaporation.DecayBasis; got != "bogus" {
+		t.Errorf("DecayBasis = %q, want bogus (raw passthrough)", got)
 	}
 }
 

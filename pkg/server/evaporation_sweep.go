@@ -72,14 +72,15 @@ func (s *Server) evaporationSweepTick(ctx context.Context, t time.Time) (int, in
 		fmt.Fprintf(os.Stderr, "[evaporation] sweep error at %s: %v\n", t.Format(time.RFC3339), err)
 		return deprecated, skipped
 	}
-	fmt.Fprintf(os.Stderr, "[evaporation] sweep at %s: deprecated=%d skipped=%d\n",
-		t.Format(time.RFC3339), deprecated, skipped)
 	return deprecated, skipped
 }
 
 // runEvaporationSweep scans active-lifecycle memories, computes their effective
-// importance, and deprecates those below cfg.EvictionThreshold (up to
-// cfg.SweepBatchLimit). Returns (deprecatedCount, skippedCount, err).
+// importance, evaluates the protection rules (spec §4.1), and deprecates the
+// non-exempt below-threshold ones (up to cfg.SweepBatchLimit). When cfg.DryRun
+// is true it does ALL the work (scroll, compute, exemption eval, metrics,
+// logging) but performs ZERO store.Update calls, returning deprecated=0.
+// Returns (deprecatedCount, skippedCount, err).
 func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.EvaporationConfig, m *engrammetrics.Metrics) (int, int, error) {
 	start := time.Now()
 	if m != nil {
@@ -94,9 +95,15 @@ func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.Eva
 
 	deprecated := 0
 	skipped := 0
+	scanned := 0
+	candidates := 0
+	exempted := 0
+	byRule := map[string]int{}
+	byType := map[string]int{}
 	var offset string
 
-	for deprecated < batchLimit {
+sweep:
+	for candidates < batchLimit {
 		mems, nextOffset, err := store.Scroll(ctx, memory.ScrollOptions{Limit: 100, Offset: offset})
 		if err != nil {
 			return deprecated, skipped, fmt.Errorf("scroll: %w", err)
@@ -109,8 +116,36 @@ func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.Eva
 			if mem.LifecycleStatus != "" && mem.LifecycleStatus != memory.LifecycleActive {
 				continue
 			}
-			eff := memory.EffectiveImportance(mem, cfg, time.Now())
+			scanned++
+			if m != nil {
+				m.EvaporationScannedTotal.Inc()
+			}
+			nowT := time.Now()
+			eff := memory.EffectiveImportance(mem, cfg, nowT)
 			if eff >= cfg.EvictionThreshold {
+				continue
+			}
+
+			// Below threshold: check protection rules BEFORE deprecating.
+			if exempt, rule := memory.EvaporationExempt(mem, cfg, nowT); exempt {
+				exempted++
+				byRule[rule]++
+				if m != nil {
+					m.EvaporationExemptedTotal.WithLabelValues(string(mem.Type), rule).Inc()
+				}
+				continue
+			}
+
+			candidates++
+			byType[string(mem.Type)]++
+			if m != nil {
+				m.EvaporationDryRunCandidatesTotal.WithLabelValues(string(mem.Type)).Inc()
+			}
+
+			if cfg.DryRun {
+				if candidates >= batchLimit {
+					break sweep
+				}
 				continue
 			}
 
@@ -118,7 +153,7 @@ func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.Eva
 			for k, v := range mem.Metadata {
 				meta[k] = v
 			}
-			now := float64(time.Now().Unix())
+			now := float64(nowT.Unix())
 			meta["deprecated_reason"] = "evaporation"
 			meta["deprecated_at"] = now
 			meta["effective_importance_at_deprecation"] = eff
@@ -136,8 +171,8 @@ func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.Eva
 			if m != nil {
 				m.EvaporationDeprecatedTotal.WithLabelValues(string(mem.Type)).Inc()
 			}
-			if deprecated >= batchLimit {
-				return deprecated, skipped, nil
+			if candidates >= batchLimit {
+				break sweep
 			}
 		}
 
@@ -146,6 +181,10 @@ func runEvaporationSweep(ctx context.Context, store memory.Store, cfg memory.Eva
 		}
 		offset = nextOffset
 	}
+
+	fmt.Fprintf(os.Stderr,
+		"[evaporation] sweep at %s dry_run=%t scanned=%d candidates=%d deprecated=%d exempted=%d skipped=%d by_rule=%v by_type=%v\n",
+		start.Format(time.RFC3339), cfg.DryRun, scanned, candidates, deprecated, exempted, skipped, byRule, byType)
 
 	return deprecated, skipped, nil
 }

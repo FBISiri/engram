@@ -88,6 +88,15 @@ func evapEvent(id string, importance, ageDays float64) memory.Memory {
 func enabledCfg() memory.EvaporationConfig {
 	c := memory.DefaultEvaporationConfig()
 	c.Enabled = true
+	c.DryRun = false // exercise the mutating path
+	return c
+}
+
+// liveCfg is the disabled-but-mutating base config used to seed s.evapCfg in
+// tests that then hot-reload Enabled=true (the override inherits DryRun=false).
+func liveCfg() memory.EvaporationConfig {
+	c := memory.DefaultEvaporationConfig()
+	c.DryRun = false
 	return c
 }
 
@@ -151,7 +160,7 @@ func TestEvaporationSweep_BatchLimit(t *testing.T) {
 // a restart.
 func TestEvaporationSweepTick_HonorsRuntimeConfig(t *testing.T) {
 	store := newEvapStore(evapEvent("old", 3, 90))
-	s := &Server{store: store, evapCfg: memory.DefaultEvaporationConfig()} // disabled
+	s := &Server{store: store, evapCfg: liveCfg()} // disabled, dry_run off
 
 	// Disabled: tick is a no-op.
 	if dep, _ := s.evaporationSweepTick(context.Background(), time.Now()); dep != 0 {
@@ -328,6 +337,70 @@ func TestPutRevivesEvaporationDeprecated(t *testing.T) {
 	}
 	if _, ok := out.Metadata["deprecated_reason"]; ok {
 		t.Errorf("deprecated_reason should be cleared, got %v", out.Metadata["deprecated_reason"])
+	}
+}
+
+// TestEvaporationSweep_DryRunZeroUpdates proves spec §4.5/§6.6: with dry_run=true
+// the sweep identifies candidates and emits candidate metrics but performs ZERO
+// store.Update calls.
+func TestEvaporationSweep_DryRunZeroUpdates(t *testing.T) {
+	store := newEvapStore(
+		evapEvent("a", 3, 200),
+		evapEvent("b", 3, 200),
+		evapEvent("c", 3, 200),
+	)
+	cfg := memory.DefaultEvaporationConfig()
+	cfg.Enabled = true
+	cfg.DryRun = true
+	m := metrics.New(nil, nil)
+
+	dep, skipped, err := runEvaporationSweep(context.Background(), store, cfg, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dep != 0 || skipped != 0 {
+		t.Fatalf("dry-run deprecated=%d skipped=%d, want 0/0", dep, skipped)
+	}
+	if store.updateCount() != 0 {
+		t.Fatalf("dry-run performed %d store.Update calls, want 0", store.updateCount())
+	}
+	if got := counterValue(t, m.EvaporationDryRunCandidatesTotal.WithLabelValues("event")); got != 3 {
+		t.Errorf("dry_run_candidates{event}=%v, want 3", got)
+	}
+	if got := counterValue(t, m.EvaporationScannedTotal); got != 3 {
+		t.Errorf("scanned_total=%v, want 3", got)
+	}
+}
+
+// TestEvaporationSweep_P1Structural is the adversarial regression (spec §6.3):
+// even with HALF_LIFE_IDENTITY=1 and HALF_LIFE_DIRECTIVE=1, a 10-year-old
+// identity/directive memory is exempted by P1 and never deprecated.
+func TestEvaporationSweep_P1Structural(t *testing.T) {
+	mk := func(id string, ty memory.MemoryType) memory.Memory {
+		return memory.Memory{
+			ID:              id,
+			Type:            ty,
+			Importance:      3,
+			CreatedAt:       float64(time.Now().Unix()) - 3650*86400.0, // 10 years
+			LifecycleStatus: memory.LifecycleActive,
+		}
+	}
+	store := newEvapStore(mk("id1", memory.TypeIdentity), mk("dir1", memory.TypeDirective))
+	cfg := memory.DefaultEvaporationConfig()
+	cfg.Enabled = true
+	cfg.DryRun = false
+	cfg.HalfLifeDays[memory.TypeIdentity] = 1  // adversarial typo
+	cfg.HalfLifeDays[memory.TypeDirective] = 1 // adversarial typo
+
+	dep, _, err := runEvaporationSweep(context.Background(), store, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dep != 0 {
+		t.Fatalf("deprecated=%d, want 0 (P1 must be structural)", dep)
+	}
+	if store.updateCount() != 0 {
+		t.Fatalf("identity/directive updated %d times, want 0", store.updateCount())
 	}
 }
 
