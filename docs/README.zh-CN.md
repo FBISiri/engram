@@ -500,11 +500,42 @@ export ENGRAM_EMBEDDING_DIMENSION=1024
 | `ENGRAM_REFLECTION_TRIGGER` | `count` | `count` / `cron` / `manual` |
 | `ENGRAM_REFLECTION_COUNT` | `10` | 触发反思所需的未反思记忆数（count 模式） |
 | `ENGRAM_REFLECTION_MODEL` | `claude-sonnet-4-20250514` | 反思使用的 LLM 模型 |
+| `ENGRAM_REFLECTION_MODE` | `v1` | 反思算法：`v1`=扁平综合（默认）；`v2`=四阶段焦点管线（焦点选择→证据收集→辩证→综合） |
+| `ENGRAM_DIALECTIC_TIMEOUT` | `45s` | 仅 v2：辩证 LLM 阶段的单次调用超时，超过 `90s` 会被截断为 `90s` |
 | **OTel 可观测性** | | |
 | `ENGRAM_OTEL_ENABLED` | `true` | 是否开启 OpenTelemetry tracing |
 | `ENGRAM_OTEL_EXPORTER` | `file` | `file` / `stdout` / `none` |
 | `ENGRAM_OTEL_FILE_DIR` | `/tmp/siri-state/engram-traces` | trace JSONL 文件目录 |
 | `ENGRAM_OTEL_SAMPLE_RATIO` | `1.0` | 采样比例（0.0–1.0） |
+| `ENGRAM_OTEL_FILE_ROTATION` | `daily` | 文件轮转策略：`daily`=每天一个文件；`size`=按文件大小轮转 |
+| **记忆蒸发 (Evaporation)** | | |
+| `ENGRAM_EVAPORATION_ENABLED` | `false` | 是否开启后台蒸发扫描 |
+| `ENGRAM_EVAPORATION_HALF_LIFE_{EVENT,INSIGHT,DIRECTIVE,IDENTITY}` | `30`/`180`/`365`/`0` | 各类型记忆重要性半衰期（天）；`0`=永不衰减 |
+| `ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA` | `0.15` | 每次召回施加的重要性提升（抵消活跃记忆的衰减） |
+| `ENGRAM_EVAPORATION_EVICTION_THRESHOLD` | `1.0` | 衰减后重要性低于此值的记忆将被扫描淘汰 |
+| `ENGRAM_EVAPORATION_SWEEP_INTERVAL_H` | `6` | 扫描运行间隔（小时） |
+| `ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT` | `100` | 每次扫描最多处理的记忆数 |
+| `ENGRAM_EVAPORATION_DRY_RUN` | `true` | 为 true 时仅计算并报告候选、不执行 `store.Update`（仅观察，故障安全） |
+| `ENGRAM_EVAPORATION_DECAY_BASIS` | `last_access` | 衰减基准：`last_access` 从 max(创建,最近访问) 起算；`created` 为仅按创建时间的旧逻辑；非法值回退 `last_access` |
+| `ENGRAM_EVAPORATION_MIN_AGE_DAYS` | `14` | P8：无论计算结果如何，年龄小于此值的记忆永不蒸发（天） |
+| `ENGRAM_EVAPORATION_OBSERVATION_DAYS` | `30` | 软废弃到可硬删除之间的观察窗口（天） |
+| `ENGRAM_EVAPORATION_PROTECT_TYPES` | `identity,directive` | P1：结构性豁免蒸发的类型（无视半衰期配置） |
+| `ENGRAM_EVAPORATION_PROTECT_IMPORTANCE` | `8` | P2：重要性达到或超过此值的记忆豁免 |
+| `ENGRAM_EVAPORATION_PROTECT_ACCESS_COUNT` | `5` | P3：访问次数达到此数的记忆豁免 |
+| `ENGRAM_EVAPORATION_PROTECT_RECENT_ACCESS_DAYS` | `30` | P4：在此窗口内被访问过的记忆豁免（天） |
+| `ENGRAM_EVAPORATION_PROTECT_TAGS` | `permanent,frank-feedback,directive,identity` | P5：携带任一这些标签的记忆豁免 |
+| `ENGRAM_EVAPORATION_PROTECT_CORROBORATED` | `true` | P7：具有非空 `provenance_history`（去重合并目标）的记忆豁免 |
+| **A-MAC 准入控制** | | |
+| `ENGRAM_AMAC_ENABLED` | `false` | 开启按类型的准入策略 |
+| `ENGRAM_DEDUP_THRESHOLD_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | `0.95`/`0.90`/`0.92`/`0.92` | 各类型去重阈值 |
+| `ENGRAM_IMPORTANCE_DEFAULT_{TYPE}` | `7`/`7`/`5`/`4` | 调用方未提供时的默认重要性（identity/directive/insight/event） |
+| `ENGRAM_IMPORTANCE_MIN_{TYPE}` / ENGRAM_IMPORTANCE_MAX_{TYPE} | per-type | 各类型重要性上下界，越界值静默截断 |
+| `ENGRAM_RATE_LIMIT_{IDENTITY,DIRECTIVE,INSIGHT,EVENT}` | `5`/`10`/`20`/`50` | 按(集合,类型)的滑动窗口写入上限（次/小时），重启后计数重置 |
+| **写入门禁 (Write Checkpoints)** | | |
+| `ENGRAM_WRITE_CHECKPOINTS_ENABLED` | `false` | 所有检查点的总开关 |
+| `ENGRAM_CP_*` | mixed | 12 个检查点子开关（CP1–CP4），仅父开关开启时生效，详见 configuration.md |
+| **状态目录** | | |
+| `ENGRAM_STATE_DIR` | 空 | 显式状态目录；设置后按原值使用（不追加 `.siri`），缺失自动创建；留空时回退 `$SIRI_HOME/.siri` > `$HOME/.siri` > `/root/.siri` |
 
 ### 11.4 场景配置示例
 
