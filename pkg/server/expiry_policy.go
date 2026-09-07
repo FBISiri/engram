@@ -169,7 +169,7 @@ func expirySnapshotDir() string {
 	if sd, err := statedir.Dir(); err == nil {
 		return filepath.Join(sd, "Engram", "expiry-snapshots")
 	}
-	return "/data/armyoftheagent/siri-vault/Engram/expiry-snapshots"
+	return "/data/obsidian-vault/Engram/expiry-snapshots"
 }
 
 // writeExpirySnapshot saves a markdown snapshot of the deletion candidates

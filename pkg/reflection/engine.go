@@ -16,12 +16,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/llm"
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/statedir"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -610,12 +612,24 @@ func ensureSourceReflectionTag(tags []string) []string {
 	return append(append([]string{}, tags...), sourceReflectionTag)
 }
 
+// reflectionDraftDir resolves the reflection draft directory relative to the
+// resolved state dir, falling back to the historical literal only when the
+// state dir is unavailable.
+func reflectionDraftDir() string {
+	if sd, err := statedir.Dir(); err == nil {
+		return filepath.Join(sd, "Reflection", "drafts")
+	}
+	return "/data/obsidian-vault/Reflection/drafts"
+}
+
 // writeReflectionDraft writes a low-confidence (conf < 0.6) reflection to an
 // Obsidian markdown draft instead of storing it in Engram. This keeps
 // Engram clean of speculative / weakly-grounded inferences while preserving
-// them for later human review in /data/armyoftheagent/siri-vault/Reflection/drafts/.
+// them for later human review under the state-dir-resolved
+// Reflection/drafts/ directory (falling back to
+// /data/obsidian-vault/Reflection/drafts/ when the state dir is unavailable).
 func writeReflectionDraft(ins ParsedInsight, tags []string, sourceIDs []string) error {
-	dir := "/data/armyoftheagent/siri-vault/Reflection/drafts"
+	dir := reflectionDraftDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}

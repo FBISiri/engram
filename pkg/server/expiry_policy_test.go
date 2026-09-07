@@ -1,6 +1,7 @@
 package server
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -84,5 +85,17 @@ func TestIsExpiryCandidate_MissingDeprecatedAt(t *testing.T) {
 	}
 	if isExpiryCandidate(m, cfg, now) {
 		t.Error("evaporation-deprecated memory with no deprecated_at must NOT be a candidate")
+	}
+}
+
+// TestExpirySnapshotDir_StateDirOverride verifies ENGRAM_STATE_DIR is honored so
+// the snapshot dir resolves under the override rather than the fallback literal.
+func TestExpirySnapshotDir_StateDirOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("ENGRAM_STATE_DIR", tmp)
+	got := expirySnapshotDir()
+	want := filepath.Join(tmp, "Engram", "expiry-snapshots")
+	if got != want {
+		t.Fatalf("expirySnapshotDir() = %q, want %q", got, want)
 	}
 }
