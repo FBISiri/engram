@@ -1,0 +1,33 @@
+# =============================================================================
+# Engram Config Example — Lifecycle ENABLED: consolidation dimension
+# Shape: a long-running single agent with evaporation LIVE. Evaporation ages
+#        memories (env-driven); this profile expresses the CONSOLIDATION knob
+#        that has NO ENGRAM_* env var — it is only reachable at runtime.
+# Apply via: memory_apply_config (see README.md for the exact snippet).
+#
+# NOTE: consolidation is NOT configurable through env vars. There are no
+# ENGRAM_*CONSOLIDATION* keys in this repo. The only ways to shape merge/
+# consolidation are (a) this runtime profile and (b) the per-type
+# ENGRAM_DEDUP_THRESHOLD_* env keys (which ARE in .env.example).
+# =============================================================================
+
+retrieve_config:
+  relevance_weight: 1.0
+  recency_weight: 0.30          # with evaporation thinning old events, favor what survived recently
+  importance_weight: 0.35       # importance is the survival signal evaporation mutates — weight it
+  limit: 8
+  min_score: 0.60
+  rerank_enabled: true          # surface the consolidated survivor over lingering fragments
+
+update_config:
+  dedupe_threshold: 0.90        # aligns with the tightened event lane in .env.example
+  default_importance: 5
+  merge_strategy: replace_or_supersede  # proposed: new memory supersedes old, chain the ref
+  consolidation_pass: enabled           # proposed: periodic offline merge of fragments evaporation left standing
+  per_type_dedupe:
+    identity: 0.95              # mirrors ENGRAM_DEDUP_THRESHOLD_IDENTITY
+    directive: 0.90            # mirrors ENGRAM_DEDUP_THRESHOLD_DIRECTIVE
+    insight: 0.92              # mirrors ENGRAM_DEDUP_THRESHOLD_INSIGHT
+    event: 0.90                # mirrors ENGRAM_DEDUP_THRESHOLD_EVENT
+  ttl:
+    insight: never             # let evaporation (not TTL) decide insight lifetime

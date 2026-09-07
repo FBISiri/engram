@@ -23,7 +23,7 @@ collection to build on.
 
 ## Config Examples
 
-Unlike the bootstrap examples above (which seed memories), these three are **runtime
+Unlike the bootstrap examples above (which seed memories), these four are **runtime
 tuning profiles** — each is a `config.yaml` + `README.md` you apply via the
 `memory_apply_config` MCP tool to shape how memories are ranked (`retrieve_config`) and
 written/deduped (`update_config`) for a given deployment shape.
@@ -33,19 +33,20 @@ written/deduped (`update_config`) for a given deployment shape.
 | [config-personal-agent](./config-personal-agent/) | Single high-value, low-volume agent. Recall of a rare-but-critical fact matters more than precision (召回 > 精确). |
 | [config-team-knowledge](./config-team-knowledge/) | Shared knowledge base, many contributors. Dedup + provenance matter more than exhaustive recall (精确 > 召回). |
 | [config-research-dedup](./config-research-dedup/) | Dense research notes with high semantic overlap. The most aggressive dedup profile — forces consolidation over fragment pile-up. |
+| [config-lifecycle-enabled](./config-lifecycle-enabled/) | Long-running agent ready to let evaporation run LIVE (mutating importance, not observe-only), with Reflection V2 + A-MAC on. Ships a `.env.example` plus a consolidation `config.yaml`. |
 
 ### 对比速查
 
-| 维度 | 1. 个人 agent | 2. 团队知识库 | 3. 研究笔记去重 |
-|---|---|---|---|
-| 主要风险 | 稀有重要记忆静默丢失 | 重复条目 + provenance 丢失 | 碎片堆积 + 反向优先级 |
-| 取舍倾向 | 召回 > 精确 | 精确 > 召回 | 强制合并 |
-| `dedupe_threshold` | 0.92（保守） | 0.85（激进） | 0.80（最激进） |
-| `recency_weight` | 0.20（低） | 0.35（中高） | 0.30（中） |
-| `importance_weight` | 0.35（高） | 0.25（低） | 0.20（最低） |
-| `min_score` | 0.55（宽） | 0.65（紧） | 0.70（最紧） |
-| `limit` | 6 | 10 | 8 |
-| 特色开关 | per-type 严 dedup | provenance + require_source | supersede 链 + 离线 consolidation |
+| 维度 | 1. 个人 agent | 2. 团队知识库 | 3. 研究笔记去重 | 4. 生命周期启用 |
+|---|---|---|---|---|
+| 主要风险 | 稀有重要记忆静默丢失 | 重复条目 + provenance 丢失 | 碎片堆积 + 反向优先级 | evaporation LIVE 误删真实记忆 |
+| 取舍倾向 | 召回 > 精确 | 精确 > 召回 | 强制合并 | 主动老化 + 存活即价值 |
+| `dedupe_threshold` | 0.92（保守） | 0.85（激进） | 0.80（最激进） | 0.90（事件收紧） |
+| `recency_weight` | 0.20（低） | 0.35（中高） | 0.30（中） | 0.30（中） |
+| `importance_weight` | 0.35（高） | 0.25（低） | 0.20（最低） | 0.35（高，evaporation 信号） |
+| `min_score` | 0.55（宽） | 0.65（紧） | 0.70（最紧） | 0.60（中） |
+| `limit` | 6 | 10 | 8 | 8 |
+| 特色开关 | per-type 严 dedup | provenance + require_source | supersede 链 + 离线 consolidation | evaporation LIVE + A-MAC + supersede consolidation |
 
 > Some per-type / merge / consolidation sub-fields are marked `# proposed` in each
 > `config.yaml` — intended productization knobs not yet all wired server-side. Each
