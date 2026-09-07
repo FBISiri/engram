@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -43,25 +44,13 @@ func main() {
 			os.Exit(1)
 		}
 	case "dream-check":
-		if err := dreamCheck(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+		exitFor(dreamCheck(cfg))
 	case "dream-run":
-		if err := dreamRun(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+		exitFor(dreamRun(cfg))
 	case "reflection-check":
-		if err := reflectionCheck(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+		exitFor(reflectionCheck(cfg))
 	case "reflection-run":
-		if err := reflectionRun(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+		exitFor(reflectionRun(cfg))
 	case "migrate":
 		fmt.Println("Migration tool not yet implemented.")
 		os.Exit(1)
@@ -92,6 +81,118 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+// errUnknownFlag is a sentinel wrapped by flag parsers when an unrecognised
+// token is encountered. main() maps it to exit code 2 via errors.Is.
+var errUnknownFlag = errors.New("unknown flag")
+
+// errHelp is a sentinel returned by a subcommand when -h/--help was requested.
+// The usage text has already been printed to stdout; main() maps it to exit 0.
+var errHelp = errors.New("help requested")
+
+// exitFor centralises exit-code mapping for subcommands that support the
+// help/unknown-flag protocol: help -> 0, unknown flag -> 2, other error -> 1.
+func exitFor(err error) {
+	if err == nil {
+		return
+	}
+	if errors.Is(err, errHelp) {
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	if errors.Is(err, errUnknownFlag) {
+		os.Exit(2)
+	}
+	os.Exit(1)
+}
+
+type reflectionOpts struct {
+	DryRun, Force, DebugEvidence bool
+	Mode                         string
+}
+
+// resolveReflectionMode applies the fixed precedence flag(--mode) > env > "v1".
+// Pure: no I/O, no globals, no os.Args.
+func resolveReflectionMode(args []string, envMode string) string {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--mode" && i+1 < len(args) && args[i+1] != "" {
+			return args[i+1]
+		}
+	}
+	if envMode != "" {
+		return envMode
+	}
+	return "v1"
+}
+
+// parseReflectionFlags parses reflection-run/reflection-check flags.
+// Returns (opts, wantHelp, err). On -h/--help it returns wantHelp=true with no
+// error. Unknown tokens yield an error wrapping errUnknownFlag. opts.Mode is
+// always resolved via resolveReflectionMode (never empty).
+func parseReflectionFlags(args []string, envMode string) (reflectionOpts, bool, error) {
+	var opts reflectionOpts
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			return reflectionOpts{}, true, nil
+		case "--dry-run":
+			opts.DryRun = true
+		case "--force":
+			opts.Force = true
+		case "--debug-evidence":
+			opts.DebugEvidence = true
+		case "--mode":
+			if i+1 >= len(args) {
+				return reflectionOpts{}, false, fmt.Errorf("--mode requires a value (v1 or v2)")
+			}
+			i++
+		default:
+			return reflectionOpts{}, false, fmt.Errorf("%w: %s", errUnknownFlag, args[i])
+		}
+	}
+	opts.Mode = resolveReflectionMode(args, envMode)
+	return opts, false, nil
+}
+
+type dreamOpts struct {
+	DryRun bool
+	Phase  string
+}
+
+// parseDreamFlags parses dream-run flags. Returns (opts, wantHelp, err).
+func parseDreamFlags(args []string) (dreamOpts, bool, error) {
+	var opts dreamOpts
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-h", "--help":
+			return dreamOpts{}, true, nil
+		case "--dry-run":
+			opts.DryRun = true
+		case "--phase":
+			if i+1 >= len(args) {
+				return dreamOpts{}, false, fmt.Errorf("--phase requires a value (orient, gather, consolidate, prune)")
+			}
+			i++
+			opts.Phase = args[i]
+		default:
+			return dreamOpts{}, false, fmt.Errorf("%w: %s", errUnknownFlag, args[i])
+		}
+	}
+	return opts, false, nil
+}
+
+// parseHelpOnly parses subcommands that accept no flags except -h/--help.
+func parseHelpOnly(args []string) (bool, error) {
+	for _, a := range args {
+		switch a {
+		case "-h", "--help":
+			return true, nil
+		default:
+			return false, fmt.Errorf("%w: %s", errUnknownFlag, a)
+		}
+	}
+	return false, nil
 }
 
 func serve(cfg *config.Config) error {
@@ -249,6 +350,15 @@ func isolatedCollectionNames() []string {
 }
 
 func dreamCheck(cfg *config.Config) error {
+	wantHelp, err := parseHelpOnly(os.Args[2:])
+	if err != nil {
+		return err
+	}
+	if wantHelp {
+		printUsage()
+		return errHelp
+	}
+
 	// Connect to Qdrant for Gate 2 (new memories count).
 	store, err := newMultiStore(cfg)
 	if err != nil {
@@ -270,6 +380,15 @@ func dreamCheck(cfg *config.Config) error {
 }
 
 func dreamRun(cfg *config.Config) error {
+	opts, wantHelp, err := parseDreamFlags(os.Args[2:])
+	if err != nil {
+		return err
+	}
+	if wantHelp {
+		printUsage()
+		return errHelp
+	}
+
 	tp, err := otelpkg.NewTracerProvider(otelpkg.LoadConfigFromEnv())
 	if err != nil {
 		return fmt.Errorf("init tracing: %w", err)
@@ -278,24 +397,8 @@ func dreamRun(cfg *config.Config) error {
 		defer func() { _ = tp.Shutdown(context.Background()) }()
 	}
 
-	// Parse flags from os.Args[2:].
-	dryRun := false
-	phase := ""
-	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--dry-run":
-			dryRun = true
-		case "--phase":
-			if i+1 < len(os.Args) {
-				i++
-				phase = os.Args[i]
-			} else {
-				return fmt.Errorf("--phase requires a value (orient, gather, consolidate, prune)")
-			}
-		default:
-			return fmt.Errorf("unknown flag: %s", os.Args[i])
-		}
-	}
+	dryRun := opts.DryRun
+	phase := opts.Phase
 
 	// Connect to Qdrant.
 	store, err := newMultiStore(cfg)
@@ -359,13 +462,24 @@ Commands:
 // reflectionCheck evaluates whether the Reflection Engine should run now.
 // Outputs JSON: {should_trigger, skip_reason, unreflected_count, accumulated_importance, ...}
 func reflectionCheck(cfg *config.Config) error {
+	opts, wantHelp, err := parseReflectionFlags(os.Args[2:], cfg.ReflectionMode)
+	if err != nil {
+		return err
+	}
+	if wantHelp {
+		printUsage()
+		return errHelp
+	}
+
 	store, err := newMultiStore(cfg)
 	if err != nil {
 		return fmt.Errorf("connect qdrant: %w", err)
 	}
 	defer func() { _ = store.Close() }()
 
-	eng := reflection.NewEngine(store, nil, reflection.DefaultConfig())
+	reflCfg := reflection.DefaultConfig()
+	reflCfg.Mode = opts.Mode
+	eng := reflection.NewEngine(store, nil, reflCfg)
 	ctx := context.Background()
 	result, err := eng.Check(ctx)
 	if err != nil {
@@ -380,6 +494,15 @@ func reflectionCheck(cfg *config.Config) error {
 // reflectionRun executes one reflection cycle.
 // Outputs JSON RunResult.
 func reflectionRun(cfg *config.Config) error {
+	opts, wantHelp, err := parseReflectionFlags(os.Args[2:], cfg.ReflectionMode)
+	if err != nil {
+		return err
+	}
+	if wantHelp {
+		printUsage()
+		return errHelp
+	}
+
 	tp, err := otelpkg.NewTracerProvider(otelpkg.LoadConfigFromEnv())
 	if err != nil {
 		return fmt.Errorf("init tracing: %w", err)
@@ -388,25 +511,9 @@ func reflectionRun(cfg *config.Config) error {
 		defer func() { _ = tp.Shutdown(context.Background()) }()
 	}
 
-	dryRun := false
-	force := false
-	mode := ""
-	debugEvidence := false
-	for i := 2; i < len(os.Args); i++ {
-		if os.Args[i] == "--dry-run" {
-			dryRun = true
-		}
-		if os.Args[i] == "--force" {
-			force = true
-		}
-		if os.Args[i] == "--mode" && i+1 < len(os.Args) {
-			mode = os.Args[i+1]
-			i++
-		}
-		if os.Args[i] == "--debug-evidence" {
-			debugEvidence = true
-		}
-	}
+	dryRun := opts.DryRun
+	force := opts.Force
+	debugEvidence := opts.DebugEvidence
 
 	store, err := newMultiStore(cfg)
 	if err != nil {
@@ -441,9 +548,7 @@ func reflectionRun(cfg *config.Config) error {
 	reflCfg.DryRun = dryRun
 	reflCfg.Force = force
 	reflCfg.DebugEvidence = debugEvidence
-	if mode != "" {
-		reflCfg.Mode = mode
-	}
+	reflCfg.Mode = opts.Mode
 
 	eng := reflection.NewEngine(store, embedder, reflCfg)
 	result, err := eng.Run(ctx)
