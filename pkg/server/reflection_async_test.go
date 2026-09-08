@@ -165,3 +165,34 @@ func TestReflectionStatus_BeforeAnyRun(t *testing.T) {
 		t.Errorf("expected zero-value status before any run, got %+v", st)
 	}
 }
+
+// TestReflectionRun_LastErrorSummary asserts that status().LastError summarizes
+// a result's Errors slice when runFn returns (result, nil err).
+func TestReflectionRun_LastErrorSummary(t *testing.T) {
+	cases := []struct {
+		name    string
+		errs    []string
+		wantErr string
+	}{
+		{"no errors", nil, ""},
+		{"single", []string{"boom"}, "boom"},
+		{"multi", []string{"first", "second", "third"}, "first (+2 more)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServer()
+			srv.reflectionRunner.runFn = func(context.Context) (*reflection.RunResult, error) {
+				return &reflection.RunResult{Triggered: true, Duration: "1s", Mode: "v2-focal", Errors: tc.errs}, nil
+			}
+			started, _, _ := srv.reflectionRunner.start(
+				func(context.Context) (*reflection.RunResult, error) { return nil, nil }, nil)
+			if !started {
+				t.Fatal("expected start to launch")
+			}
+			waitForRunnerIdle(t, srv)
+			if got := srv.reflectionRunner.status().LastError; got != tc.wantErr {
+				t.Errorf("LastError = %q, want %q", got, tc.wantErr)
+			}
+		})
+	}
+}

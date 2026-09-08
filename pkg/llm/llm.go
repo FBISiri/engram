@@ -30,6 +30,14 @@ const (
 	// neither path truncates.
 	maxTokens = 1500
 
+	// defaultDialecticMaxTokens is the fallback budget for the dialectic stage,
+	// which needs more headroom than the global default because reasoning tokens
+	// (claude-sonnet-5 via OpenRouter) can otherwise exhaust the budget.
+	defaultDialecticMaxTokens = 4000
+	// defaultMaxTokensCeiling caps the retry escalation so a single call cannot
+	// grow unbounded.
+	defaultMaxTokensCeiling = 8000
+
 	requestTimeout = 60 * time.Second
 )
 
@@ -59,10 +67,16 @@ func loadConfig() (*config, error) {
 	return &config{APIKey: key, BaseURL: baseURL, Model: model}, nil
 }
 
-// Meta carries observability metadata about a single LLM call.
+// Meta carries observability metadata about a single LLM call. Token counts use
+// -1 as a sentinel meaning "provider did not report this value".
 type Meta struct {
-	FinishReason string // choices[0].finish_reason from the provider
-	RawLen       int    // byte length of the assistant content (len(content))
+	FinishReason     string // choices[0].finish_reason from the provider
+	RawLen           int    // byte length of the assistant content (len(content))
+	MaxTokens        int    // max_tokens actually sent in the request
+	PromptTokens     int    // usage.prompt_tokens (-1 if unreported)
+	CompletionTokens int    // usage.completion_tokens (-1 if unreported)
+	TotalTokens      int    // usage.total_tokens (-1 if unreported)
+	ReasoningTokens  int    // usage.completion_tokens_details.reasoning_tokens (-1 if unreported)
 }
 
 // resolveMaxTokens reads ENGRAM_LLM_MAX_TOKENS. Unset, non-numeric, or <= 0
@@ -79,6 +93,45 @@ func resolveMaxTokens() int {
 	return n
 }
 
+// resolveDialecticMaxTokens reads ENGRAM_LLM_DIALECTIC_MAX_TOKENS. Unset,
+// non-numeric, or <= 0 falls back to the defaultDialecticMaxTokens default.
+func resolveDialecticMaxTokens() int {
+	v := os.Getenv("ENGRAM_LLM_DIALECTIC_MAX_TOKENS")
+	if v == "" {
+		return defaultDialecticMaxTokens
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultDialecticMaxTokens
+	}
+	return n
+}
+
+// resolveMaxTokensCeiling reads ENGRAM_LLM_MAX_TOKENS_CEILING. Unset,
+// non-numeric, or <= 0 falls back to the defaultMaxTokensCeiling default.
+func resolveMaxTokensCeiling() int {
+	v := os.Getenv("ENGRAM_LLM_MAX_TOKENS_CEILING")
+	if v == "" {
+		return defaultMaxTokensCeiling
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultMaxTokensCeiling
+	}
+	return n
+}
+
+// MaxTokens returns the resolved global response budget (ENGRAM_LLM_MAX_TOKENS).
+func MaxTokens() int { return resolveMaxTokens() }
+
+// DialecticMaxTokens returns the resolved dialectic-stage budget
+// (ENGRAM_LLM_DIALECTIC_MAX_TOKENS).
+func DialecticMaxTokens() int { return resolveDialecticMaxTokens() }
+
+// MaxTokensCeiling returns the resolved retry escalation cap
+// (ENGRAM_LLM_MAX_TOKENS_CEILING).
+func MaxTokensCeiling() int { return resolveMaxTokensCeiling() }
+
 // Call sends a single-turn user prompt and returns the assistant text. It
 // delegates to CallWithMeta and discards the metadata, staying backward
 // compatible with existing callers.
@@ -87,9 +140,21 @@ func Call(ctx context.Context, prompt string) (string, error) {
 	return content, err
 }
 
-// CallWithMeta sends a single-turn user prompt and returns the assistant text
-// along with observability metadata (finish_reason, raw byte length).
+// CallWithMeta sends a single-turn user prompt at the resolved global budget and
+// returns the assistant text along with observability metadata. It delegates to
+// CallWithBudget.
 func CallWithMeta(ctx context.Context, prompt string) (string, Meta, error) {
+	return CallWithBudget(ctx, prompt, resolveMaxTokens())
+}
+
+// CallWithBudget sends a single-turn user prompt at the given max_tokens budget
+// and returns the assistant text along with observability metadata
+// (finish_reason, raw byte length, and usage token counts when reported). A
+// non-positive budget falls back to the resolved global default.
+func CallWithBudget(ctx context.Context, prompt string, maxTokens int) (string, Meta, error) {
+	if maxTokens <= 0 {
+		maxTokens = resolveMaxTokens()
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return "", Meta{}, err
@@ -97,7 +162,7 @@ func CallWithMeta(ctx context.Context, prompt string) (string, Meta, error) {
 
 	reqBody, err := json.Marshal(map[string]any{
 		"model":      cfg.Model,
-		"max_tokens": resolveMaxTokens(),
+		"max_tokens": maxTokens,
 		"messages": []map[string]any{
 			{"role": "user", "content": prompt},
 		},
@@ -136,6 +201,14 @@ func CallWithMeta(ctx context.Context, prompt string) (string, Meta, error) {
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens            *int `json:"prompt_tokens"`
+			CompletionTokens        *int `json:"completion_tokens"`
+			TotalTokens             *int `json:"total_tokens"`
+			CompletionTokensDetails *struct {
+				ReasoningTokens *int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &apiResp); err != nil {
 		return "", Meta{}, fmt.Errorf("decode llm response: %w", err)
@@ -146,8 +219,27 @@ func CallWithMeta(ctx context.Context, prompt string) (string, Meta, error) {
 	}
 	content := strings.TrimSpace(apiResp.Choices[0].Message.Content)
 	meta := Meta{
-		FinishReason: apiResp.Choices[0].FinishReason,
-		RawLen:       len(content),
+		FinishReason:     apiResp.Choices[0].FinishReason,
+		RawLen:           len(content),
+		MaxTokens:        maxTokens,
+		PromptTokens:     -1,
+		CompletionTokens: -1,
+		TotalTokens:      -1,
+		ReasoningTokens:  -1,
+	}
+	if u := apiResp.Usage; u != nil {
+		if u.PromptTokens != nil {
+			meta.PromptTokens = *u.PromptTokens
+		}
+		if u.CompletionTokens != nil {
+			meta.CompletionTokens = *u.CompletionTokens
+		}
+		if u.TotalTokens != nil {
+			meta.TotalTokens = *u.TotalTokens
+		}
+		if d := u.CompletionTokensDetails; d != nil && d.ReasoningTokens != nil {
+			meta.ReasoningTokens = *d.ReasoningTokens
+		}
 	}
 	return content, meta, nil
 }

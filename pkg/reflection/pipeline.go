@@ -178,11 +178,15 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 // of unreflected memories.
 func generateFocalQuestions(ctx context.Context, batch []memory.Memory, n int) ([]string, error) {
 	prompt := buildFocalPrompt(batch, n)
-	response, meta, err := callLLMMeta(ctx, prompt)
+	response, meta, err := callLLMWithRetry(ctx, prompt, llm.MaxTokens(), llm.MaxTokensCeiling(), "focal")
 	if err != nil {
 		return nil, fmt.Errorf("llm call: %w", err)
 	}
-	log.Printf("[reflection] focal llm: finish_reason=%q raw_len=%d", meta.FinishReason, meta.RawLen)
+	log.Printf("[reflection] focal llm: finish_reason=%q raw_len=%d max_tokens=%d completion_tokens=%d reasoning_tokens=%d prompt_tokens=%d",
+		meta.FinishReason, meta.RawLen, meta.MaxTokens, meta.CompletionTokens, meta.ReasoningTokens, meta.PromptTokens)
+	if terr := truncationError("focal", meta); terr != nil {
+		return nil, terr
+	}
 	return parseFocalResponse(response, n, meta)
 }
 

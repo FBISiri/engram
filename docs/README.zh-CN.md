@@ -503,6 +503,8 @@ export ENGRAM_EMBEDDING_DIMENSION=1024
 | `ENGRAM_REFLECTION_MODE` | `v1` | 反思算法：`v1`=扁平综合（默认）；`v2`=四阶段焦点管线（焦点选择→证据收集→辩证→综合） |
 | `ENGRAM_DIALECTIC_TIMEOUT` | `45s` | 仅 v2：辩证 LLM 阶段的单次调用超时，超过 `90s` 会被截断为 `90s` |
 | `ENGRAM_LLM_MAX_TOKENS` | `1500` | 单次 reflection/dream LLM 调用的输出 token 上限；非法值（非数字/≤0）回退默认 |
+| `ENGRAM_LLM_DIALECTIC_MAX_TOKENS` | `4000` | dialectic 反思阶段的输出 token 上限（推理 token 需要更多余量）；非法值回退默认 |
+| `ENGRAM_LLM_MAX_TOKENS_CEILING` | `8000` | 被截断（`finish_reason=length`）的调用以双倍预算重试时的上限 |
 | **OTel 可观测性** | | |
 | `ENGRAM_OTEL_ENABLED` | `true` | 是否开启 OpenTelemetry tracing |
 | `ENGRAM_OTEL_EXPORTER` | `file` | `file` / `stdout` / `none` |

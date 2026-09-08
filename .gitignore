@@ -24,6 +24,8 @@ Thumbs.db
 # Docker
 qdrant_data/
 engram.bak*
+engram.new-*
+engram.hotfix-*
 w17_schema
 __pycache__/
 

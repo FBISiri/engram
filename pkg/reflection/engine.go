@@ -15,10 +15,11 @@ package reflection
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/embedding"
@@ -572,18 +573,9 @@ func callLLM(ctx context.Context, prompt string) (string, error) {
 	return callLLMFunc(ctx, prompt)
 }
 
-// callLLMMeta returns the LLM response plus observability metadata without
-// breaking the callLLMFunc test seam. When the seam still points at the real
-// client, real metadata (finish_reason, raw_len) is captured via
-// llm.CallWithMeta. When a test overrides callLLMFunc, best-effort meta is
-// returned (finish_reason unknown, raw_len = byte length of content).
-func callLLMMeta(ctx context.Context, prompt string) (string, llm.Meta, error) {
-	if reflect.ValueOf(callLLMFunc).Pointer() == reflect.ValueOf(llm.Call).Pointer() {
-		return llm.CallWithMeta(ctx, prompt)
-	}
-	content, err := callLLMFunc(ctx, prompt)
-	return content, llm.Meta{RawLen: len(content)}, err
-}
+// dumpDirLogOnce ensures the resolved reflection-dumps directory is logged only
+// once per process for diagnosability.
+var dumpDirLogOnce sync.Once
 
 // dumpRawResponse writes the COMPLETE raw LLM response to a file under the
 // engram state dir and returns the path. Best-effort: on any error it returns
@@ -598,6 +590,9 @@ func dumpRawResponse(stage, response string) string {
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		return ""
 	}
+	dumpDirLogOnce.Do(func() {
+		log.Printf("[reflection] raw-response dump dir: %s", subdir)
+	})
 	f, err := os.CreateTemp(subdir, stage+"-*.txt")
 	if err != nil {
 		return ""

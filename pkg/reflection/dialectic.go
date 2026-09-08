@@ -99,8 +99,9 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 
 			prompt := buildDialecticPrompt(pq)
 
+			stage := fmt.Sprintf("dialectic q%d", i+1)
 			llmStart := time.Now()
-			response, meta, err := callLLMMeta(qctx, prompt)
+			response, meta, err := callLLMWithRetry(qctx, prompt, llm.DialecticMaxTokens(), llm.MaxTokensCeiling(), stage)
 			llmElapsed := time.Since(llmStart).Milliseconds()
 
 			errMu.Lock()
@@ -116,8 +117,16 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 				return nil
 			}
 
-			log.Printf("[reflection] dialectic q%d llm: finish_reason=%q raw_len=%d", i+1,
-				meta.FinishReason, meta.RawLen)
+			log.Printf("[reflection] dialectic q%d llm: finish_reason=%q raw_len=%d max_tokens=%d completion_tokens=%d reasoning_tokens=%d prompt_tokens=%d",
+				i+1, meta.FinishReason, meta.RawLen, meta.MaxTokens, meta.CompletionTokens, meta.ReasoningTokens, meta.PromptTokens)
+
+			if terr := truncationError(stage, meta); terr != nil {
+				errMu.Lock()
+				stats.Errors = append(stats.Errors, terr.Error())
+				errMu.Unlock()
+				statuses[i] = dialecticStatusFailed
+				return nil
+			}
 
 			insight, err := parseDialecticResponse(response, pq, meta, fmt.Sprintf("dialectic-q%d", i+1))
 			if err != nil {

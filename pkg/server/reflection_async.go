@@ -101,6 +101,8 @@ func (r *reflectionRunner) start(
 		r.lastResult = result
 		if err != nil {
 			r.lastError = err.Error()
+		} else if result != nil && len(result.Errors) > 0 {
+			r.lastError = summarizeReflectionErrors(result.Errors)
 		} else {
 			r.lastError = ""
 		}
@@ -128,6 +130,19 @@ func (r *reflectionRunner) start(
 	}()
 
 	return true, id, at
+}
+
+// summarizeReflectionErrors condenses a reflection run's Errors slice into a
+// single LastError line: empty when none, the sole error when one, and
+// "first (+N more)" when several.
+func summarizeReflectionErrors(errs []string) string {
+	if len(errs) == 0 {
+		return ""
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return fmt.Sprintf("%s (+%d more)", errs[0], len(errs)-1)
 }
 
 // status returns a snapshot of the runner state for serialization. Fields are
