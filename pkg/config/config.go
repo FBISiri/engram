@@ -60,11 +60,15 @@ type Config struct {
 	PrincipalKeys map[string]string
 
 	// Reflection
-	ReflectionEnabled  bool
-	ReflectionTrigger  string // "count", "cron", "manual"
-	ReflectionCount    int
-	ReflectionModel    string
-	ReflectionMode     string        // ENGRAM_REFLECTION_MODE: "v1" | "v2" (focal point)
+	ReflectionEnabled bool
+	ReflectionTrigger string // "count", "cron", "manual"
+	ReflectionCount   int
+	ReflectionModel   string
+	ReflectionMode    string // ENGRAM_REFLECTION_MODE: "v1" | "v2" (focal point)
+	// LLMMaxTokens surfaces ENGRAM_LLM_MAX_TOKENS for config visibility/consistency. The LLM
+	// client (pkg/llm) reads the same env var directly via resolveMaxTokens() — pkg/llm cannot
+	// import pkg/config (import cycle), so this field mirrors rather than feeds that value.
+	LLMMaxTokens       int
 	DialecticTimeout   time.Duration // ENGRAM_DIALECTIC_TIMEOUT
 	RequireProvenance  bool          // ENGRAM_REQUIRE_PROVENANCE
 	AllowedProvenances []string      // ENGRAM_ALLOWED_PROVENANCES (comma-separated)
@@ -165,6 +169,7 @@ func Load() *Config {
 		ReflectionCount:    envInt("ENGRAM_REFLECTION_COUNT", 10),
 		ReflectionModel:    envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
 		ReflectionMode:     envStr("ENGRAM_REFLECTION_MODE", ""),
+		LLMMaxTokens:       envInt("ENGRAM_LLM_MAX_TOKENS", 1500),
 		DialecticTimeout:   envDuration("ENGRAM_DIALECTIC_TIMEOUT", 0),
 		RequireProvenance:  envBool("ENGRAM_REQUIRE_PROVENANCE", false),
 		AllowedProvenances: parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),

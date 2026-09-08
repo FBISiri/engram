@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -569,6 +570,43 @@ var callLLMFunc = llm.Call
 // callLLM sends a prompt to the shared LLM client and returns the text response.
 func callLLM(ctx context.Context, prompt string) (string, error) {
 	return callLLMFunc(ctx, prompt)
+}
+
+// callLLMMeta returns the LLM response plus observability metadata without
+// breaking the callLLMFunc test seam. When the seam still points at the real
+// client, real metadata (finish_reason, raw_len) is captured via
+// llm.CallWithMeta. When a test overrides callLLMFunc, best-effort meta is
+// returned (finish_reason unknown, raw_len = byte length of content).
+func callLLMMeta(ctx context.Context, prompt string) (string, llm.Meta, error) {
+	if reflect.ValueOf(callLLMFunc).Pointer() == reflect.ValueOf(llm.Call).Pointer() {
+		return llm.CallWithMeta(ctx, prompt)
+	}
+	content, err := callLLMFunc(ctx, prompt)
+	return content, llm.Meta{RawLen: len(content)}, err
+}
+
+// dumpRawResponse writes the COMPLETE raw LLM response to a file under the
+// engram state dir and returns the path. Best-effort: on any error it returns
+// "" so callers can still log finish_reason/raw_len. The content is never
+// truncated and never contains credentials.
+func dumpRawResponse(stage, response string) string {
+	dir, err := statedir.Dir()
+	if err != nil {
+		return ""
+	}
+	subdir := filepath.Join(dir, "reflection-dumps")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		return ""
+	}
+	f, err := os.CreateTemp(subdir, stage+"-*.txt")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write([]byte(response)); err != nil {
+		return ""
+	}
+	return f.Name()
 }
 
 // ── W17 v1.1 helpers ────────────────────────────────────────────────────────

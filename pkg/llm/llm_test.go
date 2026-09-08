@@ -43,6 +43,33 @@ func TestLoadConfig_Overrides(t *testing.T) {
 	}
 }
 
+func TestResolveMaxTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		set  bool
+		val  string
+		want int
+	}{
+		{"unset default", false, "", 1500},
+		{"valid override", true, "800", 800},
+		{"non-numeric", true, "abc", 1500},
+		{"zero", true, "0", 1500},
+		{"negative", true, "-5", 1500},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("ENGRAM_LLM_MAX_TOKENS", tc.val)
+			} else {
+				t.Setenv("ENGRAM_LLM_MAX_TOKENS", "")
+			}
+			if got := resolveMaxTokens(); got != tc.want {
+				t.Errorf("resolveMaxTokens() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_KeyRequired(t *testing.T) {
 	t.Setenv("ENGRAM_LLM_API_KEY", "")
 	if _, err := loadConfig(); err == nil {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
+	"github.com/FBISiri/engram/pkg/llm"
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
@@ -176,11 +178,12 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 // of unreflected memories.
 func generateFocalQuestions(ctx context.Context, batch []memory.Memory, n int) ([]string, error) {
 	prompt := buildFocalPrompt(batch, n)
-	response, err := callLLM(ctx, prompt)
+	response, meta, err := callLLMMeta(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("llm call: %w", err)
 	}
-	return parseFocalResponse(response, n)
+	log.Printf("[reflection] focal llm: finish_reason=%q raw_len=%d", meta.FinishReason, meta.RawLen)
+	return parseFocalResponse(response, n, meta)
 }
 
 func buildFocalPrompt(batch []memory.Memory, n int) string {
@@ -203,7 +206,8 @@ func buildFocalPrompt(batch []memory.Memory, n int) string {
 	return sb.String()
 }
 
-func parseFocalResponse(response string, n int) ([]string, error) {
+func parseFocalResponse(response string, n int, meta llm.Meta) ([]string, error) {
+	raw := response
 	response = strings.TrimSpace(response)
 	response = strings.TrimPrefix(response, "```json")
 	response = strings.TrimPrefix(response, "```")
@@ -212,6 +216,9 @@ func parseFocalResponse(response string, n int) ([]string, error) {
 
 	var questions []string
 	if err := json.Unmarshal([]byte(response), &questions); err != nil {
+		path := dumpRawResponse("focal", raw)
+		log.Printf("[reflection] focal JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
+			meta.FinishReason, meta.RawLen, path, err)
 		return nil, fmt.Errorf("JSON parse focal questions: %w", err)
 	}
 	if len(questions) == 0 {

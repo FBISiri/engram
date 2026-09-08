@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/FBISiri/engram/pkg/llm"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -98,7 +100,7 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 			prompt := buildDialecticPrompt(pq)
 
 			llmStart := time.Now()
-			response, err := callLLM(qctx, prompt)
+			response, meta, err := callLLMMeta(qctx, prompt)
 			llmElapsed := time.Since(llmStart).Milliseconds()
 
 			errMu.Lock()
@@ -114,7 +116,10 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 				return nil
 			}
 
-			insight, err := parseDialecticResponse(response, pq)
+			log.Printf("[reflection] dialectic q%d llm: finish_reason=%q raw_len=%d", i+1,
+				meta.FinishReason, meta.RawLen)
+
+			insight, err := parseDialecticResponse(response, pq, meta, fmt.Sprintf("dialectic-q%d", i+1))
 			if err != nil {
 				errMu.Lock()
 				stats.Errors = append(stats.Errors, fmt.Sprintf("dialectic q%d parse: %v", i+1, err))
@@ -207,7 +212,8 @@ func buildDialecticPrompt(pq PerQuestionEvidence) string {
 
 // parseDialecticResponse parses the LLM JSON response and validates source_ids
 // against the evidence set (prompt injection defense).
-func parseDialecticResponse(response string, pq PerQuestionEvidence) (*DialecticInsight, error) {
+func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Meta, stage string) (*DialecticInsight, error) {
+	raw := response
 	response = strings.TrimSpace(response)
 	response = strings.TrimPrefix(response, "```json")
 	response = strings.TrimPrefix(response, "```")
@@ -216,6 +222,9 @@ func parseDialecticResponse(response string, pq PerQuestionEvidence) (*Dialectic
 
 	var parsed dialecticLLMResponse
 	if err := json.Unmarshal([]byte(response), &parsed); err != nil {
+		path := dumpRawResponse(stage, raw)
+		log.Printf("[reflection] dialectic JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
+			meta.FinishReason, meta.RawLen, path, err)
 		return nil, fmt.Errorf("JSON parse: %w", err)
 	}
 

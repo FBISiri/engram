@@ -212,6 +212,7 @@ The Reflection Engine periodically synthesizes high-level insights from unreflec
 | `ENGRAM_REFLECTION_COUNT` | `int` | `10` | Minimum number of unreflected memories required to trigger reflection (only applies when `ENGRAM_REFLECTION_TRIGGER=count`). |
 | `ENGRAM_REFLECTION_MODEL` | `string` | `claude-sonnet-4-20250514` | LLM model used for synthesis. Must be accessible via Anthropic API. |
 | `ENGRAM_REFLECTION_MODE` | `string` | `v1` | Reflection algorithm. `v1` = flat synthesis (default). `v2` = 4-stage focal-point pipeline (focal selection → evidence gathering → dialectic → synthesis). See [`docs/reflection.md`](reflection.md). |
+| `ENGRAM_LLM_MAX_TOKENS` | `int` | `1500` | Max output tokens per reflection/dream LLM call. |
 | `ENGRAM_DIALECTIC_TIMEOUT` | `duration` | `45s` | V2 only. Per-call timeout for the dialectic LLM stage. Values above `90s` are clamped to `90s`. |
 
 ### Guardrails
