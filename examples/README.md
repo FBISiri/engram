@@ -35,6 +35,16 @@ written/deduped (`update_config`) for a given deployment shape.
 | [config-research-dedup](./config-research-dedup/) | Dense research notes with high semantic overlap. The most aggressive dedup profile — forces consolidation over fragment pile-up. |
 | [config-lifecycle-enabled](./config-lifecycle-enabled/) | Long-running agent ready to let evaporation run LIVE (mutating importance, not observe-only), with Reflection V2 + A-MAC on. Ships a `.env.example` plus a consolidation `config.yaml`. |
 
+> **Note — not covered by the env-key drift test.** `config-personal-agent`,
+> `config-research-dedup`, and `config-team-knowledge` are intentionally absent from
+> `config_validate_test.go`'s `ENGRAM_*` validation: that test only globs `*/.env.example`,
+> and these three ship no `.env.example` because they carry no `ENGRAM_*` environment
+> configuration at all. Every knob they expose is a YAML field under `retrieve_config` /
+> `update_config`, consumed by the `memory_apply_config` MCP tool at runtime — not by any
+> Go env parser at process startup. The missing `.env.example` is by design, not an
+> oversight. `config-lifecycle-enabled` is the exception: it does ship a `.env.example`
+> (it has an env layer) and therefore **is** covered by the test.
+
 ### 对比速查
 
 | 维度 | 1. 个人 agent | 2. 团队知识库 | 3. 研究笔记去重 | 4. 生命周期启用 |
