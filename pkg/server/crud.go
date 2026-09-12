@@ -139,6 +139,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 	// admission decision reached by the gates below. Async + non-blocking.
 	admissionDecision := "admitted"
 	gateDetails := ""
+	var dedupTopScore float64
 	if h.srv.traj != nil {
 		defer func() {
 			h.srv.traj.Log(trajectory.Record{
@@ -151,9 +152,13 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 				Tags:              tags,
 				AdmissionDecision: admissionDecision,
 				GateDetails:       gateDetails,
+				DedupTopScore:     dedupTopScore,
 				LatencyMs:         time.Since(createStart).Milliseconds(),
 				Caller:            CallerTypeFromContext(r.Context()),
 			})
+			if h.srv.metrics != nil {
+				h.srv.metrics.AdmissionTotal.WithLabelValues(string(memType), admissionDecision).Inc()
+			}
 		}()
 	}
 
@@ -213,6 +218,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = json.Unmarshal(dedupResult.DupData, &dup)
 		admissionDecision = "dedup_rejected"
+		dedupTopScore = dedupResult.TopScore
 		gateDetails = fmt.Sprintf("dedup score=%.4f against id=%s", dup.Existing.Score, dup.Existing.ID)
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"status":      "duplicate",
@@ -221,6 +227,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+	dedupTopScore = dedupResult.TopScore
 
 	if err := h.srv.store.Insert(r.Context(), mem, vec); err != nil {
 		admissionDecision = "error"
@@ -234,9 +241,19 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 	if h.srv.writeCheckpointsEnabled() {
 		if a := h.srv.cp1DedupAdvisory(dedupResult.Candidates, memType); a != nil {
 			advisories = append(advisories, *a)
+			if h.srv.metrics != nil {
+				h.srv.metrics.CheckpointTotal.WithLabelValues("cp1", "advisory").Inc()
+			}
+		} else if h.srv.metrics != nil {
+			h.srv.metrics.CheckpointTotal.WithLabelValues("cp1", "clean").Inc()
 		}
 		if a := h.srv.cp2Importance(mem.Collection, importance); a != nil {
 			advisories = append(advisories, *a)
+			if h.srv.metrics != nil {
+				h.srv.metrics.CheckpointTotal.WithLabelValues("cp2", "advisory").Inc()
+			}
+		} else if h.srv.metrics != nil {
+			h.srv.metrics.CheckpointTotal.WithLabelValues("cp2", "clean").Inc()
 		}
 		if a := h.srv.cp3RateLimitAdvisory(mem.Collection, memType); a != nil {
 			advisories = append(advisories, *a)

@@ -36,6 +36,7 @@ type Record struct {
 	SourceType        string  `json:"source_type,omitempty"`        // source_type provenance value
 	AdmissionDecision string  `json:"admission_decision,omitempty"` // admitted|dedup_rejected|rate_limited|error
 	GateDetails       string  `json:"gate_details,omitempty"`       // human-readable gate detail
+	DedupTopScore     float64 `json:"dedup_top_score,omitempty"`    // top dedup-search score seen for this candidate
 
 	// common
 	LatencyMs int64  `json:"latency_ms"`

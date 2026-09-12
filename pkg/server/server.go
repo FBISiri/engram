@@ -674,6 +674,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	// update logs.
 	admissionDecision := "admitted"
 	gateDetails := ""
+	var dedupTopScore float64
 	if s.traj != nil {
 		defer func() {
 			s.traj.Log(trajectory.Record{
@@ -686,9 +687,13 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 				Tags:              tags,
 				AdmissionDecision: admissionDecision,
 				GateDetails:       gateDetails,
+				DedupTopScore:     dedupTopScore,
 				LatencyMs:         time.Since(addStart).Milliseconds(),
 				Caller:            CallerTypeFromContext(ctx),
 			})
+			if s.metrics != nil {
+				s.metrics.AdmissionTotal.WithLabelValues(string(memType), admissionDecision).Inc()
+			}
 		}()
 	}
 
@@ -741,6 +746,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 		gateDetails = fmt.Sprintf("dedup_error: %v", dupErr)
 		return mcp.NewToolResultError(fmt.Sprintf("dedup check error: %v", dupErr)), nil
 	}
+	dedupTopScore = dedupResult.TopScore
 	if dedupResult.DupFound {
 		span.SetAttributes(attribute.Bool("dedup.hit", true))
 		if s.metrics != nil {
@@ -781,9 +787,19 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	if s.writeCheckpointsEnabled() {
 		if a := s.cp1DedupAdvisory(dedupResult.Candidates, memType); a != nil {
 			advisories = append(advisories, *a)
+			if s.metrics != nil {
+				s.metrics.CheckpointTotal.WithLabelValues("cp1", "advisory").Inc()
+			}
+		} else if s.metrics != nil {
+			s.metrics.CheckpointTotal.WithLabelValues("cp1", "clean").Inc()
 		}
 		if a := s.cp2Importance(mem.Collection, importance); a != nil {
 			advisories = append(advisories, *a)
+			if s.metrics != nil {
+				s.metrics.CheckpointTotal.WithLabelValues("cp2", "advisory").Inc()
+			}
+		} else if s.metrics != nil {
+			s.metrics.CheckpointTotal.WithLabelValues("cp2", "clean").Inc()
 		}
 		if a := s.cp3RateLimitAdvisory(mem.Collection, memType); a != nil {
 			advisories = append(advisories, *a)
@@ -821,6 +837,9 @@ type DedupResult struct {
 	DupFound   bool
 	DupData    []byte
 	Candidates []memory.ScoredMemory
+	// TopScore is the highest dedup-search similarity score (0 when no
+	// candidates); carried out so callers can record it on the trajectory.
+	TopScore float64
 }
 
 // checkDedup runs deduplication check as a child span. Returns a *DedupResult;
@@ -928,10 +947,10 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 		}
 
 		data, _ := json.Marshal(result)
-		return &DedupResult{DupFound: true, DupData: data, Candidates: dupeResults}, nil
+		return &DedupResult{DupFound: true, DupData: data, Candidates: dupeResults, TopScore: topScore}, nil
 	}
 
-	return &DedupResult{DupFound: false, Candidates: dupeResults}, nil
+	return &DedupResult{DupFound: false, Candidates: dupeResults, TopScore: topScore}, nil
 }
 
 // provenanceMerge updates an existing memory's provenance metadata when a

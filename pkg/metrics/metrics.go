@@ -51,6 +51,14 @@ type Metrics struct {
 	ImportanceP90  *prometheus.GaugeVec // engram_importance_p90{collection}
 	// SearchTopScore samples the top similarity score of vector searches, by collection.
 	SearchTopScore *prometheus.HistogramVec // engram_search_top_score{collection}
+	// AdmissionTotal counts admission-flow outcomes for memory writes, labelled
+	// by memory type and admission decision
+	// (admitted|dedup_rejected|rate_limited|error). Mirrors
+	// trajectory.Record.AdmissionDecision.
+	AdmissionTotal *prometheus.CounterVec // engram_admission_total{type,decision}
+	// CheckpointTotal counts write-discipline checkpoint outcomes, labelled by
+	// checkpoint kind (cp1|cp2) and outcome bucket (advisory|clean).
+	CheckpointTotal *prometheus.CounterVec // engram_checkpoint_total{kind,bucket}
 }
 
 // New creates a Metrics instance and registers all metrics into a fresh Registry.
@@ -147,6 +155,16 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"collection"})
 	reg.MustRegister(searchTopScore)
 
+	admissionTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_admission_total",
+		Help: "Total memory-write admission outcomes by type and decision (admitted|dedup_rejected|rate_limited|error).",
+	}, []string{"type", "decision"})
+	checkpointTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_checkpoint_total",
+		Help: "Total write-discipline checkpoint outcomes by kind (cp1|cp2) and outcome bucket (advisory|clean).",
+	}, []string{"kind", "bucket"})
+	reg.MustRegister(admissionTotal, checkpointTotal)
+
 	if embedCache != nil {
 		reg.MustRegister(newEmbedCacheCollector(embedCache))
 	}
@@ -173,6 +191,8 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		ImportanceMean:                   importanceMean,
 		ImportanceP90:                    importanceP90,
 		SearchTopScore:                   searchTopScore,
+		AdmissionTotal:                   admissionTotal,
+		CheckpointTotal:                  checkpointTotal,
 	}
 }
 
