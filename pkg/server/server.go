@@ -57,6 +57,9 @@ type Server struct {
 	reflectionRunner  *reflectionRunner      // single-flight async reflection runner
 }
 
+// Metrics returns the prometheus metrics registered via SetMetrics (nil until set).
+func (s *Server) Metrics() *engrammetrics.Metrics { return s.metrics }
+
 // SetMetrics registers prometheus metrics so handlers can record latency.
 func (s *Server) SetMetrics(m *engrammetrics.Metrics) {
 	s.metrics = m

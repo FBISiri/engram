@@ -331,6 +331,29 @@ func (m *MultiStore) Stats(ctx context.Context) (*memory.CollectionStats, error)
 	return agg, nil
 }
 
+// ScrollExpired returns ONLY expired memories (valid_until > 0 && valid_until < now)
+// from all physical collections, fanning out over every store and paginating
+// each one fully. Used for expiry attribution. Next offset is always "".
+func (m *MultiStore) ScrollExpired(ctx context.Context, opts memory.ScrollOptions) ([]memory.Memory, string, error) {
+	var all []memory.Memory
+	for _, s := range m.stores {
+		pageOpts := opts
+		pageOpts.Offset = "" // always start from the beginning per store
+		for {
+			batch, next, err := s.ScrollExpired(ctx, pageOpts)
+			if err != nil {
+				return nil, "", err
+			}
+			all = append(all, batch...)
+			if next == "" {
+				break
+			}
+			pageOpts.Offset = next
+		}
+	}
+	return all, "", nil
+}
+
 // DeleteExpired removes expired memories from all physical collections.
 func (m *MultiStore) DeleteExpired(ctx context.Context) (int, error) {
 	total := 0

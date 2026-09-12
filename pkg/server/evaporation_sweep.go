@@ -4,11 +4,56 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
 	engrammetrics "github.com/FBISiri/engram/pkg/metrics"
 )
+
+// sweepClock is a package-level singleton tracking evaporation sweep timing so
+// handleEvaporationStatus can self-audit the next-sweep estimate. The Server
+// struct is out of scope (server.go), hence a package singleton.
+type sweepClock struct {
+	mu       sync.Mutex
+	last     time.Time
+	hasSwept bool
+	started  time.Time
+}
+
+var evapSweepClock = &sweepClock{}
+
+func (c *sweepClock) markStarted(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.started = t
+}
+
+func (c *sweepClock) markSwept(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.last = t
+	c.hasSwept = true
+}
+
+func (c *sweepClock) snapshot() (last time.Time, hasSwept bool, started time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.last, c.hasSwept, c.started
+}
+
+// nextSweepEstimate is a pure function computing the next expected sweep time
+// and the basis of that estimate. Returns ok=false when no basis is available.
+func nextSweepEstimate(last time.Time, hasSwept bool, started time.Time, interval time.Duration) (time.Time, string, bool) {
+	switch {
+	case hasSwept:
+		return last.Add(interval), "last_sweep", true
+	case !started.IsZero():
+		return started.Add(interval), "process_start", true
+	default:
+		return time.Time{}, "", false
+	}
+}
 
 // StartEvaporationSweep launches a background goroutine that periodically
 // deprecates memories whose effective_importance has decayed below the
@@ -23,6 +68,10 @@ import (
 // server's *Metrics handle when present (nil-safe for the stdio-only path).
 func (s *Server) StartEvaporationSweep(ctx context.Context) {
 	interval := s.sweepInterval()
+
+	// The ticker fires after one full interval, so process_start+interval is
+	// the correct first-sweep estimate.
+	evapSweepClock.markStarted(time.Now())
 
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -68,6 +117,7 @@ func (s *Server) evaporationSweepTick(ctx context.Context, t time.Time) (int, in
 		return 0, 0
 	}
 	deprecated, skipped, err := runEvaporationSweep(ctx, s.store, cfg, s.metrics)
+	evapSweepClock.markSwept(t)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[evaporation] sweep error at %s: %v\n", t.Format(time.RFC3339), err)
 		return deprecated, skipped

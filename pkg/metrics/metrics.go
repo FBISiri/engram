@@ -138,6 +138,20 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"type"})
 	reg.MustRegister(evaporationScannedTotal, evaporationExemptedTotal, evaporationDryRunCandidatesTotal, evaporationHardDeletedTotal)
 
+	// Pre-declare evaporation counter series at 0 so they appear on /metrics
+	// from process start (before any sweep/expiry has run). Types are read from
+	// memory.ValidTypes (not hardcoded). exemptRules mirrors the inline P1..P8
+	// rule IDs returned by EvaporationExempt in pkg/memory/evaporation.go.
+	exemptRules := []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"}
+	for t := range memory.ValidTypes {
+		evaporationDeprecatedTotal.WithLabelValues(string(t)).Add(0)
+		evaporationDryRunCandidatesTotal.WithLabelValues(string(t)).Add(0)
+		evaporationHardDeletedTotal.WithLabelValues(string(t)).Add(0)
+		for _, rule := range exemptRules {
+			evaporationExemptedTotal.WithLabelValues(string(t), rule).Add(0)
+		}
+	}
+
 	importanceMean := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "engram_importance_mean",
 		Help: "Rolling mean importance of recent writes per collection (CP2 monitor).",

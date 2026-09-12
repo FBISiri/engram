@@ -1020,14 +1020,26 @@ func (h *HTTPServer) handleEvaporationStatus(w http.ResponseWriter, r *http.Requ
 	}
 
 	var nextSweep any
+	var nextBasis any
+	var lastSweepAt any
 	if cfg.Enabled && cfg.SweepIntervalH > 0 {
-		nextSweep = time.Now().Add(time.Duration(cfg.SweepIntervalH) * time.Hour).UTC().Format(time.RFC3339)
+		last, hasSwept, started := evapSweepClock.snapshot()
+		interval := time.Duration(cfg.SweepIntervalH) * time.Hour
+		if est, basis, ok := nextSweepEstimate(last, hasSwept, started, interval); ok {
+			nextSweep = est.UTC().Format(time.RFC3339)
+			nextBasis = basis
+		}
+		if hasSwept {
+			lastSweepAt = last.UTC().Format(time.RFC3339)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"config":                   cfg,
 		"deprecated_count_by_type": deprecatedByType,
 		"next_sweep_estimate":      nextSweep,
+		"next_sweep_basis":         nextBasis,
+		"last_sweep_at":            lastSweepAt,
 	})
 }
 

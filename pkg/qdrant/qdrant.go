@@ -480,6 +480,52 @@ func (s *Store) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]memory
 	return memories, nextOffset, nil
 }
 
+// ScrollExpired returns ONLY expired memories (valid_until > 0 && valid_until < now),
+// the logical complement of Scroll (which excludes them). It uses the same
+// expired filter as DeleteExpired and is used for expiry attribution.
+func (s *Store) ScrollExpired(ctx context.Context, opts memory.ScrollOptions) ([]memory.Memory, string, error) {
+	limit := uint32(opts.Limit)
+	if limit == 0 {
+		limit = 50
+	}
+
+	now := float64(time.Now().Unix())
+	expiredFilter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
+			qdrant.NewRange(fieldValidUntil, &qdrant.Range{Lt: qdrant.PtrOf(now)}),
+		},
+	}
+
+	req := &qdrant.ScrollPoints{
+		CollectionName: s.collection,
+		Filter:         expiredFilter,
+		Limit:          qdrant.PtrOf(limit),
+		WithPayload:    qdrant.NewWithPayload(true),
+	}
+	if opts.Offset != "" {
+		req.Offset = qdrant.NewID(opts.Offset)
+	}
+
+	results, err := s.client.Scroll(ctx, req)
+	if err != nil {
+		return nil, "", fmt.Errorf("qdrant: scroll_expired: %w", err)
+	}
+
+	memories := make([]memory.Memory, 0, len(results))
+	for _, pt := range results {
+		mem := pointToMemory(pt.Id, pt.Payload)
+		memories = append(memories, *mem)
+	}
+
+	var nextOffset string
+	if len(results) == int(limit) && len(results) > 0 {
+		nextOffset = extractString(results[len(results)-1].Id)
+	}
+
+	return memories, nextOffset, nil
+}
+
 // ScrollWithVectors is like Scroll but includes the embedding vector for each
 // returned memory (in ScoredMemory.Vector, Score=0). Used by migration tooling
 // to copy points across physical collections without re-embedding.

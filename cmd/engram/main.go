@@ -282,26 +282,28 @@ func serve(cfg *config.Config) error {
 	// the goroutine will be cleaned up when the process terminates.
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
-	server.StartExpiryCleanup(serverCtx, store, 0) // 0 = use DefaultExpiryInterval (10 min)
 
 	switch cfg.Transport {
 	case "stdio":
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio (ready)\n")
 		// No HTTP metrics on the stdio path; sweep records nothing but still runs.
+		server.StartExpiryCleanup(serverCtx, store, 0) // 0 = use DefaultExpiryInterval (10 min)
 		srv.StartEvaporationSweep(serverCtx)
 		return srv.ServeStdio()
 	case "http":
 		fmt.Fprintf(os.Stderr, "  Transport:  http (port %d)\n", cfg.HTTPPort)
 		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
 		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
-		srv.StartEvaporationSweep(serverCtx) // metrics wired by NewHTTPServer
+		server.StartExpiryCleanup(serverCtx, store, 0, srv.Metrics()) // 0 = use DefaultExpiryInterval (10 min)
+		srv.StartEvaporationSweep(serverCtx)                          // metrics wired by NewHTTPServer
 		return httpSrv.ListenAndServe(serverCtx)
 	case "both":
 		// Start HTTP in background; MCP stdio in foreground.
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio + http (port %d)\n", cfg.HTTPPort)
 		httpSrv := server.NewHTTPServer(srv, cfg.HTTPPort, cfg.APIKey)
 		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
-		srv.StartEvaporationSweep(serverCtx) // metrics wired by NewHTTPServer
+		server.StartExpiryCleanup(serverCtx, store, 0, srv.Metrics()) // 0 = use DefaultExpiryInterval (10 min)
+		srv.StartEvaporationSweep(serverCtx)                          // metrics wired by NewHTTPServer
 		go func() {
 			if err := httpSrv.ListenAndServe(serverCtx); err != nil {
 				fmt.Fprintf(os.Stderr, "http server error: %v\n", err)
