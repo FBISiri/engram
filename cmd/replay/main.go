@@ -11,30 +11,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/replay"
 )
 
 type args struct {
-	trace       string
-	baseline    string
-	candidate   string
-	configJSON  string
-	baselineCfg string
-	snapshot    string
-	ackSnapshot bool
-	collection  string
-	outputDir   string
-	ci          bool
-	meanRecall  float64
-	regressPct  float64
-	topK        int
+	mode             string
+	dedupThreshold   string
+	importanceBounds string
+	trace            string
+	baseline         string
+	candidate        string
+	configJSON       string
+	baselineCfg      string
+	snapshot         string
+	ackSnapshot      bool
+	collection       string
+	outputDir        string
+	ci               bool
+	meanRecall       float64
+	regressPct       float64
+	topK             int
 }
 
 func parseFlags() args {
 	var a args
-	flag.StringVar(&a.trace, "trace", "", "trajectory JSONL file to replay")
+	flag.StringVar(&a.mode, "mode", "", "replay mode: \"\" (default read-time replay) or \"candidate\" (offline write-side admission recompute over candidate records; zero LLM/Qdrant/network)")
+	flag.StringVar(&a.dedupThreshold, "dedup-threshold", "", "[--mode candidate] dedup threshold override: a global float (e.g. 0.88) or per-type list (e.g. insight=0.90,directive=0.92)")
+	flag.StringVar(&a.importanceBounds, "importance-bounds", "", "[--mode candidate] importance bounds override, per type: type=lo:hi,... (e.g. insight=5:8,directive=6:10)")
+	flag.StringVar(&a.trace, "trace", "", "trajectory JSONL file to replay (--mode candidate also accepts a directory or glob)")
 	flag.StringVar(&a.baseline, "baseline", "", "baseline trajectory JSONL (multi-day compare; requires --candidate)")
 	flag.StringVar(&a.candidate, "candidate", "", "candidate trajectory JSONL (multi-day compare; requires --baseline)")
 	flag.StringVar(&a.configJSON, "config", "", "config override as JSON (e.g. '{\"retrieve_config\":{\"recency_weight\":0.25}}'); requires --baseline-config")
@@ -58,6 +65,8 @@ func usage() {
 USAGE:
   replay --trace <file> [--config <json> --baseline-config <json>] [--ci]
   replay --baseline <file> --candidate <file> [--ci]   # multi-day compare
+  replay --mode candidate --trace <file|glob|dir> [--dedup-threshold <f|per-type>] [--importance-bounds <type=lo:hi,...>]
+         # offline write-side admission recompute over recorded candidate records (zero LLM/Qdrant/network)
 
 KNOWN SERVER-SIDE LIMITATIONS (cannot be fixed client-side):
   - memory_apply_config is SET-ONLY: it only honors recency_weight, top_k and
@@ -80,6 +89,27 @@ FLAGS:
 // validateArgs enforces mutual exclusion between --trace and the
 // --baseline/--candidate pair. Returns "single" or "multi" mode, or an error.
 func validateArgs(a args) (string, error) {
+	// Candidate mode is a pure offline recompute over recorded write-side
+	// candidate records; it shares only --trace with the read-time modes and
+	// deliberately ignores the live-server flags (--config/--snapshot/etc.).
+	if a.mode == "candidate" {
+		if a.trace == "" {
+			return "", fmt.Errorf("--mode candidate requires --trace <file|glob|dir>")
+		}
+		if a.baseline != "" || a.candidate != "" {
+			return "", fmt.Errorf("--mode candidate is mutually exclusive with --baseline/--candidate")
+		}
+		if a.configJSON != "" {
+			return "", fmt.Errorf("--config is not supported with --mode candidate (pure offline recompute)")
+		}
+		if a.snapshot != "" {
+			return "", fmt.Errorf("--snapshot is not supported with --mode candidate")
+		}
+		return "candidate", nil
+	}
+	if a.mode != "" {
+		return "", fmt.Errorf("unknown --mode %q (want: candidate, or omit for read-time replay)", a.mode)
+	}
 	multi := a.baseline != "" || a.candidate != ""
 	if a.trace != "" && multi {
 		return "", fmt.Errorf("--trace is mutually exclusive with --baseline/--candidate")
@@ -122,6 +152,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
+	}
+
+	if mode == "candidate" {
+		if err := runCandidate(a); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	th := replay.DefaultThresholds()
@@ -222,6 +260,78 @@ func runMultiDay(a args, eng *replay.Engine, th replay.Thresholds) {
 	if a.ci && cand.Aggregate.Verdict == replay.VerdictFail {
 		os.Exit(1)
 	}
+}
+
+// runCandidate executes the offline write-side admission recompute (--mode
+// candidate). It is a pure function over trajectory JSONL: zero LLM, zero
+// Qdrant, zero network. Per --ci semantics it exits non-zero ONLY on parse/IO
+// errors (returned here), never on the size of the decision diff.
+func runCandidate(a args) error {
+	global, hasGlobal, perType, err := replay.ParseDedupOverride(a.dedupThreshold)
+	if err != nil {
+		return err
+	}
+	bounds, err := replay.ParseImportanceBounds(a.importanceBounds)
+	if err != nil {
+		return err
+	}
+	traces, err := expandTraces(a.trace)
+	if err != nil {
+		return err
+	}
+	var all []replay.CandidateRecord
+	for _, t := range traces {
+		recs, err := replay.LoadCandidates(t)
+		if err != nil {
+			return err
+		}
+		all = append(all, recs...)
+	}
+	fmt.Fprintf(os.Stderr, "loaded %d candidate records from %d trace(s)\n", len(all), len(traces))
+	opts := replay.CandidateOptions{
+		DedupGlobal:      global,
+		HasDedupGlobal:   hasGlobal,
+		DedupPerType:     perType,
+		ImportanceBounds: bounds,
+	}
+	rep := replay.BuildCandidateReport(traces, all, opts)
+	rep.DedupOverride = a.dedupThreshold
+	rep.ImportanceOverride = a.importanceBounds
+
+	jsonBytes, err := replay.RenderCandidateJSON(rep)
+	if err != nil {
+		return err
+	}
+	if err := writeStamped(a.outputDir, "replay_candidate", jsonBytes, []byte(replay.RenderCandidateMarkdown(rep))); err != nil {
+		return err
+	}
+	fmt.Printf("total=%d admitted=%d dedup_rejected=%d rate_limited=%d error=%d newly_admitted=%d newly_rejected=%d importance_reclamped=%d unresolvable=%d\n",
+		rep.TotalCandidates, rep.Admitted, rep.DedupRejected, rep.RateLimited, rep.Errored,
+		len(rep.NewlyAdmitted), len(rep.NewlyRejected), len(rep.ImportanceReclamped), rep.Unresolvable)
+	return nil
+}
+
+// expandTraces resolves the --trace value into a sorted list of JSONL files. It
+// accepts a single file, a shell glob, or a directory (in which case all
+// *.jsonl files inside are used).
+func expandTraces(pattern string) ([]string, error) {
+	if info, err := os.Stat(pattern); err == nil && info.IsDir() {
+		matches, _ := filepath.Glob(filepath.Join(pattern, "*.jsonl"))
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("no *.jsonl files in directory %s", pattern)
+		}
+		sort.Strings(matches)
+		return matches, nil
+	}
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --trace glob %q: %w", pattern, err)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no trace files match %q", pattern)
+	}
+	sort.Strings(matches)
+	return matches, nil
 }
 
 func parseConfig(s string) (replay.MemoryConfig, error) {

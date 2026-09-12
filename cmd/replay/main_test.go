@@ -21,6 +21,10 @@ func TestValidateArgs(t *testing.T) {
 		{"baseline without candidate", args{baseline: "a.jsonl"}, "", true},
 		{"candidate without baseline", args{candidate: "b.jsonl"}, "", true},
 		{"nothing", args{}, "", true},
+		{"candidate mode", args{mode: "candidate", trace: "a.jsonl"}, "candidate", false},
+		{"candidate mode no trace", args{mode: "candidate"}, "", true},
+		{"candidate mode conflicts baseline", args{mode: "candidate", trace: "a.jsonl", baseline: "b.jsonl"}, "", true},
+		{"unknown mode", args{mode: "bogus", trace: "a.jsonl"}, "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

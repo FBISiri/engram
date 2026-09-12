@@ -186,7 +186,7 @@ func (s *Server) registerTools() {
 
 	// Tool 2: memory_add
 	addTool := mcp.NewTool("memory_add",
-		mcp.WithDescription("Store a new memory. Automatically deduplicates against existing memories."),
+		mcp.WithDescription("Store a new memory. Automatically deduplicates against existing memories. Optionally pass task_id to join this write to an event-loop task outcome (Memory Worth analysis)."),
 		mcp.WithString("content", mcp.Required(), mcp.Description("The memory content text.")),
 		mcp.WithString("type", mcp.Description("Memory type."), mcp.Enum("identity", "event", "insight", "directive")),
 		mcp.WithNumber("importance", mcp.Description("Importance score. Per-type defaults if omitted: identity=6, directive=7, insight=5, event=4. Per-type bounds (values outside are clamped): identity [7,9], directive [6,10], insight [5,8], event [3,7]. Omit to use per-type default.")),
@@ -194,6 +194,7 @@ func (s *Server) registerTools() {
 		mcp.WithString("source", mcp.Description("Source of the memory: user, agent, or system. Default: agent.")),
 		mcp.WithString("source_type", mcp.Description("Fine-grained provenance of the memory. Stored in metadata.source_type."), mcp.Enum("tool_output", "reflection", "web_search", "user_input", "calendar", "document")),
 		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = never expires.")),
+		mcp.WithString("task_id", mcp.Description("Optional event-loop task identifier. Recorded in the candidate trajectory record to join this write to task outcomes (Memory Worth analysis / L3 valence reinforcement). Same semantics as memory_search's task_id.")),
 	)
 	s.mcpServer.AddTool(addTool, s.handleAdd)
 
@@ -635,6 +636,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	source := request.GetString("source", "agent")
 	tags := getStringSlice(request, "tags")
 	validUntil := request.GetFloat("valid_until", 0)
+	taskID := request.GetString("task_id", "")
 
 	span.SetAttributes(
 		attribute.Int("content.length", len(content)),
@@ -693,6 +695,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 				DedupTopScore:     dedupTopScore,
 				LatencyMs:         time.Since(addStart).Milliseconds(),
 				Caller:            CallerTypeFromContext(ctx),
+				TaskID:            taskID,
 			})
 			if s.metrics != nil {
 				s.metrics.AdmissionTotal.WithLabelValues(string(memType), admissionDecision).Inc()

@@ -33,6 +33,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		Tags       []string       `json:"tags"`
 		ValidUntil float64        `json:"valid_until"`
 		Metadata   map[string]any `json:"metadata"`
+		TaskID     string         `json:"task_id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -47,6 +48,13 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 	if body.Content == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
 		return
+	}
+
+	// Optional event-loop task id: JSON body wins, else X-Task-ID header (same
+	// semantics as memory_search's task_id). Recorded on the candidate record.
+	taskID := body.TaskID
+	if taskID == "" {
+		taskID = r.Header.Get("X-Task-ID")
 	}
 
 	memType := memory.MemoryType(body.Type)
@@ -155,6 +163,7 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 				DedupTopScore:     dedupTopScore,
 				LatencyMs:         time.Since(createStart).Milliseconds(),
 				Caller:            CallerTypeFromContext(r.Context()),
+				TaskID:            taskID,
 			})
 			if h.srv.metrics != nil {
 				h.srv.metrics.AdmissionTotal.WithLabelValues(string(memType), admissionDecision).Inc()
