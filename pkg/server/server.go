@@ -21,6 +21,7 @@ import (
 	"github.com/FBISiri/engram/pkg/memory"
 	engrammetrics "github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
+	"github.com/FBISiri/engram/pkg/semconv"
 	"github.com/FBISiri/engram/pkg/trajectory"
 )
 
@@ -275,6 +276,7 @@ func isolatedCaller(ctx context.Context) (own string, isolated bool) {
 func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ctx, span := tracer.Start(ctx, "engram.memory.search")
 	defer span.End()
+	span.SetAttributes(semconv.GenAIAttrs(semconv.OpSearchMemory)...)
 	start := time.Now()
 	if s.metrics != nil {
 		defer func() { s.metrics.SearchDuration.Observe(time.Since(start).Seconds()) }()
@@ -518,6 +520,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ctx, span := tracer.Start(ctx, "engram.memory.list")
 	defer span.End()
+	span.SetAttributes(semconv.GenAIAttrs(semconv.OpListMemory)...)
 
 	limit := request.GetInt("limit", memory.DefaultListLimit)
 	if limit <= 0 {
@@ -591,6 +594,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	addStart := time.Now()
 	ctx, span := tracer.Start(ctx, "engram.memory.add")
 	defer span.End()
+	span.SetAttributes(semconv.GenAIAttrs(semconv.OpUpsertMemory)...)
 
 	content, err := request.RequireString("content")
 	if err != nil {
@@ -826,6 +830,8 @@ type DedupResult struct {
 func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, incomingSourceType string, memType memory.MemoryType) (*DedupResult, error) {
 	ctx, span := tracer.Start(ctx, "engram.memory.dedup_check")
 	defer span.End()
+	// dedup_check is a sub-step of the upsert flow, so it carries upsert_memory.
+	span.SetAttributes(semconv.GenAIAttrs(semconv.OpUpsertMemory)...)
 	start := time.Now()
 
 	threshold := s.resolveDedupThreshold(memType)
@@ -937,6 +943,8 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 func (s *Server) provenanceMerge(ctx context.Context, existing *memory.ScoredMemory, incomingSourceType string) (string, bool, error) {
 	ctx, span := tracer.Start(ctx, "engram.memory.provenance_merge")
 	defer span.End()
+	// provenance_merge is a sub-step of the upsert flow, so it carries upsert_memory.
+	span.SetAttributes(semconv.GenAIAttrs(semconv.OpUpsertMemory)...)
 
 	existingST := sourceTypeFromMeta(existing.Metadata)
 	history := getProvenanceHistory(existing.Metadata)
@@ -1238,6 +1246,10 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 
 // handleDelete implements the memory.delete tool.
 func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ctx, span := tracer.Start(ctx, "engram.memory.delete")
+	defer span.End()
+	span.SetAttributes(semconv.GenAIAttrs(semconv.OpDeleteMemory)...)
+
 	query, err := request.RequireString("query")
 	if err != nil {
 		return mcp.NewToolResultError("query is required"), nil
