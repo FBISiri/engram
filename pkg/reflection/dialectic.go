@@ -219,6 +219,154 @@ func buildDialecticPrompt(pq PerQuestionEvidence) string {
 	return sb.String()
 }
 
+// sanitizeJSONControlChars walks s as a byte-wise state machine tracking
+// in-string and backslash-escape state. Literal control chars (< 0x20) that
+// appear INSIDE a JSON string literal are escaped (LF->\n, CR->\r, TAB->\t,
+// others->\u00XX). Bytes outside string literals are left untouched, so an
+// already-clean JSON input passes through byte-identical.
+func sanitizeJSONControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				b.WriteByte(c)
+				escaped = false
+				continue
+			}
+			switch {
+			case c == '\\':
+				b.WriteByte(c)
+				escaped = true
+			case c == '"':
+				b.WriteByte(c)
+				inString = false
+			case c < 0x20:
+				switch c {
+				case '\n':
+					b.WriteString(`\n`)
+				case '\r':
+					b.WriteString(`\r`)
+				case '\t':
+					b.WriteString(`\t`)
+				default:
+					fmt.Fprintf(&b, `\u%04x`, c)
+				}
+			default:
+				b.WriteByte(c)
+			}
+		} else {
+			if c == '"' {
+				inString = true
+			}
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// repairStructuralSemicolons rewrites `;` to `,` ONLY in structural position:
+// immediately after a closing quote that terminates a string value, where the
+// next non-space token starts a new key (a `"`). It reuses the in-string /
+// escape state machine from sanitizeJSONControlChars so a legitimate `;` (or
+// `";`) INSIDE a string literal is never rewritten.
+func repairStructuralSemicolons(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inString := false
+	escaped := false
+	afterCloseQuote := false // value-closing quote seen, only whitespace since
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			b.WriteByte(c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+				afterCloseQuote = true
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inString = true
+			afterCloseQuote = false
+			b.WriteByte(c)
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			b.WriteByte(c) // preserve afterCloseQuote across whitespace
+		case c == ';' && afterCloseQuote:
+			j := i + 1
+			for j < len(s) && (s[j] == ' ' || s[j] == '\t' || s[j] == '\n' || s[j] == '\r') {
+				j++
+			}
+			if j < len(s) && s[j] == '"' {
+				b.WriteByte(',')
+			} else {
+				b.WriteByte(c)
+			}
+			afterCloseQuote = false
+		default:
+			b.WriteByte(c)
+			afterCloseQuote = false
+		}
+	}
+	return b.String()
+}
+
+// firstValidJSONObject scans s for balanced {...} objects (string-aware and
+// escape-aware brace counting) and unmarshals the first one that parses cleanly
+// into out. This tolerates prose prologue/epilogue and a leading malformed
+// object. Returns true and populates out on success.
+func firstValidJSONObject(s string, out *dialecticLLMResponse) bool {
+	depth := 0
+	start := -1
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					var tmp dialecticLLMResponse
+					if err := json.Unmarshal([]byte(s[start:i+1]), &tmp); err == nil {
+						*out = tmp
+						return true
+					}
+					start = -1
+				}
+			}
+		}
+	}
+	return false
+}
+
 // parseDialecticResponse parses the LLM JSON response and validates source_ids
 // against the evidence set (prompt injection defense).
 func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Meta, stage string) (*DialecticInsight, error) {
@@ -231,10 +379,25 @@ func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Me
 
 	var parsed dialecticLLMResponse
 	if err := json.Unmarshal([]byte(response), &parsed); err != nil {
-		path := dumpRawResponse(stage, raw)
-		log.Printf("[reflection] dialectic JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
-			meta.FinishReason, meta.RawLen, path, err)
-		return nil, fmt.Errorf("JSON parse: %w", err)
+		// Recovery ladder, attempted strictly in order. Each attempt starts from
+		// a zeroed struct so a partial failed unmarshal cannot contaminate the
+		// winning attempt.
+		var recovered string
+		if parsed = (dialecticLLMResponse{}); json.Unmarshal([]byte(sanitizeJSONControlChars(response)), &parsed) == nil {
+			recovered = "control-char sanitization"
+		} else if parsed = (dialecticLLMResponse{}); json.Unmarshal([]byte(repairStructuralSemicolons(response)), &parsed) == nil {
+			recovered = `delimiter repair (";"->",")`
+		} else if parsed = (dialecticLLMResponse{}); firstValidJSONObject(response, &parsed) {
+			recovered = "first-valid-block extraction"
+		}
+		if recovered == "" {
+			path := dumpRawResponse(stage, raw)
+			log.Printf("[reflection] dialectic JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
+				meta.FinishReason, meta.RawLen, path, err)
+			return nil, fmt.Errorf("JSON parse: %w", err)
+		}
+		log.Printf("[reflection] %s JSON recovered via %s: finish_reason=%q raw_len=%d",
+			stage, recovered, meta.FinishReason, meta.RawLen)
 	}
 
 	if parsed.Content == "" {

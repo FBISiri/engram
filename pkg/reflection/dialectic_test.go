@@ -153,6 +153,7 @@ func TestGenerateDialecticInsights_EmptyEvidenceSkip(t *testing.T) {
 // --- Test 3: JSON corruption → single-question degrade ---
 
 func TestGenerateDialecticInsights_JSONCorruption(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	origCallLLM := callLLMFunc
 	defer func() { callLLMFunc = origCallLLM }()
 
@@ -305,6 +306,7 @@ func containsStr(s, sub string) bool {
 // --- Test 6: Cross-question concurrent failure isolation ---
 
 func TestGenerateDialecticInsights_ConcurrentFailureIsolation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	origCallLLM := callLLMFunc
 	defer func() { callLLMFunc = origCallLLM }()
 
