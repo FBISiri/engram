@@ -201,11 +201,32 @@ func TestExampleConfigs(t *testing.T) {
 
 	types := helperType(t)
 
-	subExamples, err := filepath.Glob("*/.env.example")
+	// Policy: every example subdirectory MUST ship a .env.example; a config-less
+	// example dir is not allowed — a missing file fails the test rather than being
+	// silently skipped. We enumerate all subdirectories of examples/ (rather than
+	// globbing "*/.env.example", which would silently omit any dir lacking one) so
+	// a new example dir without a .env.example is caught as a failure.
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("glob env examples: %v", err)
+		t.Fatalf("read examples dir: %v", err)
 	}
-	sort.Strings(subExamples)
+	var subDirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			subDirs = append(subDirs, e.Name())
+		}
+	}
+	sort.Strings(subDirs)
+
+	var subExamples []string
+	for _, dir := range subDirs {
+		envFile := filepath.Join(dir, ".env.example")
+		if _, err := os.Stat(envFile); err != nil {
+			t.Errorf("example subdirectory %q is missing a .env.example (every example subdirectory MUST ship one; config-less example dirs are not allowed)", dir)
+			continue
+		}
+		subExamples = append(subExamples, envFile)
+	}
 	files := append([]string{"lifecycle.env"}, subExamples...)
 
 	for _, file := range files {

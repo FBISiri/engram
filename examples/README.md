@@ -35,15 +35,17 @@ written/deduped (`update_config`) for a given deployment shape.
 | [config-research-dedup](./config-research-dedup/) | Dense research notes with high semantic overlap. The most aggressive dedup profile — forces consolidation over fragment pile-up. |
 | [config-lifecycle-enabled](./config-lifecycle-enabled/) | Long-running agent ready to let evaporation run LIVE (mutating importance, not observe-only), with Reflection V2 + A-MAC on. Ships a `.env.example` plus a consolidation `config.yaml`. |
 
-> **Note — not covered by the env-key drift test.** `config-personal-agent`,
-> `config-research-dedup`, and `config-team-knowledge` are intentionally absent from
-> `config_validate_test.go`'s `ENGRAM_*` validation: that test only globs `*/.env.example`,
-> and these three ship no `.env.example` because they carry no `ENGRAM_*` environment
-> configuration at all. Every knob they expose is a YAML field under `retrieve_config` /
-> `update_config`, consumed by the `memory_apply_config` MCP tool at runtime — not by any
-> Go env parser at process startup. The missing `.env.example` is by design, not an
-> oversight. `config-lifecycle-enabled` is the exception: it does ship a `.env.example`
-> (it has an env layer) and therefore **is** covered by the test.
+> **Note — now covered by the env-key drift test.** `config-personal-agent`,
+> `config-research-dedup`, and `config-team-knowledge` now **each ship a
+> `.env.example`** — a server-bootstrap env layer whose ranking/dedup values
+> mirror the profile's `config.yaml` so the process starts up already tuned for
+> that shape. The drift test (`config_validate_test.go`) now **enumerates every
+> example subdirectory** and **fails** if any of them is missing a
+> `.env.example` (a config-less example dir is no longer allowed), so all four
+> `config-*` dirs are validated like the bootstrap examples. The YAML-only knobs
+> (`min_score`, `rerank_enabled`, `limit`, `ttl`, and every `# proposed` field)
+> have no `ENGRAM_*` env equivalent and remain **runtime-applied via the
+> `memory_apply_config` MCP tool** — the `.env.example` files deliberately omit them.
 
 ### 对比速查
 
@@ -118,9 +120,10 @@ Replace the example memories with your agent's real data as it accumulates.
 
 ## Config drift test
 
-`config_validate_test.go` (run via `go test ./examples/...`) parses every example
-env file here (`lifecycle.env` and `*/.env.example`) and asserts each `ENGRAM_*`
-key is (1) documented in [docs/configuration.md](../docs/configuration.md),
+`config_validate_test.go` (run via `go test ./examples/...`) enumerates **every
+example subdirectory** plus `lifecycle.env`, requires each subdirectory to ship a
+`.env.example` (a missing one **fails** the test — config-less example dirs are not
+allowed), and asserts each `ENGRAM_*` key is (1) documented in [docs/configuration.md](../docs/configuration.md),
 (2) actually read by a Go env parser, and (3) carries a value that parses as the
 type its config helper expects. This catches drift between the examples, the
 docs, and the code automatically in CI.
