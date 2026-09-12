@@ -50,6 +50,7 @@ type EvaporationConfigInput struct {
 	Enabled           *bool              `json:"enabled,omitempty"`
 	HalfLifeDays      map[string]float64 `json:"half_life_days,omitempty"`
 	AccessBoostAlpha  *float64           `json:"access_boost_alpha,omitempty"`
+	AccessBoostMax    *float64           `json:"access_boost_max,omitempty"`
 	EvictionThreshold *float64           `json:"eviction_threshold,omitempty"`
 	SweepIntervalH    *int               `json:"sweep_interval_hours,omitempty"`
 	SweepBatchLimit   *int               `json:"sweep_batch_limit,omitempty"`
@@ -199,6 +200,9 @@ func (s *Server) applyEvaporationOverride(in *EvaporationConfigInput) {
 	}
 	if in.AccessBoostAlpha != nil {
 		base.AccessBoostAlpha = *in.AccessBoostAlpha
+	}
+	if in.AccessBoostMax != nil {
+		base.AccessBoostMax = *in.AccessBoostMax
 	}
 	if in.EvictionThreshold != nil {
 		base.EvictionThreshold = *in.EvictionThreshold

@@ -286,6 +286,7 @@ Recent reads boost the memory (`AccessBoostAlpha`), so memories that keep gettin
 | `ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE` | `float64` (days) | `0` | Half-life for `directive` memories. `0` = never decays (v2: was `365`). |
 | `ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY` | `float64` (days) | `0` | Half-life for `identity` memories. `0` = never decays. |
 | `ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA` | `float64` | `0.15` | Importance boost applied on each recall (counteracts decay for actively-used memories). |
+| `ENGRAM_EVAPORATION_ACCESS_BOOST_MAX` | `float64` | `1.3` | Upper bound on the multiplicative access boost `1 + α·ln(1+access_count)`; caps how much frequent recall can inflate importance (default: at most +30%). `0` disables the cap (legacy unbounded). |
 | `ENGRAM_EVAPORATION_EVICTION_THRESHOLD` | `float64` | `1.0` | Memories whose decayed importance drops below this are evicted by the sweep. |
 | `ENGRAM_EVAPORATION_SWEEP_INTERVAL_H` | `int` (hours) | `6` | How often the sweep runs. |
 | `ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT` | `int` | `100` | Max memories processed per sweep. |
@@ -551,3 +552,4 @@ export ENGRAM_DEDUP_THRESHOLD=0.85  # more aggressive dedup for testing
 | 50 | `ENGRAM_EVAPORATION_PROTECT_RECENT_ACCESS_DAYS` | float64 | `30` | Lifecycle |
 | 51 | `ENGRAM_EVAPORATION_PROTECT_TAGS` | csv | `permanent,frank-feedback,directive,identity` | Lifecycle |
 | 52 | `ENGRAM_EVAPORATION_PROTECT_CORROBORATED` | bool | `true` | Lifecycle |
+| 53 | `ENGRAM_EVAPORATION_ACCESS_BOOST_MAX` | float64 | `1.3` | Lifecycle |

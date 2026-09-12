@@ -416,6 +416,9 @@ func TestEvaporationConfigDefaults(t *testing.T) {
 	if c.AccessBoostAlpha != 0.15 || c.EvictionThreshold != 1.0 || c.SweepIntervalH != 6 || c.SweepBatchLimit != 100 {
 		t.Errorf("unexpected scalar defaults: %+v", c)
 	}
+	if c.AccessBoostMax != 1.3 {
+		t.Errorf("unexpected AccessBoostMax default: %v", c.AccessBoostMax)
+	}
 }
 
 func TestEvaporationConfigFromEnv(t *testing.T) {
@@ -426,6 +429,7 @@ func TestEvaporationConfigFromEnv(t *testing.T) {
 	t.Setenv("ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE", "400")
 	t.Setenv("ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY", "10")
 	t.Setenv("ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA", "0.2")
+	t.Setenv("ENGRAM_EVAPORATION_ACCESS_BOOST_MAX", "1.6")
 	t.Setenv("ENGRAM_EVAPORATION_EVICTION_THRESHOLD", "1.5")
 	t.Setenv("ENGRAM_EVAPORATION_SWEEP_INTERVAL_H", "12")
 	t.Setenv("ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT", "50")
@@ -440,6 +444,9 @@ func TestEvaporationConfigFromEnv(t *testing.T) {
 	}
 	if c.AccessBoostAlpha != 0.2 || c.EvictionThreshold != 1.5 || c.SweepIntervalH != 12 || c.SweepBatchLimit != 50 {
 		t.Errorf("scalars not loaded: %+v", c)
+	}
+	if c.AccessBoostMax != 1.6 {
+		t.Errorf("AccessBoostMax not loaded: %v", c.AccessBoostMax)
 	}
 }
 

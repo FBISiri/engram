@@ -51,7 +51,9 @@ func TestEffectiveImportance_AccessBoost(t *testing.T) {
 	m := New("x", WithType(TypeEvent), WithImportance(1))
 	m.CreatedAt = daysAgo(0)
 	m.AccessCount = 20
-	got := EffectiveImportance(m, enabledEvapConfig(), base)
+	cfg := enabledEvapConfig()
+	cfg.AccessBoostMax = 0 // this test verifies the uncapped α·ln boost formula
+	got := EffectiveImportance(m, cfg, base)
 	wantBoost := 1.0 + 0.15*math.Log(1.0+20.0)
 	if math.Abs(got-wantBoost) > 1e-6 {
 		t.Errorf("access boost: got %f, want %f", got, wantBoost)
@@ -215,5 +217,63 @@ func TestEvaporationExempt_CorroboratedToggle(t *testing.T) {
 	off.ProtectCorroborated = false
 	if exempt, _ := EvaporationExempt(m, off, base); exempt {
 		t.Error("ProtectCorroborated off: memory should not be exempt via P7")
+	}
+}
+
+// TestAccessBoostBounded verifies the ln(1+access_count) boost term is bounded
+// above by AccessBoostMax for extreme access counts.
+func TestAccessBoostBounded(t *testing.T) {
+	cfg := DefaultEvaporationConfig()
+	cfg.Enabled = true
+	now := time.Now()
+	m := &Memory{
+		Type:           TypeInsight, // HalfLifeDays[insight]=180
+		Importance:     10,
+		AccessCount:    1_000_000_000, // 1e9
+		CreatedAt:      float64(now.Unix()),
+		LastAccessedAt: float64(now.Unix()),
+	}
+	eff := EffectiveImportance(m, cfg, now)
+
+	bounded := 10*cfg.AccessBoostMax + 1e-9
+	if eff > bounded {
+		t.Errorf("effImp=%v exceeds bounded=%v", eff, bounded)
+	}
+	uncapped := 10 * (1 + 0.15*math.Log(1+1e9))
+	if !(eff < uncapped) {
+		t.Errorf("effImp=%v not strictly less than uncapped=%v", eff, uncapped)
+	}
+}
+
+// TestP12OrderingRegression reproduces the P12 fact at EffectiveImportance
+// level: a hot insight can no longer runaway past a directive.
+func TestP12OrderingRegression(t *testing.T) {
+	now := time.Now()
+	directive := &Memory{Type: TypeDirective, Importance: 8} // returns early → eff 8.0
+	insight := &Memory{
+		Type:           TypeInsight,
+		Importance:     10,
+		AccessCount:    625,
+		CreatedAt:      float64(now.Unix()),
+		LastAccessedAt: float64(now.Unix()),
+	}
+	cfg := DefaultEvaporationConfig()
+	cfg.Enabled = true
+
+	effDir := EffectiveImportance(directive, cfg, now)
+	effIns := EffectiveImportance(insight, cfg, now)
+
+	if math.Abs(effDir-8.0) > 1e-9 {
+		t.Errorf("effDir=%v, want 8.0", effDir)
+	}
+	if math.Abs(effIns-13.0) > 1e-6 {
+		t.Errorf("effIns=%v, want ≈13.0", effIns)
+	}
+	if !(effIns < 19.0) {
+		t.Errorf("effIns=%v not < 19.0 (pre-fix runaway ≈19.66)", effIns)
+	}
+	// Pre-fix margin (effIns-effDir) was ≈11.66; the cap must shrink it well below that.
+	if !(effIns-effDir < 6.0) {
+		t.Errorf("margin effIns-effDir=%v not << pre-fix ≈11.66", effIns-effDir)
 	}
 }

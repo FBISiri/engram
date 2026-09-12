@@ -13,12 +13,15 @@ import (
 // search-scoring recency). See memory-evaporation-spec-v1.md §4.1 and the v2
 // safety spec (spec-memory-evaporation.md §4).
 type EvaporationConfig struct {
-	Enabled           bool                   `json:"enabled"`
-	HalfLifeDays      map[MemoryType]float64 `json:"half_life_days"`
-	AccessBoostAlpha  float64                `json:"access_boost_alpha"`
-	EvictionThreshold float64                `json:"eviction_threshold"`
-	SweepIntervalH    int                    `json:"sweep_interval_hours"`
-	SweepBatchLimit   int                    `json:"sweep_batch_limit"`
+	Enabled          bool                   `json:"enabled"`
+	HalfLifeDays     map[MemoryType]float64 `json:"half_life_days"`
+	AccessBoostAlpha float64                `json:"access_boost_alpha"`
+	// AccessBoostMax is the upper bound on the multiplicative access boost
+	// `(1 + α·ln(1+ac))`; 0 disables the cap (legacy unbounded behaviour).
+	AccessBoostMax    float64 `json:"access_boost_max"`
+	EvictionThreshold float64 `json:"eviction_threshold"`
+	SweepIntervalH    int     `json:"sweep_interval_hours"`
+	SweepBatchLimit   int     `json:"sweep_batch_limit"`
 
 	// v2 safety fields (spec §4).
 	DryRun     bool   `json:"dry_run"`     // when true the sweep performs no store.Update
@@ -50,6 +53,7 @@ func DefaultEvaporationConfig() EvaporationConfig {
 			TypeDirective: 0, // v2: was 365 — directives never evaporate (spec §4.3)
 		},
 		AccessBoostAlpha:  0.15,
+		AccessBoostMax:    1.3, // cap ON by default: at most +30% importance from access frequency; set to 0 to restore unbounded legacy behaviour.
 		EvictionThreshold: 1.0,
 		SweepIntervalH:    6,
 		SweepBatchLimit:   100,
@@ -97,9 +101,10 @@ func referenceTime(m *Memory, basis string) float64 {
 //	eff = base_importance × e^(-λ·Δt) × (1 + α·ln(1+access_count))
 //
 // where λ = ln(2)/half_life and Δt is days since the reinforcement-clock
-// reference (spec §4.2). When evaporation is disabled, or the type has no (or
-// non-positive) half-life (e.g. identity/directive), the raw importance is
-// returned unchanged.
+// reference (spec §4.2). The access-boost term `(1 + α·ln(1+access_count))` is
+// capped at AccessBoostMax when AccessBoostMax > 0. When evaporation is
+// disabled, or the type has no (or non-positive) half-life (e.g.
+// identity/directive), the raw importance is returned unchanged.
 func EffectiveImportance(m *Memory, cfg EvaporationConfig, now time.Time) float64 {
 	if !cfg.Enabled {
 		return m.Importance
@@ -116,6 +121,9 @@ func EffectiveImportance(m *Memory, cfg EvaporationConfig, now time.Time) float6
 
 	decayFactor := math.Exp(-lambda * daysPassed)
 	accessBoost := 1.0 + cfg.AccessBoostAlpha*math.Log(1.0+float64(m.AccessCount))
+	if cfg.AccessBoostMax > 0 && accessBoost > cfg.AccessBoostMax {
+		accessBoost = cfg.AccessBoostMax
+	}
 
 	effImp := m.Importance * decayFactor * accessBoost
 	if effImp < 0 {

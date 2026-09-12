@@ -225,6 +225,7 @@ func loadEvaporationConfig() memory.EvaporationConfig {
 	c.HalfLifeDays[memory.TypeDirective] = envFloat("ENGRAM_EVAPORATION_HALF_LIFE_DIRECTIVE", c.HalfLifeDays[memory.TypeDirective])
 	c.HalfLifeDays[memory.TypeIdentity] = envFloat("ENGRAM_EVAPORATION_HALF_LIFE_IDENTITY", c.HalfLifeDays[memory.TypeIdentity])
 	c.AccessBoostAlpha = envFloat("ENGRAM_EVAPORATION_ACCESS_BOOST_ALPHA", c.AccessBoostAlpha)
+	c.AccessBoostMax = envFloat("ENGRAM_EVAPORATION_ACCESS_BOOST_MAX", c.AccessBoostMax)
 	c.EvictionThreshold = envFloat("ENGRAM_EVAPORATION_EVICTION_THRESHOLD", c.EvictionThreshold)
 	c.SweepIntervalH = envInt("ENGRAM_EVAPORATION_SWEEP_INTERVAL_H", c.SweepIntervalH)
 	c.SweepBatchLimit = envInt("ENGRAM_EVAPORATION_SWEEP_BATCH_LIMIT", c.SweepBatchLimit)
