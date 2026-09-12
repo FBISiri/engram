@@ -105,6 +105,35 @@ func TestLogger_WritesRecordsToDatedFile(t *testing.T) {
 	}
 }
 
+// TestLogger_CloseIsSynchronous asserts that once Close() returns, every queued
+// record is ALREADY durable on disk — no sleep/poll needed. Close() returning
+// IS the durability guarantee (R1/R4).
+func TestLogger_CloseIsSynchronous(t *testing.T) {
+	dir := t.TempDir()
+	l := New(dir)
+
+	const ts = "2026-09-12T10:00:00Z"
+	const n = 50
+	for i := 0; i < n; i++ {
+		l.Log(Record{Timestamp: ts, Operation: "update", Content: "rec", LatencyMs: int64(i)})
+	}
+	l.Close()
+
+	// No polling: read immediately after Close returns.
+	recs := readRecords(t, filepath.Join(dir, "2026-09-12.jsonl"))
+	if len(recs) != n {
+		t.Fatalf("expected %d records durable after Close, got %d", n, len(recs))
+	}
+	for i, r := range recs {
+		if r.LatencyMs != int64(i) || r.Content != "rec" {
+			t.Errorf("record %d wrong: %+v", i, r)
+		}
+	}
+
+	// Close must be idempotent: a second call must not panic.
+	l.Close()
+}
+
 func TestLogger_SplitsByDate(t *testing.T) {
 	dir := t.TempDir()
 	l := New(dir)

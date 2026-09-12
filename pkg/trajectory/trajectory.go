@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // ResultItem is one entry in a retrieve record's results list.
@@ -50,13 +51,15 @@ type Record struct {
 // Logger writes trajectory records to per-day JSONL files under Dir.
 // All writes are asynchronous; callers are never blocked.
 type Logger struct {
-	dir string
-	ch  chan Record
+	dir       string
+	ch        chan Record
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // New creates a Logger that writes to dir/YYYY-MM-DD.jsonl and starts its background goroutine.
 func New(dir string) *Logger {
-	l := &Logger{dir: dir, ch: make(chan Record, 512)}
+	l := &Logger{dir: dir, ch: make(chan Record, 512), done: make(chan struct{})}
 	go l.run()
 	return l
 }
@@ -69,14 +72,20 @@ func (l *Logger) Log(r Record) {
 	}
 }
 
-// Close stops the background goroutine after draining queued records.
-func (l *Logger) Close() { close(l.ch) }
+// Close stops the background goroutine and blocks until it has drained all
+// queued records, flushed, and closed its file handle. It is idempotent and
+// safe to call more than once.
+func (l *Logger) Close() {
+	l.closeOnce.Do(func() { close(l.ch) })
+	<-l.done
+}
 
 func (l *Logger) run() {
 	var (
 		currentDate string
 		f           *os.File
 	)
+	defer close(l.done)
 	defer func() {
 		if f != nil {
 			_ = f.Close()
