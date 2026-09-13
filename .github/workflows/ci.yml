@@ -150,6 +150,35 @@ jobs:
           version: v2.12.2                        # matches .golangci.yml (version "2")
           args: --timeout=3m
 
+  # ── Job 3.5: Race detector (go test -race) ────────────────────────────────
+  # The Go race detector otherwise ran ONLY in pr.yml, and pr.yml never fires:
+  # this repo ships by direct push to master (pull_request events are not part
+  # of the normal workflow), so -race coverage was effectively dead. This job
+  # runs it on every push/PR that triggers ci.yml, and additionally stresses the
+  # 09-12 concurrency regression (trajectory + server admission counter) so that
+  # data races there cannot silently reappear. Self-contained: no services, no
+  # env, no secrets.
+  race:
+    name: Race Tests (go test -race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod   # exact version from go.mod (go 1.25)
+          cache: true               # module + build cache keyed on go.sum
+
+      - name: Race-enabled tests
+        run: go test -race -count=1 -timeout 10m ./...
+
+      - name: Stress the 09-12 regression
+        run: |
+          go test -race -count=20 ./pkg/trajectory/
+          go test -count=50 -run TestAdmissionTotalIncrements ./pkg/server/
+
   # ── Job 4: Docker build + GHCR push (Phase 2) ─────────────────────────────
   # Builds the container image from the repo Dockerfile and, on a push to
   # master, publishes it to GitHub Container Registry (GHCR). Pull requests
