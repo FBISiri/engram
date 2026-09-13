@@ -283,10 +283,17 @@ func TestGenerateDialecticInsights_SourceIDOutOfBounds(t *testing.T) {
 	if stats.OkCount != 0 {
 		t.Errorf("expected OkCount=0, got %d", stats.OkCount)
 	}
+	// New contract: the injected id is DROPPED (never trusted) with a
+	// "prompt injection" warning; with only 1 valid id (< 2) each question is
+	// discarded. Assert the injected id is observably dropped for injection.
+	var sawInjectionDrop bool
 	for _, e := range stats.Errors {
-		if !contains(e, "prompt injection") {
-			t.Errorf("expected prompt injection error, got: %s", e)
+		if contains(e, "prompt injection") && contains(e, "INJECTED_ID") {
+			sawInjectionDrop = true
 		}
+	}
+	if !sawInjectionDrop {
+		t.Errorf("expected a prompt-injection drop naming INJECTED_ID, got: %v", stats.Errors)
 	}
 }
 

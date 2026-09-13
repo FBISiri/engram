@@ -128,7 +128,14 @@ func (e *Engine) generateDialecticInsights(ctx context.Context, evidenceList []P
 				return nil
 			}
 
-			insight, err := parseDialecticResponse(response, pq, meta, fmt.Sprintf("dialectic-q%d", i+1))
+			insight, warnings, err := parseDialecticResponse(response, pq, meta, fmt.Sprintf("dialectic-q%d", i+1))
+			if len(warnings) > 0 {
+				errMu.Lock()
+				for _, w := range warnings {
+					stats.Errors = append(stats.Errors, fmt.Sprintf("dialectic q%d parse: %s", i+1, w))
+				}
+				errMu.Unlock()
+			}
 			if err != nil {
 				errMu.Lock()
 				stats.Errors = append(stats.Errors, fmt.Sprintf("dialectic q%d parse: %v", i+1, err))
@@ -367,9 +374,41 @@ func firstValidJSONObject(s string, out *dialecticLLMResponse) bool {
 	return false
 }
 
+// resolveEvidenceID maps a source_id from the LLM to a canonical evidence id,
+// or reports that it cannot be trusted. It NEVER invents ids: a returned id is
+// always already present in the evidence set (prompt injection defense).
+//   - direct hit (full id or prompt id form) -> returned verbatim
+//   - otherwise, if sid is >= 8 chars and is a prefix of EXACTLY ONE full
+//     evidence id, treat it as a truncated/garbled id and repair to that full id
+//   - otherwise -> not resolvable (caller drops it)
+func resolveEvidenceID(sid string, evidenceIDs map[string]struct{}, fullIDs []string) (string, bool) {
+	if _, ok := evidenceIDs[sid]; ok {
+		return sid, true
+	}
+	if len(sid) >= 8 {
+		match := ""
+		count := 0
+		for _, full := range fullIDs {
+			if strings.HasPrefix(full, sid) {
+				match = full
+				count++
+				if count > 1 {
+					break
+				}
+			}
+		}
+		if count == 1 {
+			return match, true
+		}
+	}
+	return "", false
+}
+
 // parseDialecticResponse parses the LLM JSON response and validates source_ids
-// against the evidence set (prompt injection defense).
-func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Meta, stage string) (*DialecticInsight, error) {
+// against the evidence set (prompt injection defense). It returns a slice of
+// human-readable warnings for fields/entries that were repaired or dropped so
+// the caller can record them without voiding the whole question.
+func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Meta, stage string) (*DialecticInsight, []string, error) {
 	raw := response
 	response = strings.TrimSpace(response)
 	response = strings.TrimPrefix(response, "```json")
@@ -391,40 +430,64 @@ func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Me
 			recovered = "first-valid-block extraction"
 		}
 		if recovered == "" {
+			// No parseable JSON survived the recovery ladder: there is nothing
+			// to salvage, so this stays fatal.
 			path := dumpRawResponse(stage, raw)
 			log.Printf("[reflection] dialectic JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
 				meta.FinishReason, meta.RawLen, path, err)
-			return nil, fmt.Errorf("JSON parse: %w", err)
+			return nil, nil, fmt.Errorf("JSON parse: %w", err)
 		}
 		log.Printf("[reflection] %s JSON recovered via %s: finish_reason=%q raw_len=%d",
 			stage, recovered, meta.FinishReason, meta.RawLen)
 	}
 
+	var warnings []string
+
+	// Content is the core of the insight; without it there is nothing to keep.
 	if parsed.Content == "" {
-		return nil, fmt.Errorf("missing content field")
+		return nil, nil, fmt.Errorf("missing content field")
 	}
 
+	// Missing tensions degrades gracefully: an insight can stand without any
+	// explicit tensions, so default to an empty (non-nil) slice.
 	if parsed.Tensions == nil {
-		return nil, fmt.Errorf("missing tensions field")
+		parsed.Tensions = []string{}
 	}
 	if len(parsed.Tensions) > 5 {
 		parsed.Tensions = parsed.Tensions[:5]
 	}
 
-	if len(parsed.SourceIDs) < 2 {
-		return nil, fmt.Errorf("source_ids must have >= 2 entries, got %d", len(parsed.SourceIDs))
-	}
-
+	// source_id validation — DEGRADE GRACEFULLY. A single blemished id used to
+	// void the entire question (~33% output wasted per run). Instead we repair
+	// what is safely repairable and DROP what is not, keeping the rest.
+	//
+	// PROMPT-INJECTION DEFENSE IS PRESERVED: an id outside the evidence set is
+	// never accepted into the output. Dropping an untrusted id is allowed;
+	// trusting it is not. Warnings quote ids with %q so Go escapes any control
+	// chars, keeping them safe from log injection.
 	evidenceIDs := make(map[string]struct{}, len(pq.Evidence)*2)
+	fullIDs := make([]string, 0, len(pq.Evidence))
 	for _, m := range pq.Evidence {
 		evidenceIDs[m.ID] = struct{}{}
 		evidenceIDs[promptIDForm(m.ID)] = struct{}{}
+		fullIDs = append(fullIDs, m.ID)
 	}
+	validIDs := make([]string, 0, len(parsed.SourceIDs))
 	for _, sid := range parsed.SourceIDs {
-		if _, ok := evidenceIDs[sid]; !ok {
-			return nil, fmt.Errorf("source_id %q not in evidence set (prompt injection defense)", sid)
+		if resolved, ok := resolveEvidenceID(sid, evidenceIDs, fullIDs); ok {
+			validIDs = append(validIDs, resolved)
+		} else {
+			warnings = append(warnings, fmt.Sprintf("source_id %q dropped: not in evidence set (prompt injection defense)", sid))
 		}
 	}
+
+	// An insight needs >= 2 corroborating sources by design. If fewer than 2
+	// survive filtering, drop the QUESTION with a clear error — but still return
+	// the warnings so the dropped id(s) remain observable.
+	if len(validIDs) < 2 {
+		return nil, warnings, fmt.Errorf("source_ids: only %d valid of %d after filtering (need >= 2); dropped %d", len(validIDs), len(parsed.SourceIDs), len(warnings))
+	}
+	parsed.SourceIDs = validIDs
 
 	if parsed.Confidence < 0 {
 		parsed.Confidence = 0
@@ -450,5 +513,5 @@ func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Me
 		Confidence: parsed.Confidence,
 		Importance: parsed.Importance,
 		Tags:       parsed.Tags,
-	}, nil
+	}, warnings, nil
 }
