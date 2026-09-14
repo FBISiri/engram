@@ -33,17 +33,29 @@ The read-time modes (`--trace` alone, `--baseline/--candidate`) are unchanged.
 - **`dedup_rejected` records** carry the dedup score in `gate_details`
   (`dedup score=%.4f against id=%s`). Under a **lower** override they flip to
   `newly_admitted`; under a higher/equal one they stay rejected. Fully resolvable.
-- **`admitted` records carry NO dedup score** (the server logs the score only on
-  rejection), so under any threshold change they **cannot** be re-decided →
-  counted as **`unresolvable`**. Always-logging the top score is a separate job
-  (S32 item **A-6**) and is deliberately *not* done here.
+- **`admitted` records are layered by data vintage.** `Record.DedupTopScore` (the
+  top dedup-search score seen for a candidate) landed in `5c1434a` and is written
+  on both admitted and `dedup_rejected` records on/after `2026-09-12T19:07Z`:
+    - Records written **before** that carry **no** `dedup_top_score`, so under any
+      threshold change they **cannot** be re-decided → counted as
+      **`unresolvable_legacy_no_score`** (data vintage; this share dilutes as new
+      logs accrue).
+    - Records written **on/after** it carry `dedup_top_score` and are
+      **re-decidable**: an admitted record whose `top_score >=` a raised override
+      flips `admitted` → `newly_rejected`; below the threshold it stays admitted
+      (no change, not unresolvable).
+  The `unresolvable_has_score` column counts admitted records that carry a score
+  yet still could not be decided — it is expected to stay `0` (a record with a
+  score is always resolvable); a nonzero value flags a regression. The overall
+  `unresolvable_dedup` equals `unresolvable_legacy_no_score + unresolvable_has_score`.
 - **Importance is post-clamp.** An `--importance-bounds` change is only
   resolvable when the recorded value falls **outside** the new bounds (it would
   then be re-clamped to the new bound). In-bounds records are `unresolvable`
   because the original pre-clamp value is not recorded. Importance does not gate
   admission, so this is reported as a separate informational section.
-- `newly_rejected` is therefore always empty here (flipping an admitted record to
-  rejected needs its top score → A-6).
+- `newly_rejected` is therefore **reachable**: any admitted record written after
+  the `dedup_top_score` cutover whose recorded top score meets/exceeds the raised
+  threshold flips to rejected.
 
 ## Write-side `task_id`
 

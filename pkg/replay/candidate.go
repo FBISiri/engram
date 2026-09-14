@@ -24,17 +24,23 @@ import (
 // recorded at write time.
 //
 // Honesty constraints (why "unresolvable" exists):
-//   - admitted records carry NO dedup score (server.go logs the score ONLY on
-//     rejection), so under a changed threshold they cannot be re-decided → they
-//     are counted as UNRESOLVABLE. Fixing this (always logging top_score) is
-//     S32 item A-6 and is deliberately NOT done here.
-//   - dedup_rejected records DO carry the score in gate_details
+//   - dedup re-decision is LAYERED by data vintage. Record.DedupTopScore (the
+//     top dedup-search score) landed in 5c1434a and is written on BOTH admitted
+//     and dedup_rejected records on/after 2026-09-12T19:07Z:
+//       * records written before that carry NO dedup_top_score, so under a
+//         changed threshold they cannot be re-decided → UNRESOLVABLE (legacy
+//         data vintage; this share dilutes as new logs accrue).
+//       * records written on/after it carry dedup_top_score and ARE re-decidable:
+//         an admitted record whose top_score >= a raised threshold flips
+//         admitted → newly_rejected.
+//   - dedup_rejected records also carry the score in gate_details
 //     ("dedup score=%.4f against id=%s") → they can flip to admitted under a
 //     lower threshold.
 //   - Record.Importance is POST-clamp. A change to importance bounds is only
 //     resolvable when the recorded value falls OUTSIDE the new bounds (it would
 //     then be re-clamped to the new bound); otherwise it is UNRESOLVABLE because
-//     the original pre-clamp value is not recorded.
+//     the original pre-clamp value is not recorded. This gap is separate from
+//     the dedup vintage layering above and is still real.
 // -----------------------------------------------------------------------------
 
 var validMemTypes = map[string]bool{
@@ -65,6 +71,12 @@ type CandidateRecord struct {
 	DedupScore     float64 `json:"dedup_score,omitempty"`
 	DedupAgainstID string  `json:"dedup_against_id,omitempty"`
 	HasDedupScore  bool    `json:"has_dedup_score"`
+
+	// Top dedup-search score recorded at write time (Record.DedupTopScore,
+	// landed in 5c1434a). Present on BOTH admitted and dedup_rejected records
+	// written on/after 2026-09-12T19:07Z; absent (zero) on older records.
+	DedupTopScore    float64 `json:"dedup_top_score,omitempty"`
+	HasDedupTopScore bool    `json:"has_dedup_top_score"`
 }
 
 // LoadCandidates reads one trajectory JSONL file and returns ONLY the
@@ -116,6 +128,10 @@ func recordToCandidate(rec trajectory.Record) CandidateRecord {
 		GateDetails:       rec.GateDetails,
 		Caller:            rec.Caller,
 		TaskID:            rec.TaskID,
+	}
+	if rec.DedupTopScore != 0 {
+		c.DedupTopScore = rec.DedupTopScore
+		c.HasDedupTopScore = true
 	}
 	if rec.AdmissionDecision == "dedup_rejected" {
 		if m := dedupScoreRe.FindStringSubmatch(rec.GateDetails); m != nil {
@@ -206,9 +222,11 @@ type CandidateReport struct {
 	ImportanceReclamped []ImportanceDelta `json:"importance_reclamped,omitempty"`
 
 	// Records the override could not be applied to for lack of recorded data.
-	UnresolvableDedup      int `json:"unresolvable_dedup"`
-	UnresolvableImportance int `json:"unresolvable_importance,omitempty"`
-	Unresolvable           int `json:"unresolvable"`
+	UnresolvableDedupLegacyNoScore int `json:"unresolvable_legacy_no_score"`
+	UnresolvableDedupHasScore      int `json:"unresolvable_has_score"`
+	UnresolvableDedup              int `json:"unresolvable_dedup"` // == legacy_no_score + has_score
+	UnresolvableImportance         int `json:"unresolvable_importance,omitempty"`
+	Unresolvable                   int `json:"unresolvable"`
 
 	Notes []string `json:"notes,omitempty"`
 }
@@ -255,8 +273,9 @@ func BuildCandidateReport(traces []string, recs []CandidateRecord, opts Candidat
 				switch r.AdmissionDecision {
 				case "dedup_rejected":
 					if !r.HasDedupScore {
-						// rejected but no parseable score → cannot re-decide.
-						rep.UnresolvableDedup++
+						// rejected but no parseable score → cannot re-decide
+						// (a rejected record with no score is legacy-no-score).
+						rep.UnresolvableDedupLegacyNoScore++
 						unresolvableRec = true
 					} else if r.DedupScore < newT {
 						// was rejected because score >= old threshold; under the
@@ -272,11 +291,27 @@ func BuildCandidateReport(traces []string, recs []CandidateRecord, opts Candidat
 					}
 					// score >= newT → stays rejected (no change).
 				case "admitted":
-					// admitted records carry no top dedup score, so we cannot
-					// tell whether a near-duplicate below the old threshold
-					// would now trip a lower one → unresolvable (see A-6).
-					rep.UnresolvableDedup++
-					unresolvableRec = true
+					if r.HasDedupTopScore {
+						// records written on/after 2026-09-12T19:07Z carry the
+						// top dedup score → re-decidable. If it meets/exceeds the
+						// override it would now trip the dedup gate → rejected.
+						if r.DedupTopScore >= newT {
+							rep.NewlyRejected = append(rep.NewlyRejected, CandidateDelta{
+								ContentPrefix: truncate(r.Content, prefixLen),
+								Type:          r.Type,
+								Score:         r.DedupTopScore,
+								OldDecision:   r.AdmissionDecision,
+								NewThreshold:  newT,
+								// AgainstID left empty: admits record no rival id.
+							})
+						}
+						// score < newT → stays admitted (no change, not unresolvable).
+					} else {
+						// legacy record (written before top_score landed) → cannot
+						// tell whether a lower threshold would trip it → unresolvable.
+						rep.UnresolvableDedupLegacyNoScore++
+						unresolvableRec = true
+					}
 					// rate_limited / error / other: terminal before/around the
 					// dedup gate, unaffected by a threshold override.
 				}
@@ -320,15 +355,19 @@ func BuildCandidateReport(traces []string, recs []CandidateRecord, opts Candidat
 	}
 
 	// Deterministic ordering (highest score first) for stable output.
+	rep.UnresolvableDedup = rep.UnresolvableDedupLegacyNoScore + rep.UnresolvableDedupHasScore
 	sort.SliceStable(rep.NewlyAdmitted, func(i, j int) bool {
 		return rep.NewlyAdmitted[i].Score > rep.NewlyAdmitted[j].Score
+	})
+	sort.SliceStable(rep.NewlyRejected, func(i, j int) bool {
+		return rep.NewlyRejected[i].Score > rep.NewlyRejected[j].Score
 	})
 
 	if opts.hasDedupOverride() {
 		rep.Notes = append(rep.Notes,
-			"admitted records carry no dedup top_score (logged only on rejection) → counted as unresolvable; always-log-top_score is deferred to S32 item A-6.")
+			"dedup re-decision is layered: records written before 2026-09-12T19:07Z carry no dedup_top_score and are permanently unresolvable (data vintage — this share dilutes as new logs accrue).")
 		rep.Notes = append(rep.Notes,
-			"newly_rejected is always empty here: flipping an admitted record to rejected needs its top_score, which is not recorded (A-6).")
+			"records written on/after 2026-09-12T19:07Z carry dedup_top_score and are re-decidable: an admitted record whose top_score >= the override flips admitted → newly_rejected.")
 	}
 	if len(opts.ImportanceBounds) > 0 {
 		rep.Notes = append(rep.Notes,
@@ -472,6 +511,8 @@ func RenderCandidateMarkdown(r CandidateReport) string {
 		fmt.Fprintf(&b, "| importance_reclamped | %d |\n", len(r.ImportanceReclamped))
 	}
 	fmt.Fprintf(&b, "| unresolvable | %d |\n", r.Unresolvable)
+	fmt.Fprintf(&b, "| unresolvable_legacy_no_score | %d |\n", r.UnresolvableDedupLegacyNoScore)
+	fmt.Fprintf(&b, "| unresolvable_has_score | %d |\n", r.UnresolvableDedupHasScore)
 	b.WriteString("\n")
 
 	if len(r.NewlyAdmitted) > 0 {
@@ -480,6 +521,15 @@ func RenderCandidateMarkdown(r CandidateReport) string {
 		for _, d := range r.NewlyAdmitted {
 			fmt.Fprintf(&b, "| %s | %.4f | %.4f | %s | %s |\n",
 				d.Type, d.Score, d.NewThreshold, d.AgainstID, truncate(d.ContentPrefix, 60))
+		}
+		b.WriteString("\n")
+	}
+	if len(r.NewlyRejected) > 0 {
+		fmt.Fprintf(&b, "### Newly rejected (admitted → dedup_rejected)\n\n")
+		fmt.Fprintf(&b, "| Type | Score | New threshold | Content |\n|---|---|---|---|\n")
+		for _, d := range r.NewlyRejected {
+			fmt.Fprintf(&b, "| %s | %.4f | %.4f | %s |\n",
+				d.Type, d.Score, d.NewThreshold, truncate(d.ContentPrefix, 60))
 		}
 		b.WriteString("\n")
 	}

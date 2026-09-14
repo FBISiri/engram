@@ -19,6 +19,9 @@ func candidateFixture(t *testing.T) string {
 {"timestamp":"2026-09-05T00:00:03Z","operation":"candidate","content":"rate limited event","type":"event","importance":4,"admission_decision":"rate_limited","gate_details":"rate_limited: retry_after=30s","latency_ms":1,"caller":"agent-self"}
 {"timestamp":"2026-09-05T00:00:04Z","operation":"candidate","content":"errored event","type":"event","importance":4,"admission_decision":"error","gate_details":"embed_error: boom","latency_ms":2,"caller":"agent-self"}
 {"timestamp":"2026-09-05T00:00:05Z","operation":"candidate","content":"rejected no score","type":"directive","importance":7,"admission_decision":"dedup_rejected","gate_details":"","latency_ms":3,"caller":"agent-self"}
+{"timestamp":"2026-09-13T00:00:00Z","operation":"candidate","content":"admitted insight high top_score","type":"insight","importance":6,"source_type":"reflection","admission_decision":"admitted","dedup_top_score":0.92,"latency_ms":10,"caller":"agent-self"}
+{"timestamp":"2026-09-13T00:00:01Z","operation":"candidate","content":"admitted insight low top_score","type":"insight","importance":6,"source_type":"reflection","admission_decision":"admitted","dedup_top_score":0.85,"latency_ms":10,"caller":"agent-self"}
+{"timestamp":"2026-09-13T00:00:02Z","operation":"candidate","content":"admitted insight boundary top_score","type":"insight","importance":6,"source_type":"reflection","admission_decision":"admitted","dedup_top_score":0.90,"latency_ms":10,"caller":"agent-self"}
 {"timestamp":"2026-09-05T00:00:06Z","operation":"retrieve","query":"ignored","strategy":"semantic_search","latency_ms":9,"results":[{"id":"z","content":"c","score":1.0}]}
 this is not json
 `
@@ -34,8 +37,8 @@ func TestLoadCandidates_SkipsRetrieveMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCandidates: %v", err)
 	}
-	if len(recs) != 6 {
-		t.Fatalf("expected 6 candidate records, got %d", len(recs))
+	if len(recs) != 9 {
+		t.Fatalf("expected 9 candidate records, got %d", len(recs))
 	}
 	// task_id is carried through.
 	if recs[0].TaskID != "loop-42" {
@@ -49,9 +52,19 @@ func TestLoadCandidates_SkipsRetrieveMalformed(t *testing.T) {
 	if recs[5].HasDedupScore {
 		t.Errorf("record 5 should have no dedup score, got %+v", recs[5])
 	}
-	// admitted record carries no dedup score.
-	if recs[0].HasDedupScore {
-		t.Errorf("admitted record should not carry a dedup score")
+	// admitted record (legacy) carries no dedup score of any kind.
+	if recs[0].HasDedupScore || recs[0].HasDedupTopScore {
+		t.Errorf("admitted legacy record should not carry a dedup score")
+	}
+	// admitted records written after the cutover carry dedup_top_score.
+	if !recs[6].HasDedupTopScore || recs[6].DedupTopScore != 0.92 {
+		t.Errorf("record 6 dedup_top_score wrong: %+v", recs[6])
+	}
+	if !recs[7].HasDedupTopScore || recs[7].DedupTopScore != 0.85 {
+		t.Errorf("record 7 dedup_top_score wrong: %+v", recs[7])
+	}
+	if !recs[8].HasDedupTopScore || recs[8].DedupTopScore != 0.90 {
+		t.Errorf("record 8 dedup_top_score wrong: %+v", recs[8])
 	}
 }
 
@@ -82,25 +95,40 @@ func TestBuildCandidateReport_DedupFlip(t *testing.T) {
 		DedupGlobal: global, HasDedupGlobal: hasGlobal, DedupPerType: perType,
 	})
 
-	if rep.TotalCandidates != 6 {
-		t.Errorf("total = %d, want 6", rep.TotalCandidates)
+	if rep.TotalCandidates != 9 {
+		t.Errorf("total = %d, want 9", rep.TotalCandidates)
 	}
-	if rep.Admitted != 1 || rep.DedupRejected != 3 || rep.RateLimited != 1 || rep.Errored != 1 {
+	if rep.Admitted != 4 || rep.DedupRejected != 3 || rep.RateLimited != 1 || rep.Errored != 1 {
 		t.Errorf("census wrong: %+v", rep)
 	}
-	// Under threshold 0.90: score 0.95 stays rejected; score 0.89 flips to
-	// admitted; the empty-gate rejection is unresolvable. The 1 admitted
-	// record is unresolvable (no top score).
+	// Under threshold 0.90: rejected 0.95 stays rejected; rejected 0.89 flips to
+	// admitted; the empty-gate rejection and the legacy admitted record are
+	// unresolvable (legacy_no_score). Admitted top_score 0.92 (>0.90) and 0.90
+	// (== boundary, `>=`) flip to newly_rejected; top_score 0.85 (<0.90) stays admitted.
 	if len(rep.NewlyAdmitted) != 1 {
 		t.Fatalf("newly_admitted = %d, want 1", len(rep.NewlyAdmitted))
 	}
 	if rep.NewlyAdmitted[0].Score != 0.89 || rep.NewlyAdmitted[0].AgainstID != "bbb" {
 		t.Errorf("wrong newly_admitted delta: %+v", rep.NewlyAdmitted[0])
 	}
-	if len(rep.NewlyRejected) != 0 {
-		t.Errorf("newly_rejected should be empty, got %d", len(rep.NewlyRejected))
+	if len(rep.NewlyRejected) != 2 {
+		t.Fatalf("newly_rejected = %d, want 2", len(rep.NewlyRejected))
 	}
-	// unresolvable = 1 admitted + 1 rejected-without-score.
+	// sorted desc: 0.92 then the 0.90 boundary record.
+	if rep.NewlyRejected[0].Score != 0.92 || rep.NewlyRejected[0].OldDecision != "admitted" || rep.NewlyRejected[0].AgainstID != "" {
+		t.Errorf("wrong newly_rejected[0] delta: %+v", rep.NewlyRejected[0])
+	}
+	// EXACT equality boundary: dedup_top_score == threshold must be rejected (>=).
+	if rep.NewlyRejected[1].Score != 0.90 || rep.NewlyRejected[1].OldDecision != "admitted" {
+		t.Errorf("boundary record (top_score==threshold) not in newly_rejected: %+v", rep.NewlyRejected[1])
+	}
+	// unresolvable = legacy admitted + rejected-without-score = 2 (both legacy_no_score).
+	if rep.UnresolvableDedupLegacyNoScore != 2 || rep.UnresolvableDedupHasScore != 0 {
+		t.Errorf("legacy=%d has_score=%d, want 2/0", rep.UnresolvableDedupLegacyNoScore, rep.UnresolvableDedupHasScore)
+	}
+	if rep.UnresolvableDedup != rep.UnresolvableDedupLegacyNoScore+rep.UnresolvableDedupHasScore {
+		t.Errorf("UnresolvableDedup %d != legacy+has_score", rep.UnresolvableDedup)
+	}
 	if rep.UnresolvableDedup != 2 || rep.Unresolvable != 2 {
 		t.Errorf("unresolvable = %d (dedup %d), want 2", rep.Unresolvable, rep.UnresolvableDedup)
 	}
@@ -115,25 +143,30 @@ func TestBuildCandidateReport_PerTypeThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep := BuildCandidateReport([]string{path}, recs, CandidateOptions{DedupPerType: perType})
-	// insight rejections: 0.95 and 0.89 both < 0.96 → both flip. admitted
-	// insight is unresolvable. directive rejection (no override) untouched.
+	// insight rejections: 0.95 and 0.89 both < 0.96 → both flip to admitted.
+	// admitted insight top_scores 0.92 and 0.85 both < 0.96 → stay admitted.
+	// legacy admitted insight is unresolvable. directive rejection (no override) untouched.
 	if len(rep.NewlyAdmitted) != 2 {
 		t.Fatalf("newly_admitted = %d, want 2", len(rep.NewlyAdmitted))
+	}
+	if len(rep.NewlyRejected) != 0 {
+		t.Errorf("newly_rejected = %d, want 0", len(rep.NewlyRejected))
 	}
 	// ordering is highest score first.
 	if rep.NewlyAdmitted[0].Score < rep.NewlyAdmitted[1].Score {
 		t.Errorf("newly_admitted not sorted desc: %+v", rep.NewlyAdmitted)
 	}
-	if rep.UnresolvableDedup != 1 {
-		t.Errorf("unresolvable_dedup = %d, want 1 (the admitted insight)", rep.UnresolvableDedup)
+	if rep.UnresolvableDedup != 1 || rep.UnresolvableDedupLegacyNoScore != 1 || rep.UnresolvableDedupHasScore != 0 {
+		t.Errorf("unresolvable_dedup = %d (legacy %d has_score %d), want 1/1/0 (the legacy admitted insight)",
+			rep.UnresolvableDedup, rep.UnresolvableDedupLegacyNoScore, rep.UnresolvableDedupHasScore)
 	}
 }
 
 func TestBuildCandidateReport_ImportanceBounds(t *testing.T) {
 	path := candidateFixture(t)
 	recs, _ := LoadCandidates(path)
-	// insight recorded importances: 6, 6, 7. New bounds [5,6.5]:
-	//   6 in-bounds (unresolvable x2), 7 > 6.5 → reclamp to 6.5.
+	// insight recorded importances: 6, 6, 7, 6, 6, 6. New bounds [5,6.5]:
+	//   the five imp-6 records in-bounds (unresolvable x5), 7 > 6.5 → reclamp to 6.5.
 	bounds, err := ParseImportanceBounds("insight=5:6.5")
 	if err != nil {
 		t.Fatal(err)
@@ -145,8 +178,8 @@ func TestBuildCandidateReport_ImportanceBounds(t *testing.T) {
 	if rep.ImportanceReclamped[0].NewImportance != 6.5 || rep.ImportanceReclamped[0].OldImportance != 7 {
 		t.Errorf("wrong reclamp: %+v", rep.ImportanceReclamped[0])
 	}
-	if rep.UnresolvableImportance != 2 {
-		t.Errorf("unresolvable_importance = %d, want 2", rep.UnresolvableImportance)
+	if rep.UnresolvableImportance != 5 {
+		t.Errorf("unresolvable_importance = %d, want 5", rep.UnresolvableImportance)
 	}
 }
 
@@ -157,8 +190,8 @@ func TestBuildCandidateReport_NoOverrideIsCensusOnly(t *testing.T) {
 	if len(rep.NewlyAdmitted) != 0 || rep.Unresolvable != 0 {
 		t.Errorf("no override should produce no diff/unresolvable, got %+v", rep)
 	}
-	if rep.TotalCandidates != 6 {
-		t.Errorf("census total = %d, want 6", rep.TotalCandidates)
+	if rep.TotalCandidates != 9 {
+		t.Errorf("census total = %d, want 9", rep.TotalCandidates)
 	}
 }
 
@@ -176,16 +209,19 @@ func TestBuildCandidateReport_NoDoubleCountUnresolvable(t *testing.T) {
 	if rep.Unresolvable > rep.TotalCandidates {
 		t.Fatalf("Unresolvable %d exceeds TotalCandidates %d (double-count)", rep.Unresolvable, rep.TotalCandidates)
 	}
-	// The admitted insight (imp 6) is unresolvable in BOTH dimensions → counts once.
-	// dedup-unresolvable: admitted insight(imp6) + rejected-no-score directive = 2.
-	// importance-unresolvable: the two insights with imp 6 (in [5,6.5]) = 2.
-	// distinct unresolvable records: admitted-insight(6), rejected-no-score-directive,
-	// rejected-insight(0.89, imp7 → reclamped not unres), rejected-insight(0.95, imp6 in-bounds unres).
-	if rep.UnresolvableDedup != 2 || rep.UnresolvableImportance != 2 {
-		t.Errorf("dim counts: dedup=%d imp=%d, want 2/2", rep.UnresolvableDedup, rep.UnresolvableImportance)
+	// dedup-unresolvable (legacy_no_score): legacy admitted insight + rejected-no-score directive = 2.
+	// importance-unresolvable: the five imp-6 insights in [5,6.5] = 5.
+	// distinct unresolvable records: legacy-admitted-insight(6), rejected-no-score-directive,
+	// rejected-insight(0.95, imp6 in-bounds), admitted-insight(0.92 top,imp6 in-bounds),
+	// admitted-insight(0.85 top,imp6 in-bounds), admitted-insight(0.90 top,imp6 in-bounds) = 6.
+	if rep.UnresolvableDedup != 2 || rep.UnresolvableImportance != 5 {
+		t.Errorf("dim counts: dedup=%d imp=%d, want 2/5", rep.UnresolvableDedup, rep.UnresolvableImportance)
 	}
-	if rep.Unresolvable != 3 {
-		t.Errorf("distinct Unresolvable = %d, want 3", rep.Unresolvable)
+	if rep.UnresolvableDedup != rep.UnresolvableDedupLegacyNoScore+rep.UnresolvableDedupHasScore {
+		t.Errorf("UnresolvableDedup %d != legacy+has_score (%d+%d)", rep.UnresolvableDedup, rep.UnresolvableDedupLegacyNoScore, rep.UnresolvableDedupHasScore)
+	}
+	if rep.Unresolvable != 6 {
+		t.Errorf("distinct Unresolvable = %d, want 6", rep.Unresolvable)
 	}
 }
 
