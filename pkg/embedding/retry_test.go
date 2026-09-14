@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -36,10 +37,10 @@ func newReqFor(t *testing.T, url string) func(context.Context) (*http.Request, e
 
 // (a) transient-then-success: 503 then 200 → success, N attempts observed.
 func TestRetryTransientThenSuccess(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		if attempts < 2 {
+		attempts.Add(1)
+		if attempts.Load() < 2 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -57,8 +58,8 @@ func TestRetryTransientThenSuccess(t *testing.T) {
 	if status != http.StatusOK || string(body) != "ok" {
 		t.Fatalf("got status=%d body=%q", status, body)
 	}
-	if attempts != 2 {
-		t.Fatalf("expected 2 attempts, got %d", attempts)
+	if int(attempts.Load()) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts.Load())
 	}
 	if len(sleeps) != 1 {
 		t.Fatalf("expected 1 backoff sleep, got %d (%v)", len(sleeps), sleeps)
@@ -67,9 +68,9 @@ func TestRetryTransientThenSuccess(t *testing.T) {
 
 // (b) permanent-4xx-no-retry: 400 → exactly ONE attempt, no retry.
 func TestRetryPermanent4xxNoRetry(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`bad`))
 	}))
@@ -84,8 +85,8 @@ func TestRetryPermanent4xxNoRetry(t *testing.T) {
 	if status != http.StatusBadRequest || string(body) != "bad" {
 		t.Fatalf("got status=%d body=%q", status, body)
 	}
-	if attempts != 1 {
-		t.Fatalf("expected exactly 1 attempt (no retry on 4xx), got %d", attempts)
+	if int(attempts.Load()) != 1 {
+		t.Fatalf("expected exactly 1 attempt (no retry on 4xx), got %d", attempts.Load())
 	}
 	if len(sleeps) != 0 {
 		t.Fatalf("expected no sleeps, got %v", sleeps)
@@ -95,9 +96,9 @@ func TestRetryPermanent4xxNoRetry(t *testing.T) {
 // (c) budget/attempts exhaustion: persistent 503 → returns error/last status,
 // bounded attempts.
 func TestRetryExhaustsAttempts(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`down`))
 	}))
@@ -112,8 +113,8 @@ func TestRetryExhaustsAttempts(t *testing.T) {
 	if status != http.StatusServiceUnavailable || string(body) != "down" {
 		t.Fatalf("expected last 503 result, got status=%d body=%q", status, body)
 	}
-	if attempts != rc.maxAttempts {
-		t.Fatalf("expected %d attempts, got %d", rc.maxAttempts, attempts)
+	if int(attempts.Load()) != rc.maxAttempts {
+		t.Fatalf("expected %d attempts, got %d", rc.maxAttempts, attempts.Load())
 	}
 	if len(sleeps) != rc.maxAttempts-1 {
 		t.Fatalf("expected %d sleeps, got %d", rc.maxAttempts-1, len(sleeps))
@@ -122,9 +123,9 @@ func TestRetryExhaustsAttempts(t *testing.T) {
 
 // (d) ctx-cancellation-mid-backoff: cancel during the backoff → returns ctx.Err().
 func TestRetryCtxCancelledMidBackoff(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
@@ -143,17 +144,17 @@ func TestRetryCtxCancelledMidBackoff(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if attempts != 1 {
-		t.Fatalf("expected 1 attempt before cancel, got %d", attempts)
+	if int(attempts.Load()) != 1 {
+		t.Fatalf("expected 1 attempt before cancel, got %d", attempts.Load())
 	}
 }
 
 // R2: Retry-After (delta-seconds) is honoured on 429.
 func TestRetryAfterHonoured(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		if attempts < 2 {
+		attempts.Add(1)
+		if attempts.Load() < 2 {
 			w.Header().Set("Retry-After", "2")
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
@@ -196,9 +197,9 @@ func TestParseRetryAfterHTTPDate(t *testing.T) {
 
 // R1: network errors are transient and retried, then surfaced.
 func TestRetryNetworkErrorRetried(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	newReq := func(ctx context.Context) (*http.Request, error) {
-		attempts++
+		attempts.Add(1)
 		return http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:0/nope", nil)
 	}
 	var sleeps []time.Duration
@@ -207,16 +208,16 @@ func TestRetryNetworkErrorRetried(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a network error")
 	}
-	if attempts != rc.maxAttempts {
-		t.Fatalf("expected %d attempts, got %d", rc.maxAttempts, attempts)
+	if int(attempts.Load()) != rc.maxAttempts {
+		t.Fatalf("expected %d attempts, got %d", rc.maxAttempts, attempts.Load())
 	}
 }
 
 // R4: totalBudget stops retries before exceeding the wall bound.
 func TestRetryTotalBudgetBounds(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
+		attempts.Add(1)
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
@@ -235,8 +236,8 @@ func TestRetryTotalBudgetBounds(t *testing.T) {
 	if len(sleeps) > 2 {
 		t.Fatalf("expected budget to bound sleeps, got %d (%v)", len(sleeps), sleeps)
 	}
-	if attempts >= rc.maxAttempts {
-		t.Fatalf("expected budget to stop well before maxAttempts, got %d", attempts)
+	if int(attempts.Load()) >= rc.maxAttempts {
+		t.Fatalf("expected budget to stop well before maxAttempts, got %d", attempts.Load())
 	}
 }
 
@@ -246,9 +247,9 @@ func TestRetryTotalBudgetBounds(t *testing.T) {
 func TestRetryTotalBudgetBoundsSlowResponse(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
+		attempts.Add(1)
 		// Block until the request ctx is cancelled (budget elapses) or test ends.
 		select {
 		case <-r.Context().Done():
@@ -272,16 +273,17 @@ func TestRetryTotalBudgetBoundsSlowResponse(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Fatalf("operation exceeded budget: took %v", elapsed)
 	}
-	if attempts >= rc.maxAttempts {
-		t.Fatalf("expected budget to bound attempts, got %d", attempts)
+	if int(attempts.Load()) >= rc.maxAttempts {
+		t.Fatalf("expected budget to bound attempts, got %d", attempts.Load())
 	}
 }
+
 // Sanity: OpenAI.EmbedBatch drives the retry path end-to-end via a fake server.
 func TestOpenAIEmbedBatchRetries(t *testing.T) {
-	var attempts int
+	var attempts atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		if attempts < 2 {
+		attempts.Add(1)
+		if attempts.Load() < 2 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -300,7 +302,7 @@ func TestOpenAIEmbedBatchRetries(t *testing.T) {
 	if len(vecs) != 1 || len(vecs[0]) != 3 {
 		t.Fatalf("unexpected vecs: %v", vecs)
 	}
-	if attempts != 2 {
-		t.Fatalf("expected 2 attempts, got %d", attempts)
+	if int(attempts.Load()) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts.Load())
 	}
 }
