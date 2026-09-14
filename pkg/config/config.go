@@ -65,6 +65,9 @@ type Config struct {
 	ReflectionCount   int
 	ReflectionModel   string
 	ReflectionMode    string // ENGRAM_REFLECTION_MODE: "v1" | "v2" (focal point)
+	// ConsolidationStage0Enabled mirrors ENGRAM_CONSOLIDATION_STAGE0_ENABLED (default false).
+	// Visibility mirror only; pkg/reflection reads the env var directly (server.go wiring out of scope for 5a).
+	ConsolidationStage0Enabled bool
 	// LLMMaxTokens surfaces ENGRAM_LLM_MAX_TOKENS for config visibility/consistency. The LLM
 	// client (pkg/llm) reads the same env var directly via resolveMaxTokens() — pkg/llm cannot
 	// import pkg/config (import cycle), so this field mirrors rather than feeds that value.
@@ -170,18 +173,19 @@ func Load() *Config {
 		PrincipalKeys: parsePrincipalKeys(envStr("ENGRAM_PRINCIPAL_KEYS", "")),
 
 		// Reflection
-		ReflectionEnabled:     envBool("ENGRAM_REFLECTION_ENABLED", false),
-		ReflectionTrigger:     envStr("ENGRAM_REFLECTION_TRIGGER", "count"),
-		ReflectionCount:       envInt("ENGRAM_REFLECTION_COUNT", 10),
-		ReflectionModel:       envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
-		ReflectionMode:        envStr("ENGRAM_REFLECTION_MODE", ""),
-		LLMMaxTokens:          envInt("ENGRAM_LLM_MAX_TOKENS", 1500),
-		LLMDialecticMaxTokens: envInt("ENGRAM_LLM_DIALECTIC_MAX_TOKENS", 4000),
-		LLMMaxTokensCeiling:   envInt("ENGRAM_LLM_MAX_TOKENS_CEILING", 8000),
-		DialecticTimeout:      envDuration("ENGRAM_DIALECTIC_TIMEOUT", 0),
-		RequireProvenance:     envBool("ENGRAM_REQUIRE_PROVENANCE", false),
-		AllowedProvenances:    parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
-		ProvenanceMode:        provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),
+		ReflectionEnabled:          envBool("ENGRAM_REFLECTION_ENABLED", false),
+		ReflectionTrigger:          envStr("ENGRAM_REFLECTION_TRIGGER", "count"),
+		ReflectionCount:            envInt("ENGRAM_REFLECTION_COUNT", 10),
+		ReflectionModel:            envStr("ENGRAM_REFLECTION_MODEL", "claude-sonnet-4-20250514"),
+		ReflectionMode:             envStr("ENGRAM_REFLECTION_MODE", ""),
+		ConsolidationStage0Enabled: envBool("ENGRAM_CONSOLIDATION_STAGE0_ENABLED", false),
+		LLMMaxTokens:               envInt("ENGRAM_LLM_MAX_TOKENS", 1500),
+		LLMDialecticMaxTokens:      envInt("ENGRAM_LLM_DIALECTIC_MAX_TOKENS", 4000),
+		LLMMaxTokensCeiling:        envInt("ENGRAM_LLM_MAX_TOKENS_CEILING", 8000),
+		DialecticTimeout:           envDuration("ENGRAM_DIALECTIC_TIMEOUT", 0),
+		RequireProvenance:          envBool("ENGRAM_REQUIRE_PROVENANCE", false),
+		AllowedProvenances:         parseCommaList(envStr("ENGRAM_ALLOWED_PROVENANCES", "")),
+		ProvenanceMode:             provenanceMode(envStr("ENGRAM_PROVENANCE_MODE", "warn")),
 
 		// Write Checkpoints
 		WriteCheckpointsEnabled: envBool("ENGRAM_WRITE_CHECKPOINTS_ENABLED", false),

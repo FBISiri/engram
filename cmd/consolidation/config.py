@@ -34,6 +34,7 @@ DEFAULTS: Dict[str, Any] = {
     # Safety
     "recency_guard_hours": 24,
     "max_merges_per_run": 20,
+    "max_llm_calls_per_run": 20,
     "llm_confidence_threshold": 0.7,
     "dry_run_default": True,
     "max_cluster_size": 20,
@@ -87,6 +88,7 @@ class Config:
     event_merge_threshold: float
     recency_guard_hours: int
     max_merges_per_run: int
+    max_llm_calls_per_run: int
     llm_confidence_threshold: float
     dry_run_default: bool
     max_cluster_size: int
@@ -223,6 +225,7 @@ def _from_env(env: Dict[str, str]) -> Dict[str, Any]:
         ("ENGRAM_CONSOLIDATION_AUTO_MERGE_THRESHOLD", "auto_merge_threshold", float),
         ("ENGRAM_CONSOLIDATION_LLM_THRESHOLD", "llm_adjudicate_threshold", float),
         ("ENGRAM_CONSOLIDATION_MAX_MERGES", "max_merges_per_run", int),
+        ("ENGRAM_CONSOLIDATION_MAX_LLM_CALLS", "max_llm_calls_per_run", int),
     ):
         if env.get(env_key):
             try:
@@ -254,7 +257,7 @@ def _validate(cfg: Dict[str, Any]) -> None:
                 f"{cfg['dedup_anomaly_threshold']})"
             )
 
-    for k in ("recency_guard_hours", "max_merges_per_run", "max_cluster_size",
+    for k in ("recency_guard_hours", "max_merges_per_run", "max_llm_calls_per_run", "max_cluster_size",
               "min_memory_count", "min_interval_hours", "llm_max_tokens"):
         v = cfg.get(k)
         if not isinstance(v, int) or v < 0:

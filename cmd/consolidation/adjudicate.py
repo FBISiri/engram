@@ -98,7 +98,8 @@ def build_prompt(mem_a: MemoryPoint, mem_b: MemoryPoint, similarity: float) -> s
     return prompt
 
 
-def _keep_separate(reason: str, usage: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+def _keep_separate(reason: str, usage: Optional[Dict[str, int]] = None,
+                   status: str = "ok") -> Dict[str, Any]:
     return {
         "decision": DECISION_KEEP_SEPARATE,
         "confidence": 0.0,
@@ -107,6 +108,7 @@ def _keep_separate(reason: str, usage: Optional[Dict[str, int]] = None) -> Dict[
         "keep_id": None,
         "delete_ids": [],
         "usage": usage or {"input_tokens": 0, "output_tokens": 0},
+        "call_status": status,
     }
 
 
@@ -173,7 +175,7 @@ def adjudicate_pair(
     """
     api_key = api_key if api_key is not None else cfg.llm_api_key
     if not api_key:
-        return _keep_separate("no LLM API key configured")
+        return _keep_separate("no LLM API key configured", status="no_key")
 
     if call_fn is None:
         def call_fn(prompt_: str, cfg_: Config, key_: str) -> Dict[str, Any]:
@@ -183,18 +185,18 @@ def adjudicate_pair(
     try:
         raw = call_fn(prompt, cfg, api_key)
     except requests.RequestException as e:
-        return _keep_separate(f"llm api error: {e}")
+        return _keep_separate(f"llm api error: {e}", status="error")
     except Exception as e:  # defensive: never let adjudication crash a run
-        return _keep_separate(f"llm call failed: {e}")
+        return _keep_separate(f"llm call failed: {e}", status="error")
 
     usage = raw.get("usage", {"input_tokens": 0, "output_tokens": 0})
     parsed = _extract_json(raw.get("text", ""))
     if not parsed or "decision" not in parsed:
-        return _keep_separate("malformed llm response", usage)
+        return _keep_separate("malformed llm response", usage, status="malformed")
 
     decision = parsed.get("decision")
     if decision not in (DECISION_MERGE, DECISION_KEEP_SEPARATE, DECISION_PARTIAL_MERGE):
-        return _keep_separate(f"unknown decision: {decision!r}", usage)
+        return _keep_separate(f"unknown decision: {decision!r}", usage, status="malformed")
 
     try:
         confidence = float(parsed.get("confidence", 0.0))
@@ -220,4 +222,5 @@ def adjudicate_pair(
         "keep_id": parsed.get("keep_id"),
         "delete_ids": [str(x) for x in delete_ids],
         "usage": usage,
+        "call_status": "ok",
     }

@@ -1,0 +1,5 @@
+# Runtime dependencies for the consolidation CLI.
+# Conservative floors — pin below the next known-breaking major.
+numpy>=1.26,<3
+requests>=2.31,<3
+# optional: pyyaml>=6 (only needed for --config file support; config.py guards `try: import yaml`)

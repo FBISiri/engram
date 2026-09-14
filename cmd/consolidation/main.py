@@ -196,10 +196,12 @@ def run_pipeline(cfg: Config, mode: str) -> Dict[str, Any]:
                        {"executed": [], "failed": [], "remaining": []})
 
     # --- Adjudicate + build merge ops (dry-run + live) ---
-    # The max_merges cap doubles as an LLM-call budget: we only adjudicate
-    # candidates (in priority order) while we still have room for more merge
-    # ops. This keeps a run within the spec §5.4 cost target (~$0.03/run)
-    # instead of paying for an LLM call on every fringe pair.
+    # Two INDEPENDENT budgets (spec §5a-B):
+    #   * max_merges_per_run    gates only the number of merge OPS written.
+    #   * max_llm_calls_per_run gates only the number of successful LLM CALLS.
+    # Adjudication is gated ONLY by the LLM-call budget — a full OP budget must
+    # NOT suppress adjudication, so "adjudicate-more / merge-less" is expressible.
+    # (The effective caps are echoed in the report for self-verification.)
     for i, c in enumerate(all_clusters, start=1):
         entry = _cluster_entry(c, points)
         entry["cluster_id"] = i
@@ -207,11 +209,12 @@ def run_pipeline(cfg: Config, mode: str) -> Dict[str, Any]:
 
         if c.decision_source == DS_SKIP:
             entry["decision"] = DECISION_KEEP_SEPARATE
+            metrics.note_skip("guard_filtered")
             cluster_entries.append(entry)
             continue
 
-        budget_left = len(ops) < cfg.max_merges_per_run
-        llm_budget_left = metrics.llm_calls < cfg.max_merges_per_run
+        budget_left = len(ops) < cfg.max_merges_per_run          # OP budget only
+        llm_budget_left = metrics.llm_calls < cfg.max_llm_calls_per_run  # LLM budget only
 
         if c.decision_source == DS_AUTO_MERGE:
             merged = pick_superset(members).content
@@ -220,23 +223,24 @@ def run_pipeline(cfg: Config, mode: str) -> Dict[str, Any]:
             entry["would_reduce_by"] = len(members) - 1
             if budget_left:
                 ops.append(build_merge_op(i, members, DS_AUTO_MERGE, c.zone, now, merged_content=merged))
+                metrics.note_skip("auto_merge")
             else:
                 entry["decision"] = "MERGE (capped by max_merges)"
+                metrics.note_skip("budget_merges")
             cluster_entries.append(entry)
             continue
 
-        # LLM adjudication (llm_adjudicate + dedup_anomaly). Bounded by BOTH the
-        # merge-op cap and a hard LLM-call budget (<= max_merges calls) so a run
-        # stays within the spec §5.4 cost target even when most verdicts are
-        # KEEP_SEPARATE.
-        if not (budget_left and llm_budget_left):
-            entry["decision"] = "NOT_ADJUDICATED (budget reached)"
+        # LLM adjudication (llm_adjudicate + dedup_anomaly). Gated ONLY by the
+        # LLM-call budget (NOT the op budget).
+        if not llm_budget_left:
+            entry["decision"] = "NOT_ADJUDICATED (llm budget reached)"
+            metrics.note_skip("budget_llm_calls")
             cluster_entries.append(entry)
             continue
 
         ma, mb, s = _top_pair(c, points)
         verdict = adj.adjudicate_pair(ma, mb, s, cfg, api_key=cfg.llm_api_key)
-        metrics.add_llm_usage(verdict.get("usage", {}))
+        metrics.add_llm_usage(verdict.get("usage", {}), verdict.get("call_status", "ok"))
         entry["decision"] = verdict["decision"]
         entry["reasoning"] = verdict.get("reasoning")
 
@@ -252,7 +256,11 @@ def run_pipeline(cfg: Config, mode: str) -> Dict[str, Any]:
             merged = verdict.get("merged_content") or pick_superset([ma, mb]).content
             entry["proposed_merged_content"] = merged
             entry["would_reduce_by"] = 1
-            ops.append(build_merge_op(i, [ma, mb], c.decision_source, c.zone, now, merged_content=merged))
+            if budget_left:
+                ops.append(build_merge_op(i, [ma, mb], c.decision_source, c.zone, now, merged_content=merged))
+            else:
+                entry["decision"] = "MERGE (capped by max_merges)"
+                metrics.note_skip("budget_merges")
         cluster_entries.append(entry)
 
     metrics.merges_proposed = len(ops)
@@ -302,7 +310,24 @@ def _finish(cfg: Config, mode: str, run_id: str, ts, metrics: Metrics,
         "mode": mode,
         "collections": cfg.collections,
     }
-    report = report_mod.build_report(run_meta, metrics.to_dict(), cluster_entries, execution)
+    # Effective (post flag/env/default) resolved values echoed into the report
+    # for self-verification. NOTE: spec item D says "mode (v1/v2)" but the
+    # consolidation agent has no v1/v2 concept (that is the reflection engine),
+    # so we echo the run mode (dry-run/live/scan-only) plus a dry_run boolean.
+    effective_config = {
+        "max_merges_per_run": cfg.max_merges_per_run,
+        "max_llm_calls_per_run": cfg.max_llm_calls_per_run,
+        "auto_merge_threshold": cfg.auto_merge_threshold,
+        "llm_adjudicate_threshold": cfg.llm_adjudicate_threshold,
+        "dedup_anomaly_threshold": cfg.dedup_anomaly_threshold,
+        "cluster_edge_threshold": cfg.cluster_edge_threshold,
+        "llm_confidence_threshold": cfg.llm_confidence_threshold,
+        "mode": mode,
+        "dry_run": mode != "live",
+        "llm_model": cfg.llm_model,
+    }
+    report = report_mod.build_report(run_meta, metrics.to_dict(), cluster_entries,
+                                     execution, effective_config)
     json_path, md_path = report_mod.write_reports(cfg, report, ts)
 
     # longitudinal metrics
@@ -337,6 +362,7 @@ def _parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     mode.add_argument("--scan-only", action="store_true", help="scan + cluster report only")
 
     p.add_argument("--max-merges", type=int, default=None)
+    p.add_argument("--max-llm-calls", type=int, default=None)
     p.add_argument("--collections", default=None, help="comma-separated collection names")
     p.add_argument("--auto-merge-threshold", type=float, default=None)
     p.add_argument("--llm-threshold", type=float, default=None)
@@ -351,6 +377,8 @@ def _cli_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     overrides: Dict[str, Any] = {}
     if args.max_merges is not None:
         overrides["max_merges_per_run"] = args.max_merges
+    if args.max_llm_calls is not None:
+        overrides["max_llm_calls_per_run"] = args.max_llm_calls
     if args.collections is not None:
         overrides["collections"] = [c.strip() for c in args.collections.split(",") if c.strip()]
     if args.auto_merge_threshold is not None:
@@ -378,6 +406,15 @@ def main(argv: Optional[List[str]] = None) -> int:
               "(set ENGRAM_CONSOLIDATION_ENABLED=true or enable in config).",
               file=sys.stderr)
         return 2
+
+    # Item A: dependency-missing => abort, never degrade. Adjudication needs an
+    # LLM key; without one we must NOT emit a success-shaped report on a keyless
+    # degrade. scan-only is exempt (it makes no LLM calls).
+    if mode != "scan-only" and not cfg.llm_api_key:
+        print("adjudication requires an LLM API key (set ANTHROPIC_API_KEY or ENGRAM_LLM_API_KEY) — "
+              "refusing to run so we never emit a success-shaped report on a keyless degrade.",
+              file=sys.stderr)
+        return 3
 
     lock = PidLock()
     try:

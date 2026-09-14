@@ -24,6 +24,10 @@ class Metrics:
     net_reduction: int = 0
     net_reduction_pct: float = 0.0
     llm_calls: int = 0
+    llm_calls_malformed: int = 0
+    llm_calls_failed: int = 0
+    adjudication_attempted: int = 0
+    adjudication_skipped_reason: Dict[str, int] = field(default_factory=dict)
     llm_tokens_input: int = 0
     llm_tokens_output: int = 0
     llm_cost_usd: float = 0.0
@@ -31,10 +35,22 @@ class Metrics:
     scan_duration_seconds: float = 0.0
     cluster_duration_seconds: float = 0.0
 
-    def add_llm_usage(self, usage: Dict[str, int]) -> None:
-        self.llm_calls += 1
+    def add_llm_usage(self, usage: Dict[str, int], status: str = "ok") -> None:
+        self.adjudication_attempted += 1
+        # Tokens count always (real cost), regardless of parse/success status.
         self.llm_tokens_input += int(usage.get("input_tokens", 0))
         self.llm_tokens_output += int(usage.get("output_tokens", 0))
+        if status == "ok":
+            self.llm_calls += 1  # SUCCESS budget only
+        elif status == "malformed":
+            self.llm_calls_malformed += 1
+        else:
+            self.llm_calls_failed += 1
+
+    def note_skip(self, reason: str) -> None:
+        self.adjudication_skipped_reason[reason] = (
+            self.adjudication_skipped_reason.get(reason, 0) + 1
+        )
 
     def finalize(self) -> None:
         self.llm_cost_usd = round(

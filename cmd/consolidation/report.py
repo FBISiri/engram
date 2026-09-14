@@ -17,12 +17,21 @@ def build_report(
     metrics: Dict[str, Any],
     cluster_entries: List[Dict[str, Any]],
     execution: Dict[str, Any],
+    effective_config: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     return {
         "run_id": run_meta.get("run_id"),
         "run_timestamp": run_meta.get("run_timestamp"),
         "mode": run_meta.get("mode"),
         "collections": run_meta.get("collections"),
+        "effective_config": effective_config or {},
+        "adjudication": {
+            "attempted": metrics.get("adjudication_attempted", 0),
+            "succeeded": metrics.get("llm_calls", 0),
+            "malformed": metrics.get("llm_calls_malformed", 0),
+            "failed": metrics.get("llm_calls_failed", 0),
+            "skipped_reason": metrics.get("adjudication_skipped_reason", {}),
+        },
         "scan_summary": {
             "total_memories_scanned": metrics.get("total_memories_scanned"),
             "total_clusters_found": metrics.get("total_clusters_found"),
@@ -45,6 +54,31 @@ def render_markdown(report: Dict[str, Any]) -> str:
     L.append(f"- **Timestamp:** {report.get('run_timestamp')}")
     L.append(f"- **Mode:** `{report.get('mode')}`")
     L.append(f"- **Collections:** {', '.join(report.get('collections') or [])}")
+    L.append("")
+
+    ec = report.get("effective_config") or {}
+    L.append("## Effective Config")
+    L.append("")
+    L.append("| Key | Value |")
+    L.append("|-----|-------|")
+    for k, v in ec.items():
+        L.append(f"| {k} | {v} |")
+    L.append("")
+
+    adj = report.get("adjudication") or {}
+    L.append("## Adjudication")
+    L.append("")
+    L.append(f"- Attempted: **{adj.get('attempted', 0)}**")
+    L.append(f"- Succeeded: **{adj.get('succeeded', 0)}**")
+    L.append(f"- Malformed: **{adj.get('malformed', 0)}**")
+    L.append(f"- Failed: **{adj.get('failed', 0)}**")
+    L.append("")
+    L.append("### Skipped (by reason)")
+    L.append("")
+    L.append("| Reason | Count |")
+    L.append("|--------|-------|")
+    for reason, n in (adj.get("skipped_reason") or {}).items():
+        L.append(f"| {reason} | {n} |")
     L.append("")
 
     ss = report.get("scan_summary", {})

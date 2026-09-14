@@ -13,11 +13,14 @@
 package reflection
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -286,6 +289,10 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 	if mode == "" {
 		mode = "v1"
 	}
+
+	// Stage 0 consolidation pre-pass (gated, default-OFF). Placed before the
+	// V1/V2 dispatch so it covers BOTH paths.
+	e.maybeRunConsolidationStage0(ctx)
 
 	if mode == "v2" {
 		return e.RunV2(ctx)
@@ -751,6 +758,10 @@ func (e *Engine) RunSingleEvent(ctx context.Context, in SingleEventInput) (*RunR
 		return nil, fmt.Errorf("RunSingleEvent: Summary is required")
 	}
 
+	// Stage 0 consolidation pre-pass (gated, default-OFF). RunSingleEvent
+	// bypasses the V1/V2 dispatch, so hook it here too.
+	e.maybeRunConsolidationStage0(ctx)
+
 	ctx, span := tracer.Start(ctx, "engram.reflection.run")
 	defer span.End()
 
@@ -901,4 +912,84 @@ func buildSingleEventPrompt(in SingleEventInput) string {
 	sb.WriteString("---\n\n")
 	sb.WriteString("Keep it grounded to the event. If the event is too vague to draw a useful lesson, emit CONFIDENCE: 0.4 and state the uncertainty honestly.\n")
 	return sb.String()
+}
+
+// ---------------------------------------------------------------------------
+// Stage 0 consolidation hook (spec §5a items E/F).
+//
+// A GATED (default-OFF) best-effort pre-pass that shells out to the Python
+// consolidation CLI. server.go wiring is out of scope for 5a, so the hook
+// reads its config directly from the environment here.
+// ---------------------------------------------------------------------------
+type stage0Config struct {
+	enabled bool
+	command string
+	args    []string
+	workDir string
+	timeout time.Duration
+}
+
+func stage0ConfigFromEnv() stage0Config {
+	enabled := false
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ENGRAM_CONSOLIDATION_STAGE0_ENABLED"))) {
+	case "1", "true", "yes", "on":
+		enabled = true
+	}
+
+	command := os.Getenv("ENGRAM_CONSOLIDATION_PYTHON")
+	if command == "" {
+		command = "python3"
+	}
+
+	timeout := 300 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("ENGRAM_CONSOLIDATION_STAGE0_TIMEOUT")); raw != "" {
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			timeout = time.Duration(secs) * time.Second
+		}
+	}
+
+	return stage0Config{
+		enabled: enabled,
+		command: command,
+		workDir: os.Getenv("ENGRAM_CONSOLIDATION_DIR"),
+		timeout: timeout,
+		// --scan-only so the hook NEVER makes LLM calls or writes (item H).
+		args: []string{"-m", "consolidation.main", "--dry-run", "--scan-only"},
+	}
+}
+
+// runStage0 is the low-level, testable os/exec runner. A non-zero exit from the
+// Python CLI (e.g. the item A abort) makes cmd.Run() return an *exec.ExitError,
+// which is surfaced as an error including stderr — never swallowed as success.
+func runStage0(ctx context.Context, s stage0Config) error {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, s.command, s.args...)
+	if s.workDir != "" {
+		cmd.Dir = s.workDir
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("consolidation stage0 timed out after %s", s.timeout)
+	}
+	if err != nil {
+		return fmt.Errorf("consolidation stage0 failed (%v): %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// maybeRunConsolidationStage0 is the actual hook. Default OFF: it no-ops (no
+// spawn) unless explicitly enabled, keeping prod + tests untouched. On error it
+// logs but does NOT abort the reflection run (stage 0 is best-effort).
+func (e *Engine) maybeRunConsolidationStage0(ctx context.Context) {
+	s := stage0ConfigFromEnv()
+	if !s.enabled {
+		return
+	}
+	if err := runStage0(ctx, s); err != nil {
+		fmt.Fprintf(os.Stderr, "reflection: consolidation stage0 error: %v\n", err)
+	}
 }
