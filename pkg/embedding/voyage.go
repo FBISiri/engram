@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -18,6 +17,7 @@ type Voyage struct {
 	baseURL   string
 	dimension int
 	client    *http.Client
+	retry     retryConfig
 }
 
 // VoyageConfig configures the Voyage embedder.
@@ -45,8 +45,9 @@ func NewVoyage(cfg VoyageConfig) *Voyage {
 		baseURL:   cfg.BaseURL,
 		dimension: cfg.Dimension,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 15 * time.Second,
 		},
+		retry: defaultRetryConfig(),
 	}
 }
 
@@ -105,30 +106,27 @@ func (v *Voyage) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 
 	url := v.baseURL + "/embeddings"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("voyage: create request: %w", err)
+	newReq := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("voyage: create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+v.apiKey)
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+v.apiKey)
 
-	resp, err := v.client.Do(req)
+	statusCode, respBody, err := doRequestWithRetry(ctx, v.client, newReq, v.retry)
 	if err != nil {
 		return nil, fmt.Errorf("voyage: send request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("voyage: read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
+	if statusCode != http.StatusOK {
 		var apiErr voyageError
 		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Detail != "" {
-			return nil, fmt.Errorf("voyage: API error (HTTP %d): %s", resp.StatusCode, apiErr.Detail)
+			return nil, fmt.Errorf("voyage: API error (HTTP %d): %s", statusCode, apiErr.Detail)
 		}
-		return nil, fmt.Errorf("voyage: unexpected status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("voyage: unexpected status %d: %s", statusCode, string(respBody))
 	}
 
 	var embResp voyageEmbeddingResponse

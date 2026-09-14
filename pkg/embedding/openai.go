@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ type OpenAI struct {
 	baseURL   string
 	dimension int
 	client    *http.Client
+	retry     retryConfig
 }
 
 // OpenAIConfig configures the OpenAI embedder.
@@ -45,8 +45,9 @@ func NewOpenAI(cfg OpenAIConfig) *OpenAI {
 		baseURL:   cfg.BaseURL,
 		dimension: cfg.Dimension,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 15 * time.Second,
 		},
+		retry: defaultRetryConfig(),
 	}
 }
 
@@ -127,31 +128,28 @@ func (o *OpenAI) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 
 	url := o.baseURL + "/embeddings"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("openai: create request: %w", err)
+	newReq := func(ctx context.Context) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("openai: create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+o.apiKey)
+		return req, nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+o.apiKey)
 
-	resp, err := o.client.Do(req)
+	statusCode, respBody, err := doRequestWithRetry(ctx, o.client, newReq, o.retry)
 	if err != nil {
 		return nil, fmt.Errorf("openai: send request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("openai: read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
+	if statusCode != http.StatusOK {
 		var apiErr embeddingError
 		if json.Unmarshal(respBody, &apiErr) == nil && apiErr.Error.Message != "" {
 			return nil, fmt.Errorf("openai: API error (HTTP %d): %s [%s]",
-				resp.StatusCode, apiErr.Error.Message, apiErr.Error.Type)
+				statusCode, apiErr.Error.Message, apiErr.Error.Type)
 		}
-		return nil, fmt.Errorf("openai: unexpected status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("openai: unexpected status %d: %s", statusCode, string(respBody))
 	}
 
 	var embResp embeddingResponse
