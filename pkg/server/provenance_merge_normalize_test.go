@@ -84,13 +84,20 @@ func TestProvenanceMerge_UpdateFieldsNormalized(t *testing.T) {
 				t.Errorf("expected primary user_input, got %q", primary)
 			}
 
-			raw, ok := cap.lastUpdateFields["metadata.provenance_history"]
+			raw, ok := cap.lastUpdateFields["metadata"]
 			if !ok {
-				t.Fatalf("Update did not receive metadata.provenance_history")
+				t.Fatalf("Update did not receive metadata")
 			}
-			slice, ok := raw.([]any)
+			md, ok := raw.(map[string]any)
 			if !ok {
-				t.Fatalf("metadata.provenance_history is %T, want []any", raw)
+				t.Fatalf("metadata is %T, want map[string]any", raw)
+			}
+			if md["source_type"] != "user_input" {
+				t.Errorf("nested source_type = %v, want user_input", md["source_type"])
+			}
+			slice, ok := md["provenance_history"].([]any)
+			if !ok {
+				t.Fatalf("metadata.provenance_history is %T, want []any", md["provenance_history"])
 			}
 			if len(slice) == 0 {
 				t.Fatalf("expected non-empty provenance_history")
@@ -116,5 +123,65 @@ func TestProvenanceMerge_UpdateFieldsNormalized(t *testing.T) {
 				t.Errorf("last entry source_type = %v, want user_input", last["source_type"])
 			}
 		})
+	}
+}
+
+// TestProvenanceMerge_PreservesSiblingMetadata (R2) asserts that a provenance
+// merge preserves unrelated metadata sibling keys (the RMW clone must not drop
+// them) while adding provenance_history and the promoted source_type.
+func TestProvenanceMerge_PreservesSiblingMetadata(t *testing.T) {
+	cap := &capturingStore{mockStore: newMockStore()}
+	cfg := &config.Config{
+		Weights:        memory.DefaultScoringWeights(),
+		Decay:          memory.DefaultDecayConfig(),
+		MMRLambda:      0.5,
+		DedupThreshold: 0.92,
+	}
+	srv := NewServer(cap, newMockEmbedder(), cfg)
+
+	existing := &memory.ScoredMemory{
+		Memory: memory.Memory{
+			ID:      "sib1",
+			Content: "Engram uses Qdrant",
+			Metadata: map[string]any{
+				"source_type": "reflection",
+				"city":        "Berlin",
+			},
+		},
+		Score: 0.96,
+	}
+	if err := cap.Insert(context.Background(), &existing.Memory, []float32{1}); err != nil {
+		t.Fatalf("seed insert: %v", err)
+	}
+
+	primary, merged, err := srv.provenanceMerge(context.Background(), existing, "user_input")
+	if err != nil {
+		t.Fatalf("provenanceMerge error: %v", err)
+	}
+	if !merged {
+		t.Fatalf("expected merged=true")
+	}
+	if primary != "user_input" {
+		t.Errorf("expected primary user_input, got %q", primary)
+	}
+
+	md, ok := cap.lastUpdateFields["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("Update metadata is %T, want map[string]any", cap.lastUpdateFields["metadata"])
+	}
+	if md["city"] != "Berlin" {
+		t.Errorf("sibling key city dropped: got %v", md["city"])
+	}
+	if md["source_type"] != "user_input" {
+		t.Errorf("source_type = %v, want user_input", md["source_type"])
+	}
+	ph, ok := md["provenance_history"].([]any)
+	if !ok || len(ph) == 0 {
+		t.Fatalf("provenance_history missing/empty: %T %v", md["provenance_history"], md["provenance_history"])
+	}
+	// Confirm the stored point retains the sibling too (read-back).
+	stored := findStored(t, cap.mockStore, "Engram uses Qdrant")
+	if stored.Metadata["city"] != "Berlin" {
+		t.Errorf("stored sibling key city dropped: got %v", stored.Metadata["city"])
 	}
 }

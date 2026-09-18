@@ -932,9 +932,11 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 		case existingST == "" || existingST == string(memory.SourceTypeUnknown):
 			// C2 §5.3: legacy existing memory — opportunistic backfill of source_type.
 			// This is initial classification, not a merge, so no provenance_history.
+			md := cloneMetadata(dup.Metadata)
+			md["source_type"] = incomingSourceType
 			if err := s.store.Update(ctx, dup.ID, map[string]any{
-				"metadata.source_type": incomingSourceType,
-				"updated_at":           float64(time.Now().Unix()),
+				"metadata":   md,
+				"updated_at": float64(time.Now().Unix()),
 			}); err == nil {
 				result.Existing.SourceType = incomingSourceType
 			}
@@ -1000,10 +1002,13 @@ func (s *Server) provenanceMerge(ctx context.Context, existing *memory.ScoredMem
 	}
 	primary := memory.HighestTrustSource(sources)
 
+	md := cloneMetadata(existing.Metadata)
+	md["provenance_history"] = memory.ProvenanceHistoryToAny(history)
+	md["source_type"] = primary
+
 	fields := map[string]any{
-		"metadata.provenance_history": memory.ProvenanceHistoryToAny(history),
-		"metadata.source_type":        primary,
-		"updated_at":                  float64(time.Now().Unix()),
+		"metadata":   md,
+		"updated_at": float64(time.Now().Unix()),
 	}
 
 	span.SetAttributes(
@@ -1020,6 +1025,17 @@ func (s *Server) provenanceMerge(ctx context.Context, existing *memory.ScoredMem
 		return "", false, err
 	}
 	return primary, true, nil
+}
+
+// cloneMetadata returns a shallow copy of a metadata map (nil -> new empty map)
+// so callers can RMW a nested "metadata" payload without mutating the source or
+// dropping sibling keys. Mirrors qdrant SetPayload replacing the key wholesale.
+func cloneMetadata(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m)+2)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // sourceTypeFromMeta extracts the source_type string from a metadata map.

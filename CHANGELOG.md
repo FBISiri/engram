@@ -146,6 +146,18 @@ v1.1 Reflection upgrade (confidence, evidence grounding, event-driven trigger).
   (`6808739`).
 
 ### Fixed
+- **Provenance-merge dotted-key persistence bug** — `provenanceMerge` and the
+  §5.3 legacy-backfill branch in `checkDedup` built the store `Update` payload
+  with dotted literal keys (`metadata.source_type`,
+  `metadata.provenance_history`). Qdrant `SetPayload` stored those verbatim as
+  top-level keys, so the read path (`pointToMemory` → nested `metadata` dict)
+  never saw them, breaking provenance visibility, idempotency, and evaporation
+  P7. Both sites now read-modify-write the nested `metadata` map (via a new
+  `cloneMetadata` helper), preserving unrelated sibling keys. Added a real-Qdrant
+  regression test (throwaway collection) plus a sibling-preservation unit test.
+  New `scripts/migrate-provenance-dotted-keys.py` (dry-run by default, `--apply`
+  to mutate; dotted value wins on conflict; idempotent) folds the ~18 legacy
+  dirty points in `engram_agent_self` into the nested metadata dict.
 - **Reflection V2 write-back livelock** — a v2-focal run whose insights were all
   caught by pre-write dedup marked zero sources reflected, so the next run
   re-fetched the same batch → same insights → dedup again forever. Stage 5 now

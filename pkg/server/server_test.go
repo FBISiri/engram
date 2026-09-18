@@ -175,17 +175,10 @@ func (s *mockStore) Update(_ context.Context, id string, fields map[string]any) 
 	if content, ok := fields["content"].(string); ok {
 		sp.mem.Content = content
 	}
-	if st, ok := fields["metadata.source_type"].(string); ok {
-		if sp.mem.Metadata == nil {
-			sp.mem.Metadata = map[string]any{}
-		}
-		sp.mem.Metadata["source_type"] = st
-	}
-	if ph, ok := fields["metadata.provenance_history"]; ok {
-		if sp.mem.Metadata == nil {
-			sp.mem.Metadata = map[string]any{}
-		}
-		sp.mem.Metadata["provenance_history"] = ph
+	// Nested metadata replaces the whole payload key wholesale, mirroring
+	// qdrant SetPayload (no deep merge). Callers RMW-clone before Update.
+	if meta, ok := fields["metadata"].(map[string]any); ok {
+		sp.mem.Metadata = meta
 	}
 	if ua, ok := fields["updated_at"].(float64); ok {
 		sp.mem.UpdatedAt = ua
