@@ -1,0 +1,13 @@
+{
+  "content": "Every 'false green' instance shares one root cause: Siri equates 'success' with 'the designated success-signal was observed' (a sentinel string, an exit code, a job-status field, a test-run 'ok', an in-memory flag) rather than with 'the causal chain that the signal is supposed to represent actually completed correctly.' Each fix (memory 1's DialecticTimeout patch, memory 2's sentinel check, memory 4's assertion-command check) closes one specific proxy-signal gap but leaves the underlying epistemic stance untouched—verification still trusts a single observable token as a stand-in for the real world-state—so the same decoupling reappears in a new artifact (job logs, gate condition, reflection_runner memory) the next week. The fail-closed/fail-permanent-block duality in memory 3 and the quiescence-gate saga in memory 10 show this isn't just 'add more grep flags'—it's that the check and the target can diverge in *both* directions (false pass and false block) whenever the check is a static syntactic pattern instead of a semantically-grounded re-derivation of the claimed state from source-of-truth data.
+",
+  "tensions": [
+    "Fixing each surface-level false-green case (new regex, new sentinel format) treats symptoms while the meta-pattern—trusting a proxy signal instead of re-deriving truth from source of truth—remains structurally unaddressed.",
+    "Fail-closed gates are tuned to avoid false pass (memory 10) but this same tightening produces false permanent-block (memory 3), showing the binary-signal model itself, not just its calibration, is the flaw.",
+    "Verification methodology memories (4,5,6,7,9) accumulate an ever-growing taxonomy of 'known false-green types' instead of a general rule for what counts as valid evidence of success."
+  ],
+  "source_ids": ["6f15d1be-ef1", "77a31ab1-2cf", "505a0cca-e21", "35b45faf-ac4", "dc0aafb1-971", "fa5b569a-040"],
+  "confidence": 0.82,
+  "importance": 9,
+  "tags": ["verification-methodology", "false-green", "root-cause", "fail-closed-gates", "signal-vs-substance"]
+}

@@ -2,7 +2,6 @@ package reflection
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -327,53 +326,6 @@ func repairStructuralSemicolons(s string) string {
 	return b.String()
 }
 
-// firstValidJSONObject scans s for balanced {...} objects (string-aware and
-// escape-aware brace counting) and unmarshals the first one that parses cleanly
-// into out. This tolerates prose prologue/epilogue and a leading malformed
-// object. Returns true and populates out on success.
-func firstValidJSONObject(s string, out *dialecticLLMResponse) bool {
-	depth := 0
-	start := -1
-	inString := false
-	escaped := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if inString {
-			switch {
-			case escaped:
-				escaped = false
-			case c == '\\':
-				escaped = true
-			case c == '"':
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{':
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		case '}':
-			if depth > 0 {
-				depth--
-				if depth == 0 && start >= 0 {
-					var tmp dialecticLLMResponse
-					if err := json.Unmarshal([]byte(s[start:i+1]), &tmp); err == nil {
-						*out = tmp
-						return true
-					}
-					start = -1
-				}
-			}
-		}
-	}
-	return false
-}
-
 // resolveEvidenceID maps a source_id from the LLM to a canonical evidence id,
 // or reports that it cannot be trusted. It NEVER invents ids: a returned id is
 // always already present in the evidence set (prompt injection defense).
@@ -417,28 +369,18 @@ func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Me
 	response = strings.TrimSpace(response)
 
 	var parsed dialecticLLMResponse
-	if err := json.Unmarshal([]byte(response), &parsed); err != nil {
-		// Recovery ladder, attempted strictly in order. Each attempt starts from
-		// a zeroed struct so a partial failed unmarshal cannot contaminate the
-		// winning attempt.
-		var recovered string
-		if parsed = (dialecticLLMResponse{}); json.Unmarshal([]byte(sanitizeJSONControlChars(response)), &parsed) == nil {
-			recovered = "control-char sanitization"
-		} else if parsed = (dialecticLLMResponse{}); json.Unmarshal([]byte(repairStructuralSemicolons(response)), &parsed) == nil {
-			recovered = `delimiter repair (";"->",")`
-		} else if parsed = (dialecticLLMResponse{}); firstValidJSONObject(response, &parsed) {
-			recovered = "first-valid-block extraction"
-		}
-		if recovered == "" {
-			// No parseable JSON survived the recovery ladder: there is nothing
-			// to salvage, so this stays fatal.
-			path := dumpRawResponse(stage, raw)
-			log.Printf("[reflection] dialectic JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
-				meta.FinishReason, meta.RawLen, path, err)
-			return nil, nil, fmt.Errorf("JSON parse: %w", err)
-		}
+	stage2, err := parseLenientJSON(response, &parsed)
+	if err != nil {
+		// No parseable JSON survived the recovery ladder: there is nothing
+		// to salvage, so this stays fatal.
+		path := dumpRawResponse(stage, raw)
+		log.Printf("[reflection] dialectic JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
+			meta.FinishReason, meta.RawLen, path, err)
+		return nil, nil, fmt.Errorf("JSON parse (raw dump: %s): %w", path, err)
+	}
+	if stage2 != "strict" {
 		log.Printf("[reflection] %s JSON recovered via %s: finish_reason=%q raw_len=%d",
-			stage, recovered, meta.FinishReason, meta.RawLen)
+			stage, stage2, meta.FinishReason, meta.RawLen)
 	}
 
 	var warnings []string

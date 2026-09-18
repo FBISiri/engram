@@ -2,7 +2,6 @@ package reflection
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -219,11 +218,16 @@ func parseFocalResponse(response string, n int, meta llm.Meta) ([]string, error)
 	response = strings.TrimSpace(response)
 
 	var questions []string
-	if err := json.Unmarshal([]byte(response), &questions); err != nil {
+	stage, err := parseLenientJSON(response, &questions)
+	if err != nil {
 		path := dumpRawResponse("focal", raw)
 		log.Printf("[reflection] focal JSON parse failed: finish_reason=%q raw_len=%d dump=%s: %v",
 			meta.FinishReason, meta.RawLen, path, err)
-		return nil, fmt.Errorf("JSON parse focal questions: %w", err)
+		return nil, fmt.Errorf("JSON parse focal questions (raw dump: %s): %w", path, err)
+	}
+	if stage != "strict" {
+		log.Printf("[reflection] focal JSON recovered via %s: finish_reason=%q raw_len=%d",
+			stage, meta.FinishReason, meta.RawLen)
 	}
 	if len(questions) == 0 {
 		return nil, fmt.Errorf("no focal questions generated")
