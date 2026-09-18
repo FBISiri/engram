@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -756,7 +757,7 @@ func (s *Server) handleAdd(ctx context.Context, request mcp.CallToolRequest) (*m
 	if dedupResult.DupFound {
 		span.SetAttributes(attribute.Bool("dedup.hit", true))
 		if s.metrics != nil {
-			s.metrics.DedupHits.WithLabelValues(mem.Collection, "server_side_092").Inc()
+			s.metrics.DedupHits.WithLabelValues(mem.Collection, dedupTypeLabel(dedupResult.Threshold)).Inc()
 			s.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()
 		}
 		admissionDecision = "dedup_rejected"
@@ -846,6 +847,19 @@ type DedupResult struct {
 	// TopScore is the highest dedup-search similarity score (0 when no
 	// candidates); carried out so callers can record it on the trajectory.
 	TopScore float64
+	// Threshold is the dedup similarity threshold actually used for this
+	// decision (from resolveDedupThreshold). Carried out so callers label the
+	// dedup-hit metric with the real threshold instead of a hardcoded value.
+	Threshold float64
+}
+
+// dedupTypeLabel formats the dedup_type metric label deterministically from the
+// threshold actually used for the decision. The value is always
+// server_side_NNN where NNN = round(threshold*100) zero-padded to 3 digits
+// (e.g. 0.90 -> "server_side_090", 0.92 -> "server_side_092", 0.78 ->
+// "server_side_078"). Fixing to an integer percent bounds label cardinality.
+func dedupTypeLabel(threshold float64) string {
+	return fmt.Sprintf("server_side_%03d", int(math.Round(threshold*100)))
 }
 
 // checkDedup runs deduplication check as a child span. Returns a *DedupResult;
@@ -955,10 +969,10 @@ func (s *Server) checkDedup(ctx context.Context, vec []float32, content string, 
 		}
 
 		data, _ := json.Marshal(result)
-		return &DedupResult{DupFound: true, DupData: data, Candidates: dupeResults, TopScore: topScore}, nil
+		return &DedupResult{DupFound: true, DupData: data, Candidates: dupeResults, TopScore: topScore, Threshold: threshold}, nil
 	}
 
-	return &DedupResult{DupFound: false, Candidates: dupeResults, TopScore: topScore}, nil
+	return &DedupResult{DupFound: false, Candidates: dupeResults, TopScore: topScore, Threshold: threshold}, nil
 }
 
 // provenanceMerge updates an existing memory's provenance metadata when a

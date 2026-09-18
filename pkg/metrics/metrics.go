@@ -27,7 +27,8 @@ type Metrics struct {
 	// operation ("add"|"update"|"delete"), collection, and source_type.
 	MemoryOps *prometheus.CounterVec // engram_memory_ops_total
 	// DedupHits counts deduplication hits, labelled by collection and
-	// dedup_type ("server_side_092"|"client_side_078").
+	// dedup_type ("server_side_<NNN>" where NNN is round(threshold*100),
+	// e.g. server_side_090, server_side_092, server_side_078).
 	DedupHits *prometheus.CounterVec // engram_dedup_hits_total
 	// EvaporationSweepTotal counts evaporation sweep executions.
 	EvaporationSweepTotal prometheus.Counter // engram_evaporation_sweep_total
@@ -96,7 +97,7 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 	}, []string{"operation", "collection", "source_type"})
 	dedupHits := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "engram_dedup_hits_total",
-		Help: "Total deduplication hits by collection and dedup_type (server_side_092|client_side_078).",
+		Help: "Total deduplication hits by collection and dedup_type (server_side_<NNN> where NNN is round(threshold*100), e.g. server_side_090|server_side_092|server_side_078).",
 	}, []string{"collection", "dedup_type"})
 	reg.MustRegister(memoryOps, dedupHits)
 

@@ -208,15 +208,16 @@ func (h *HTTPServer) handleCreateMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Server-side 0.92 dedup (C1): mirror the MCP add path so REST writers
-	// (e.g. the Consolidation Agent) don't bypass dedup. Fail-open on error.
+	// Server-side dedup (C1): mirror the MCP add path so REST writers
+	// (e.g. the Consolidation Agent) don't bypass dedup. The threshold is
+	// resolved per memory type (A-MAC). Fail-open on error.
 	dedupResult, dupErr := h.srv.checkDedup(r.Context(), vec, body.Content, sourceType, memType)
 	if dupErr != nil {
 		log.Printf("[WARN] engram REST POST /memories: dedup check failed, proceeding with insert: %v", dupErr)
 		dedupResult = &DedupResult{}
 	} else if dedupResult.DupFound {
 		if h.srv.metrics != nil {
-			h.srv.metrics.DedupHits.WithLabelValues(mem.Collection, "server_side_092").Inc()
+			h.srv.metrics.DedupHits.WithLabelValues(mem.Collection, dedupTypeLabel(dedupResult.Threshold)).Inc()
 			h.srv.metrics.MemoryOps.WithLabelValues("add", mem.Collection, sourceType).Inc()
 		}
 		var dup struct {
