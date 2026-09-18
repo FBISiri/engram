@@ -61,7 +61,7 @@ func rawPayload(t *testing.T, coll, id string) map[string]any {
 	if err != nil {
 		t.Fatalf("rest get: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("rest get status %d: %s", resp.StatusCode, body)

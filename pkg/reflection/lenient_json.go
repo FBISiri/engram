@@ -246,7 +246,6 @@ func salvageJSON(s string) string {
 							paren--
 						}
 					case paren == 0 && (d == ',' || d == '}' || d == ']'):
-						valueJustClosed = false
 						goto skipped
 					}
 					i++
