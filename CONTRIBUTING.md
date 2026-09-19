@@ -143,6 +143,29 @@ make lint
 
 All lint errors must pass before a PR can be merged. The project uses `golangci-lint` with default settings.
 
+### Pre-push hook
+
+A repo-distributed pre-push hook enforces the lint gate locally so failures are
+caught before they reach CI. Activate it once per clone:
+
+```bash
+make install-hooks
+```
+
+This runs `git config core.hooksPath .githooks`, pointing git at the tracked
+`.githooks/pre-push` script. On every `git push` the hook runs whole-repo
+`golangci-lint run ./...` (matching CI exactly) and refuses the push if there
+are any issues. It requires the Go toolchain and `golangci-lint` on PATH; a
+missing toolchain fails the push rather than passing silently.
+
+To bypass the gate use git's built-in escape hatch:
+
+```bash
+git push --no-verify
+```
+
+Using `--no-verify` means you own any resulting CI lint failure.
+
 ---
 
 ## Code Conventions

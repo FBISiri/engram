@@ -1,4 +1,4 @@
-.PHONY: build test lint clean docker integration-test
+.PHONY: build test lint install-hooks clean docker integration-test
 
 BINARY=engram
 VERSION=0.1.0
@@ -13,6 +13,11 @@ test:
 
 lint:
 	golangci-lint run ./...
+
+# Activate the repo-distributed pre-push lint gate (.githooks/pre-push).
+install-hooks:
+	git config core.hooksPath .githooks
+	@echo "✓ core.hooksPath set to .githooks — pre-push lint gate active."
 
 clean:
 	rm -f $(BINARY)

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# engram repo-distributed pre-push lint gate.
+#
+# Activate once per clone with:  make install-hooks
+# (which runs `git config core.hooksPath .githooks`).
+#
+# Bypass with:  git push --no-verify
+# (git's built-in escape hatch — if you use it, you own any CI lint failure).
+#
+set -euo pipefail
+
+# --- R2: PATH landmine -------------------------------------------------------
+# `go` lives at /usr/local/go/bin/go and is NOT on the default PATH; git hooks
+# run with a reduced environment. Without this, golangci-lint prints
+# "go command required, not found" which is an ENVIRONMENT ERROR, NOT a lint
+# pass. A missing toolchain must fail the push, never be treated as success.
+export PATH=/usr/local/go/bin:/usr/local/bin:$PATH
+
+if ! command -v go >/dev/null 2>&1; then
+  echo "✗ pre-push: 'go' not found on PATH (checked /usr/local/go/bin)." >&2
+  echo "  A missing toolchain is an environment error, NOT a lint pass — refusing push." >&2
+  exit 1
+fi
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "✗ pre-push: 'golangci-lint' not found on PATH." >&2
+  echo "  A missing toolchain is an environment error, NOT a lint pass — refusing push." >&2
+  exit 1
+fi
+
+# --- R5: delete-ref handling -------------------------------------------------
+# A pre-push hook receives ref lines on stdin:
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+# For a branch deletion the local_sha is all zeros. There is nothing to lint on
+# a deletion, so skip those refs. If every pushed ref is a deletion, exit 0.
+zero="0000000000000000000000000000000000000000"
+have_real_ref=0
+saw_ref=0
+# `|| [ -n ... ]` processes a final line lacking a trailing newline (read returns
+# non-zero at EOF-without-delimiter). Stock git LF-terminates each line, but this
+# guards against a silent gate bypass — a missing lint run must never count as pass.
+while read -r local_ref local_sha remote_ref remote_sha || [ -n "${local_ref:-}" ]; do
+  [ -z "${local_ref:-}" ] && continue
+  saw_ref=1
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  have_real_ref=1
+done
+
+if [ "$have_real_ref" -eq 0 ]; then
+  if [ "$saw_ref" -eq 0 ]; then
+    echo "✓ pre-push: no refs on stdin — nothing to lint."
+  else
+    echo "✓ pre-push: only ref deletions in this push — nothing to lint."
+  fi
+  exit 0
+fi
+
+# --- R3: gate criterion ------------------------------------------------------
+# Use WHOLE-REPO `golangci-lint run ./...` (NOT --new-from-rev). Both
+# .github/workflows/push.yml and ci.yml run whole-repo `golangci-lint run ./...`,
+# so this local gate must match CI exactly. The engram tree is currently CLEAN
+# (0 issues), so the absolute criterion is affordable and strictly stronger.
+# --new-from-rev is only needed for repos carrying a pre-existing backlog, which
+# engram has none of.
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+echo "→ pre-push: running golangci-lint run ./... (whole repo)"
+if golangci-lint run ./...; then
+  echo "✓ pre-push: lint clean — allowing push."
+  exit 0
+else
+  echo "✗ pre-push: golangci-lint reported issues (see above) — refusing push." >&2
+  echo "  Fix them, or bypass with 'git push --no-verify' (then you own the CI failure)." >&2
+  exit 1
+fi
