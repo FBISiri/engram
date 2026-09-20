@@ -565,13 +565,15 @@ func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*
 	}
 
 	type listResult struct {
-		ID               string   `json:"id"`
-		Content          string   `json:"content"`
-		Type             string   `json:"type"`
-		Importance       float64  `json:"importance"`
-		CreatedAt        float64  `json:"created_at"`
-		Tags             []string `json:"tags"`
-		SourceCollection string   `json:"source_collection"`
+		ID               string         `json:"id"`
+		Content          string         `json:"content"`
+		Type             string         `json:"type"`
+		Importance       float64        `json:"importance"`
+		CreatedAt        float64        `json:"created_at"`
+		Tags             []string       `json:"tags"`
+		SourceCollection string         `json:"source_collection"`
+		Metadata         map[string]any `json:"metadata,omitempty"`
+		SourceType       string         `json:"source_type,omitempty"`
 	}
 
 	output := make([]listResult, len(mems))
@@ -584,6 +586,8 @@ func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*
 			CreatedAt:        m.CreatedAt,
 			Tags:             m.Tags,
 			SourceCollection: collectionOrFallback(m.Collection, collection.CollectionUser),
+			Metadata:         m.Metadata,
+			SourceType:       sourceTypeFromMetadata(m.Metadata),
 		}
 	}
 

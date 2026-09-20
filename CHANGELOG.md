@@ -8,6 +8,15 @@ releases begin.
 ## [Unreleased]
 
 ### Added
+- **`memory_list` now returns `source_type` (and `metadata`) per record.**
+  The `memory_list` MCP tool projection dropped provenance: it emitted only
+  `id/content/type/importance/created_at/tags/source_collection`. It now adds
+  `source_type` (via the same `sourceTypeFromMetadata` helper as `memory_search`)
+  and `metadata`, both `,omitempty`. The Scroll/`ListMemories` path already
+  carried `Memory.Metadata` end-to-end (`qdrant.pointToMemory` maps the payload
+  metadata field), so only the handler's local projection struct needed the fix —
+  no change to `pkg/memory` or `pkg/qdrant`. Additive JSON fields → backward
+  compatible. Requires recompiling/restarting `engram.service` to take effect.
 - **Memory evaporation v2 — safety & gap closure** (spec
   `Engram/spec-memory-evaporation.md` §4). Builds on the shipped evaporation v1
   (`c170c0d`, `ca23b07`) to make the sweep *safe to enable*:
