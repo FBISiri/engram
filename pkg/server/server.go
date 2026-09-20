@@ -172,6 +172,7 @@ func (s *Server) registerTools() {
 		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: searches all collections (fan-out)."), mcp.WithStringItems()),
 		mcp.WithArray("source_type", mcp.Description("Filter by provenance source_type (tool_output, reflection, web_search, user_input, calendar, document). Memories must match at least one."), mcp.WithStringItems()),
 		mcp.WithString("task_id", mcp.Description("Optional event-loop task identifier. Recorded in the trajectory log to join retrievals to task outcomes (Memory Worth analysis).")),
+		mcp.WithBoolean("include_archived", mcp.Description("If true, also return archived (soft-deleted) memories. Default: false (archived/soft-deleted entries are hidden).")),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
@@ -223,6 +224,26 @@ func (s *Server) registerTools() {
 		mcp.WithBoolean("dry_run", mcp.Description("If true, preview which memories would be deleted without removing them. Default: false.")),
 	)
 	s.mcpServer.AddTool(deleteTool, s.handleDelete)
+
+	// Tool 4b: memory_delete_by_id — reliable removal by exact id (no cosine).
+	deleteByIDTool := mcp.NewTool("memory_delete_by_id",
+		mcp.WithDescription("Delete a memory by its exact id. This is the RELIABLE, 100%-hit removal path: it targets the memory directly by id and bypasses cosine similarity entirely (unlike memory_delete/memory_update, which can silently miss a readable memory when the raw score falls under their hard thresholds). This is a SOFT delete: the memory becomes archived (lifecycle_status=archived), not erased, and stops appearing in search. Use this to remove a memory you already found via memory_search."),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Exact id of the memory to soft-delete (archive).")),
+	)
+	s.mcpServer.AddTool(deleteByIDTool, s.handleDeleteByID)
+
+	// Tool 4c: memory_update_by_id — reliable correction by exact id (no cosine).
+	updateByIDTool := mcp.NewTool("memory_update_by_id",
+		mcp.WithDescription("Update/correct a memory by its exact id. This is the RELIABLE, 100%-hit correction path: it replaces the memory identified by id (content re-embedded, id preserved) and bypasses cosine similarity entirely (unlike memory_update, which can silently miss a readable memory when the raw score falls under its hard threshold and would otherwise insert a duplicate). Use this to fix a memory you already found via memory_search."),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Exact id of the memory to replace.")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("New memory content text (re-embedded). Replaces the existing content.")),
+		mcp.WithString("type", mcp.Description("Memory type for the updated memory. Omit to keep the existing type."), mcp.Enum("identity", "event", "insight", "directive")),
+		mcp.WithNumber("importance", mcp.Description("Importance score. Omit (or <=0) to keep the existing importance.")),
+		mcp.WithArray("tags", mcp.Description("Tags for the updated memory. Omit to keep the existing tags."), mcp.WithStringItems()),
+		mcp.WithString("source_type", mcp.Description("Fine-grained provenance. Stored in metadata.source_type."), mcp.Enum("tool_output", "reflection", "web_search", "user_input", "calendar", "document")),
+		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = recompute from the TTL matrix.")),
+	)
+	s.mcpServer.AddTool(updateByIDTool, s.handleUpdateByID)
 
 	// Tool 5: reflection_check
 	reflectionCheckTool := mcp.NewTool("reflection_check",
@@ -302,6 +323,10 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	taskID := request.GetString("task_id", "")
+
+	// R3: by default MCP search hides archived (soft-deleted) memories, matching
+	// REST vector search. Set include_archived=true to surface them.
+	includeArchived := request.GetBool("include_archived", false)
 
 	// Build filters
 	var filters []memory.Filter
@@ -404,8 +429,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	results, err := s.store.Search(ctx, vec, memory.SearchOptions{
-		Limit:   fetchLimit,
-		Filters: filters,
+		Limit:           fetchLimit,
+		Filters:         filters,
+		ExcludeArchived: !includeArchived,
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -1219,7 +1245,47 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultText(string(data)), nil
 	}
 
-	// Step 2: Delete matching memories
+	// R1: a search miss (or an ambiguous multi-match) is a HARD failure, never a
+	// silent degrade to Insert. Historically a zero-hit update still inserted,
+	// turning every "correction" into a duplicate.
+	if len(toDelete) == 0 {
+		type noTargetResult struct {
+			Status       string  `json:"status"`
+			Message      string  `json:"message"`
+			DeletedCount int     `json:"deleted_count"`
+			Threshold    float64 `json:"threshold"`
+		}
+		result := noTargetResult{
+			Status: "no_target_matched",
+			Message: "no existing memory matched old_content above the similarity threshold; " +
+				"nothing was updated and nothing was inserted. If you intended to CREATE a new memory, " +
+				"call memory_add explicitly. To correct a KNOWN memory, target it by id with memory_update_by_id.",
+			DeletedCount: 0,
+			Threshold:    threshold,
+		}
+		data, _ := json.Marshal(result)
+		return mcp.NewToolResultText(string(data)), nil
+	}
+	if len(toDelete) > 1 {
+		type ambiguousResult struct {
+			Status     string        `json:"status"`
+			Message    string        `json:"message"`
+			MatchCount int           `json:"match_count"`
+			Candidates []deletedItem `json:"candidates"`
+		}
+		result := ambiguousResult{
+			Status: "ambiguous_match",
+			Message: fmt.Sprintf("old_content matched %d memories above the threshold; refusing to update to avoid "+
+				"clobbering the wrong one. Nothing was deleted or inserted. Pick one candidate below and correct it "+
+				"by id with memory_update_by_id (or raise similarity_threshold).", len(toDelete)),
+			MatchCount: len(toDelete),
+			Candidates: deleted,
+		}
+		data, _ := json.Marshal(result)
+		return mcp.NewToolResultText(string(data)), nil
+	}
+
+	// Step 2: Delete matching memories (exactly one target at this point)
 	deletedCount := 0
 	if len(toDelete) > 0 {
 		deletedCount, err = s.store.Delete(ctx, toDelete)
@@ -1384,11 +1450,13 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	if len(toDelete) == 0 {
 		type deleteResult struct {
 			Status       string        `json:"status"`
+			Message      string        `json:"message"`
 			DeletedCount int           `json:"deleted_count"`
 			Deleted      []deletedItem `json:"deleted"`
 		}
 		result := deleteResult{
 			Status:       "no_matches",
+			Message:      "no memory matched the query above the similarity threshold; nothing was deleted.",
 			DeletedCount: 0,
 			Deleted:      []deletedItem{},
 		}
@@ -1434,6 +1502,118 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	}
 	data, _ := json.Marshal(result)
 	return mcp.NewToolResultText(string(data)), nil
+}
+
+// handleDeleteByID implements the memory_delete_by_id tool: reliable removal by
+// exact id via the by-id escape hatch (no vector search, no cosine threshold).
+// Reuses the same soft-delete code path as REST DELETE /memories/{id}.
+func (s *Server) handleDeleteByID(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := request.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+
+	// ISOLATION: an isolated caller may only touch its own collection. SearchByIDs
+	// fans out across ALL stores, so guard before mutating anything.
+	allowed, err := s.byIDAllowed(ctx, id)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+	}
+	if !allowed {
+		return byIDNotFound(id), nil
+	}
+
+	status, err := s.deleteByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, errMemoryNotFound) {
+			return byIDNotFound(id), nil
+		}
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	if s.metrics != nil {
+		s.metrics.MemoryOps.WithLabelValues("delete", CollectionFromContext(ctx), "unknown").Inc()
+	}
+
+	result := map[string]any{
+		"status":           "archived",
+		"id":               id,
+		"lifecycle_status": status,
+	}
+	data, _ := json.Marshal(result)
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// handleUpdateByID implements the memory_update_by_id tool: reliable correction
+// by exact id via the by-id escape hatch (no vector search, no cosine
+// threshold). Reuses the same replace+re-embed code path as REST
+// PUT /memories/{id}; the id/lifecycle/CreatedAt are preserved.
+func (s *Server) handleUpdateByID(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := request.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+	content, err := request.RequireString("content")
+	if err != nil {
+		return mcp.NewToolResultError("content is required"), nil
+	}
+
+	// ISOLATION: guard before mutating (SearchByIDs fans out across all stores).
+	allowed, err := s.byIDAllowed(ctx, id)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+	}
+	if !allowed {
+		return byIDNotFound(id), nil
+	}
+
+	p := updateByIDParams{
+		Type:       request.GetString("type", ""),
+		Content:    content,
+		Importance: request.GetFloat("importance", 0),
+		Tags:       getStringSlice(request, "tags"),
+		ValidUntil: request.GetFloat("valid_until", 0),
+	}
+	// source_type mirrors the PUT body: carried through metadata.source_type.
+	if st := request.GetString("source_type", ""); st != "" {
+		p.Metadata = map[string]any{"source_type": st}
+	}
+
+	mem, advisories, err := s.updateByID(ctx, id, p)
+	if err != nil {
+		if errors.Is(err, errMemoryNotFound) {
+			return byIDNotFound(id), nil
+		}
+		var be *byIDError
+		if errors.As(err, &be) {
+			return mcp.NewToolResultError(be.msg), nil
+		}
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	if s.metrics != nil {
+		s.metrics.MemoryOps.WithLabelValues("update", mem.Collection, sourceTypeFromMetadata(mem.Metadata)).Inc()
+	}
+
+	result := struct {
+		Status     string         `json:"status"`
+		Memory     *memory.Memory `json:"memory"`
+		Advisories []Advisory     `json:"advisories,omitempty"`
+	}{Status: "updated", Memory: mem, Advisories: advisories}
+	data, _ := json.Marshal(result)
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// byIDNotFound is the shared no-op result for a by-id tool when the id is
+// unknown or (for an isolated caller) lives outside its own collection.
+func byIDNotFound(id string) *mcp.CallToolResult {
+	result := map[string]any{
+		"status":  "not_found",
+		"id":      id,
+		"message": "no memory with that id is reachable; nothing was changed.",
+	}
+	data, _ := json.Marshal(result)
+	return mcp.NewToolResultText(string(data))
 }
 
 // =============================================================================

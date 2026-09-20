@@ -76,6 +76,10 @@ func (m *mockEmbedder) Dimension() int {
 type mockStore struct {
 	mu       sync.Mutex
 	memories map[string]storedPoint
+	// mutation counters for tests asserting a handler performed no writes.
+	insertCalls int
+	updateCalls int
+	deleteCalls int
 }
 
 type storedPoint struct {
@@ -92,6 +96,7 @@ func newMockStore() *mockStore {
 func (s *mockStore) Insert(_ context.Context, mem *memory.Memory, vector []float32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.insertCalls++
 	s.memories[mem.ID] = storedPoint{mem: *mem, vector: vector}
 	return nil
 }
@@ -121,8 +126,10 @@ func (s *mockStore) Search(_ context.Context, vector []float32, opts memory.Sear
 		if !matchFilters(sp.mem, opts.Filters) {
 			continue
 		}
-
-		// Compute cosine similarity
+		// Exclude archived (soft-deleted) memories when requested.
+		if opts.ExcludeArchived && sp.mem.LifecycleStatus == memory.LifecycleArchived {
+			continue
+		}
 		sim := cosineSimilarity(vector, sp.vector)
 		entries = append(entries, scoredEntry{mem: sp.mem, score: sim})
 	}
@@ -155,6 +162,7 @@ func (s *mockStore) Search(_ context.Context, vector []float32, opts memory.Sear
 func (s *mockStore) Delete(_ context.Context, ids []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleteCalls++
 	count := 0
 	for _, id := range ids {
 		if _, ok := s.memories[id]; ok {
@@ -168,6 +176,7 @@ func (s *mockStore) Delete(_ context.Context, ids []string) (int, error) {
 func (s *mockStore) Update(_ context.Context, id string, fields map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.updateCalls++
 	sp, ok := s.memories[id]
 	if !ok {
 		return fmt.Errorf("memory not found: %s", id)
@@ -182,6 +191,15 @@ func (s *mockStore) Update(_ context.Context, id string, fields map[string]any) 
 	}
 	if ua, ok := fields["updated_at"].(float64); ok {
 		sp.mem.UpdatedAt = ua
+	}
+	if ls, ok := fields["lifecycle_status"].(string); ok {
+		sp.mem.LifecycleStatus = ls
+	}
+	if aa, ok := fields["archived_at"].(float64); ok {
+		sp.mem.ArchivedAt = aa
+	}
+	if ra, ok := fields["reflected_at"].(float64); ok {
+		sp.mem.ReflectedAt = ra
 	}
 	s.memories[id] = sp
 	return nil
@@ -262,6 +280,14 @@ func (s *mockStore) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.memories)
+}
+
+// mutations returns the cumulative count of Insert+Update+Delete calls, used to
+// assert a handler performed no writes.
+func (s *mockStore) mutations() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.insertCalls + s.updateCalls + s.deleteCalls
 }
 
 // all returns a snapshot of all stored memories.

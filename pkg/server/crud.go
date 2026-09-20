@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -490,76 +491,125 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// PUT /memories/{id} — full replacement (content allowed, re-embeds)
+// Shared by-id helpers (bypass cosine): reused by REST PUT/DELETE
+// /memories/{id} and the memory_update_by_id/memory_delete_by_id MCP tools so
+// both paths go through identical code.
 // ─────────────────────────────────────────────────────────────
 
-func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use PUT"})
-		return
+// errMemoryNotFound is returned by the by-id helpers when no memory matches id.
+var errMemoryNotFound = errors.New("not found")
+
+// byIDError carries an HTTP status code alongside a message so REST callers can
+// map failures to identical status codes/bodies as before the refactor.
+type byIDError struct {
+	code int
+	msg  string
+}
+
+func (e *byIDError) Error() string { return e.msg }
+
+// updateByIDParams mirrors the PUT /memories/{id} body semantics: content
+// required, re-embed, id preserved. Zero-valued fields inherit from the
+// existing memory.
+type updateByIDParams struct {
+	Type       string
+	Content    string
+	Source     string
+	Importance float64
+	Tags       []string
+	ValidUntil float64
+	Metadata   map[string]any
+}
+
+// byIDAllowed reports whether the caller in ctx may act on the memory with the
+// given id. Non-isolated callers are always allowed (matching REST fan-out).
+// An isolated caller is allowed only when the memory lives in its own
+// collection; an unknown id is allowed through so the core helper can return
+// errMemoryNotFound. SearchByIDs fans out across ALL stores, hence this guard.
+func (s *Server) byIDAllowed(ctx context.Context, id string) (bool, error) {
+	own, isolated := isolatedCaller(ctx)
+	if !isolated {
+		return true, nil
 	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id required"})
-		return
+	mems, err := s.store.SearchByIDs(ctx, []string{id})
+	if err != nil {
+		return false, err
+	}
+	if len(mems) == 0 {
+		return true, nil // let the core helper report not_found
+	}
+	return mems[0].Collection == own, nil
+}
+
+// deleteByID soft-deletes (archives) the memory with the given id via the by-id
+// escape hatch: SearchByIDs (no vector search, no cosine threshold) then
+// store.Update to lifecycle_status=archived. Returns the new lifecycle status,
+// or errMemoryNotFound / *byIDError on failure.
+func (s *Server) deleteByID(ctx context.Context, id string) (string, error) {
+	mems, err := s.store.SearchByIDs(ctx, []string{id})
+	if err != nil {
+		return "", &byIDError{http.StatusInternalServerError, fmt.Sprintf("store error: %v", err)}
+	}
+	if len(mems) == 0 {
+		return "", errMemoryNotFound
 	}
 
+	now := float64(time.Now().Unix())
+	updates := map[string]any{
+		"lifecycle_status": memory.LifecycleArchived,
+		"archived_at":      now,
+		"updated_at":       now,
+	}
+	// Guard: stamp reflected_at so this memory exits the unreflected pool.
+	// Without this, archived memories with reflected_at=0 would keep appearing
+	// in fetchUnreflected on every reflection run.
+	if mems[0].ReflectedAt == 0 {
+		updates["reflected_at"] = now
+	}
+	if err := s.store.Update(ctx, id, updates); err != nil {
+		return "", &byIDError{http.StatusInternalServerError, fmt.Sprintf("update error: %v", err)}
+	}
+	return memory.LifecycleArchived, nil
+}
+
+// updateByID fully replaces the memory with the given id via the by-id escape
+// hatch: SearchByIDs (no vector search, no cosine threshold), re-embed, and
+// Insert with id/lifecycle/CreatedAt preserved. Returns the updated memory plus
+// any write-discipline advisories, or errMemoryNotFound / *byIDError on failure.
+func (s *Server) updateByID(ctx context.Context, id string, p updateByIDParams) (*memory.Memory, []Advisory, error) {
 	// Fetch existing to preserve lifecycle_status, CreatedAt, etc.
-	existing, err := h.srv.store.SearchByIDs(r.Context(), []string{id})
+	existing, err := s.store.SearchByIDs(ctx, []string{id})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("store error: %v", err)})
-		return
+		return nil, nil, &byIDError{http.StatusInternalServerError, fmt.Sprintf("store error: %v", err)}
 	}
 	if len(existing) == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
+		return nil, nil, errMemoryNotFound
 	}
 	prev := existing[0]
 
-	var body struct {
-		Type       string         `json:"type"`
-		Content    string         `json:"content"`
-		Source     string         `json:"source"`
-		Importance float64        `json:"importance"`
-		Tags       []string       `json:"tags"`
-		ValidUntil float64        `json:"valid_until"`
-		Metadata   map[string]any `json:"metadata"`
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
-		return
-	}
-	if body.Content == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
-		return
+	if p.Content == "" {
+		return nil, nil, &byIDError{http.StatusBadRequest, "content is required"}
 	}
 
-	memType := memory.MemoryType(body.Type)
-	if body.Type == "" {
+	memType := memory.MemoryType(p.Type)
+	if p.Type == "" {
 		memType = prev.Type
 	} else if !memory.ValidTypes[memType] {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid type: %s", body.Type)})
-		return
+		return nil, nil, &byIDError{http.StatusBadRequest, fmt.Sprintf("invalid type: %s", p.Type)}
 	}
 
-	importance := body.Importance
+	importance := p.Importance
 	if importance <= 0 {
 		importance = prev.Importance
 	}
 	importance = clampImportance(importance)
 
-	source := body.Source
+	source := p.Source
 	if source == "" {
 		source = prev.Source
 	}
 
-	tags := body.Tags
+	tags := p.Tags
 	if tags == nil {
 		tags = prev.Tags
 	}
@@ -567,19 +617,19 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 	// TTL: compute valid_until from the TTL matrix (or honor an explicit,
 	// future-dated value), matching the POST path.
 	ttlCfg := memory.DefaultTTLConfig()
-	computedValidUntil := memory.ComputeValidUntil(ttlCfg, memType, importance, tags, body.ValidUntil)
+	computedValidUntil := memory.ComputeValidUntil(ttlCfg, memType, importance, tags, p.ValidUntil)
 
 	now := float64(time.Now().Unix())
 	mem := &memory.Memory{
 		ID:                 id,
 		Type:               memType,
-		Content:            body.Content,
+		Content:            p.Content,
 		Source:             source,
 		Importance:         importance,
 		Tags:               tags,
 		CreatedAt:          prev.CreatedAt,
 		UpdatedAt:          now,
-		Metadata:           body.Metadata,
+		Metadata:           p.Metadata,
 		ValidUntil:         computedValidUntil,
 		LifecycleStatus:    prev.LifecycleStatus,
 		AccessCount:        prev.AccessCount,
@@ -600,47 +650,103 @@ func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
 
 	// Spec §5.5: revive a memory that was deprecated by evaporation when the
 	// update lifts its effective importance back to/above the eviction threshold.
-	h.reviveIfEvaporated(prev, mem)
+	s.reviveIfEvaporated(prev, mem)
 
 	// C1 provenance (shared helper).
 	sourceType, provided, perr := extractMetaSourceType(mem.Metadata)
 	if perr != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": perr.Error()})
-		return
+		return nil, nil, &byIDError{http.StatusBadRequest, perr.Error()}
 	}
-	if err := h.srv.applyProvenance(mem.Metadata, sourceType, provided, "REST PUT /memories"); err != nil {
+	if err := s.applyProvenance(mem.Metadata, sourceType, provided, "REST PUT /memories"); err != nil {
 		code, msg := provenanceStatus(err)
-		writeJSON(w, code, map[string]string{"error": msg})
-		return
+		return nil, nil, &byIDError{code, msg}
 	}
 
 	embedStart := time.Now()
-	vec, err := h.srv.embedder.Embed(r.Context(), body.Content)
-	if h.srv.metrics != nil {
-		h.srv.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
+	vec, err := s.embedder.Embed(ctx, p.Content)
+	if s.metrics != nil {
+		s.metrics.EmbedDuration.Observe(time.Since(embedStart).Seconds())
 	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("embed error: %v", err)})
-		return
+		return nil, nil, &byIDError{http.StatusInternalServerError, fmt.Sprintf("embed error: %v", err)}
 	}
 
-	if err := h.srv.store.Insert(r.Context(), mem, vec); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("upsert error: %v", err)})
-		return
+	if err := s.store.Insert(ctx, mem, vec); err != nil {
+		return nil, nil, &byIDError{http.StatusInternalServerError, fmt.Sprintf("upsert error: %v", err)}
 	}
 
-	// Write Discipline Checkpoints (R10): PUT is an update, so CP2/CP4 apply
-	// (CP1/CP3 do not). Mirrors the POST createResponse wrap.
-	mem.Collection = CollectionFromContext(r.Context())
+	// Write Discipline Checkpoints (R10): an update, so CP2/CP4 apply
+	// (CP1/CP3 do not).
+	mem.Collection = CollectionFromContext(ctx)
 	var advisories []Advisory
-	if h.srv.writeCheckpointsEnabled() {
-		if a := h.srv.cp2Importance(mem.Collection, importance); a != nil {
+	if s.writeCheckpointsEnabled() {
+		if a := s.cp2Importance(mem.Collection, importance); a != nil {
 			advisories = append(advisories, *a)
 		}
-		advisories = append(advisories, h.srv.cp4Content(body.Content, tags, sourceType)...)
+		advisories = append(advisories, s.cp4Content(p.Content, tags, sourceType)...)
 		for _, a := range advisories {
 			logAdvisory(a)
 		}
+	}
+	return mem, advisories, nil
+}
+
+// ─────────────────────────────────────────────────────────────
+// PUT /memories/{id} — full replacement (content allowed, re-embeds)
+// ─────────────────────────────────────────────────────────────
+
+func (h *HTTPServer) handlePutMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use PUT"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id required"})
+		return
+	}
+
+	var body struct {
+		Type       string         `json:"type"`
+		Content    string         `json:"content"`
+		Source     string         `json:"source"`
+		Importance float64        `json:"importance"`
+		Tags       []string       `json:"tags"`
+		ValidUntil float64        `json:"valid_until"`
+		Metadata   map[string]any `json:"metadata"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid JSON: %v", err)})
+		return
+	}
+
+	mem, advisories, err := h.srv.updateByID(r.Context(), id, updateByIDParams{
+		Type:       body.Type,
+		Content:    body.Content,
+		Source:     body.Source,
+		Importance: body.Importance,
+		Tags:       body.Tags,
+		ValidUntil: body.ValidUntil,
+		Metadata:   body.Metadata,
+	})
+	if err != nil {
+		if errors.Is(err, errMemoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		var be *byIDError
+		if errors.As(err, &be) {
+			writeJSON(w, be.code, map[string]string{"error": be.msg})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
 
 	type putResponse struct {
@@ -665,34 +771,22 @@ func (h *HTTPServer) handleDeleteMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	mems, err := h.srv.store.SearchByIDs(r.Context(), []string{id})
+	status, err := h.srv.deleteByID(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("store error: %v", err)})
-		return
-	}
-	if len(mems) == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-
-	now := float64(time.Now().Unix())
-	updates := map[string]any{
-		"lifecycle_status": memory.LifecycleArchived,
-		"archived_at":      now,
-		"updated_at":       now,
-	}
-	// Guard: stamp reflected_at so this memory exits the unreflected pool.
-	// Without this, archived memories with reflected_at=0 would keep appearing
-	// in fetchUnreflected on every reflection run.
-	if mems[0].ReflectedAt == 0 {
-		updates["reflected_at"] = now
-	}
-	if err := h.srv.store.Update(r.Context(), id, updates); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update error: %v", err)})
+		if errors.Is(err, errMemoryNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		var be *byIDError
+		if errors.As(err, &be) {
+			writeJSON(w, be.code, map[string]string{"error": be.msg})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"id": id, "lifecycle_status": memory.LifecycleArchived})
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "lifecycle_status": status})
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1057,14 +1151,14 @@ func (h *HTTPServer) handleEvaporationStatus(w http.ResponseWriter, r *http.Requ
 // evaporation and m's recomputed effective importance now meets the eviction
 // threshold (spec §5.5). It clears the deprecated_* metadata keys on m. Returns
 // true if a revival occurred.
-func (h *HTTPServer) reviveIfEvaporated(prev memory.Memory, m *memory.Memory) bool {
+func (s *Server) reviveIfEvaporated(prev memory.Memory, m *memory.Memory) bool {
 	if prev.LifecycleStatus != memory.LifecycleDeprecated {
 		return false
 	}
 	if reason, _ := prev.Metadata["deprecated_reason"].(string); reason != "evaporation" {
 		return false
 	}
-	cfg := h.srv.evaporationConfig()
+	cfg := s.evaporationConfig()
 	if memory.EffectiveImportance(m, cfg, time.Now()) < cfg.EvictionThreshold {
 		return false
 	}

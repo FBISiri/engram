@@ -57,7 +57,10 @@ func TestProvenance_Strict_AddWithSourceType_Succeeds(t *testing.T) {
 }
 
 func TestProvenance_Strict_UpdateWithoutSourceType_Rejects(t *testing.T) {
-	srv, _ := newTestServerWithMode("strict")
+	srv, store := newTestServerWithMode("strict")
+	// Seed a matching target so the update reaches the provenance check (R1: a
+	// zero-match update now returns no_target_matched before Insert).
+	seedMemory(t, srv, store, "prov-target", "anything", memory.TypeIdentity)
 	res, err := callTool(srv, "memory_update", map[string]any{
 		"old_content":          "anything",
 		"new_content":          "replacement",
@@ -76,7 +79,8 @@ func TestProvenance_Strict_UpdateWithoutSourceType_Rejects(t *testing.T) {
 }
 
 func TestProvenance_Strict_UpdateWithSourceType_Succeeds(t *testing.T) {
-	srv, _ := newTestServerWithMode("strict")
+	srv, store := newTestServerWithMode("strict")
+	seedMemory(t, srv, store, "prov-target2", "anything", memory.TypeIdentity)
 	res, err := callTool(srv, "memory_update", map[string]any{
 		"old_content":          "anything",
 		"new_content":          "replacement",
