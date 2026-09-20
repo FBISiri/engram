@@ -95,6 +95,19 @@ func (r *reflectionRunner) start(
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 
+		// Single-flight reset MUST always happen, even if fn panics; otherwise
+		// running stays true forever and wedges the runner. Recover here so a
+		// panic in fn cannot leak, and release the flight under the same mutex.
+		defer func() {
+			if p := recover(); p != nil {
+				slog.Error("reflection run panicked", "run_id", id, "panic", p)
+			}
+			r.mu.Lock()
+			r.running = false
+			r.runID = ""
+			r.mu.Unlock()
+		}()
+
 		result, err := fn(ctx)
 
 		r.mu.Lock()
@@ -108,8 +121,6 @@ func (r *reflectionRunner) start(
 		}
 		r.lastRunAt = time.Now()
 		r.lastRunID = id
-		r.running = false
-		r.runID = ""
 		r.mu.Unlock()
 
 		if err == nil && result != nil && recordMetrics != nil {

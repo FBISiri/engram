@@ -283,12 +283,25 @@ func serve(cfg *config.Config) error {
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
 
+	// startReflectionScheduler gates the in-process reflection scheduler on the
+	// ReflectionTrigger config field; it is called once inside the single
+	// transport branch that runs below.
+	startReflectionScheduler := func() {
+		if cfg.ReflectionTrigger == "cron" {
+			srv.StartReflectionScheduler(serverCtx)
+			fmt.Fprintf(os.Stderr, "  Reflection scheduler: ENABLED (ReflectionTrigger=cron)\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "  Reflection scheduler: DISABLED (ReflectionTrigger=%q, want \"cron\")\n", cfg.ReflectionTrigger)
+		}
+	}
+
 	switch cfg.Transport {
 	case "stdio":
 		fmt.Fprintf(os.Stderr, "  Transport:  stdio (ready)\n")
 		// No HTTP metrics on the stdio path; sweep records nothing but still runs.
 		server.StartExpiryCleanup(serverCtx, store, 0) // 0 = use DefaultExpiryInterval (10 min)
 		srv.StartEvaporationSweep(serverCtx)
+		startReflectionScheduler()
 		return srv.ServeStdio()
 	case "http":
 		fmt.Fprintf(os.Stderr, "  Transport:  http (port %d)\n", cfg.HTTPPort)
@@ -296,6 +309,7 @@ func serve(cfg *config.Config) error {
 		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
 		server.StartExpiryCleanup(serverCtx, store, 0, srv.Metrics()) // 0 = use DefaultExpiryInterval (10 min)
 		srv.StartEvaporationSweep(serverCtx)                          // metrics wired by NewHTTPServer
+		startReflectionScheduler()
 		return httpSrv.ListenAndServe(serverCtx)
 	case "both":
 		// Start HTTP in background; MCP stdio in foreground.
@@ -304,6 +318,7 @@ func serve(cfg *config.Config) error {
 		httpSrv.SetPrincipalKeys(cfg.PrincipalKeys)
 		server.StartExpiryCleanup(serverCtx, store, 0, srv.Metrics()) // 0 = use DefaultExpiryInterval (10 min)
 		srv.StartEvaporationSweep(serverCtx)                          // metrics wired by NewHTTPServer
+		startReflectionScheduler()
 		go func() {
 			if err := httpSrv.ListenAndServe(serverCtx); err != nil {
 				fmt.Fprintf(os.Stderr, "http server error: %v\n", err)
