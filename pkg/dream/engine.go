@@ -3,6 +3,7 @@ package dream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,18 @@ const (
 // AllPhases in execution order.
 var AllPhases = []Phase{PhaseOrient, PhaseGather, PhaseConsolidate, PhasePrune}
 
+// skillDiffHoldThreshold is the maximum tolerated skill-diff failure rate. When
+// the fraction of failed per-skill proposals exceeds this value the run is
+// considered degraded and last_run is HELD (the gate budget is NOT consumed), so
+// a mostly-empty run does not waste the 20h window.
+const skillDiffHoldThreshold = 0.5
+
+// ErrSkillDiffPartial is returned by Run when one or more skill-diff proposals
+// failed. It is a sentinel so main() can map it to a dedicated non-zero exit
+// code — a LIVE dream-run whose skill-diff sub-step was (partially) broken must
+// not be able to exit 0.
+var ErrSkillDiffPartial = errors.New("skill-diff partial failure")
+
 // Config holds Dream Engine runtime configuration.
 type Config struct {
 	DryRun bool   // Read-only mode: no writes to memory store or files.
@@ -44,12 +57,20 @@ type Engine struct {
 
 // Log collects structured output from each phase.
 type Log struct {
-	StartedAt       string     `json:"started_at"`
-	DryRun          bool       `json:"dry_run"`
-	Phases          []PhaseLog `json:"phases"`
-	Summary         string     `json:"summary,omitempty"`
-	SkillDiffPath   string     `json:"skill_diff_path,omitempty"`   // path to skill diff draft file
-	HasSkillDiff    bool       `json:"has_skill_diff,omitempty"`    // true if diff was generated
+	StartedAt     string     `json:"started_at"`
+	DryRun        bool       `json:"dry_run"`
+	Phases        []PhaseLog `json:"phases"`
+	Summary       string     `json:"summary,omitempty"`
+	SkillDiffPath string     `json:"skill_diff_path,omitempty"` // path to skill diff draft file
+	HasSkillDiff  bool       `json:"has_skill_diff,omitempty"`  // true if diff was generated
+
+	// Skill-diff observability (R1/R3): counts and last_run decision.
+	SkillDiffRan         bool     `json:"skill_diff_ran,omitempty"`          // true if the per-skill LLM loop actually ran
+	SkillDiffOK          int      `json:"skill_diff_ok,omitempty"`           // proposals successfully generated
+	SkillDiffFailed      int      `json:"skill_diff_failed,omitempty"`       // proposals that failed (e.g. llm error)
+	SkillDiffTotal       int      `json:"skill_diff_total,omitempty"`        // candidate skills attempted (ok+failed)
+	SkillDiffFailedNames []string `json:"skill_diff_failed_names,omitempty"` // names of skills whose proposal failed
+	LastRunAdvanced      bool     `json:"last_run_advanced,omitempty"`       // whether UpdateRunTimestamp was called
 }
 
 // PhaseLog records a single phase's execution.
@@ -133,12 +154,21 @@ func (e *Engine) Run(ctx context.Context) error {
 	// Generates a skill improvement draft and writes it to workspace.
 	shouldRunSkillDiff := e.cfg.Phase == "" || e.cfg.Phase == "prune"
 	if shouldRunSkillDiff {
-		diffPath, diffItems, diffErr := e.skillDiff(ctx)
+		res, diffItems, diffErr := e.skillDiff(ctx)
 		if diffErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: skill diff failed: %v\n", diffErr)
-		} else if diffPath != "" {
-			e.log.SkillDiffPath = diffPath
-			e.log.HasSkillDiff = true
+		} else if res != nil {
+			if res.draftPath != "" {
+				e.log.SkillDiffPath = res.draftPath
+				e.log.HasSkillDiff = true
+			}
+			if res.ran {
+				e.log.SkillDiffRan = true
+				e.log.SkillDiffOK = res.ok
+				e.log.SkillDiffFailed = res.failed
+				e.log.SkillDiffTotal = res.total
+				e.log.SkillDiffFailedNames = res.failedNames
+			}
 		}
 		// Log skill diff items in the prune phase log if it exists, else append a new entry.
 		if len(diffItems) > 0 {
@@ -152,9 +182,19 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	// Update run timestamp (only if full run, not single-phase, and not dry-run).
+	// R3: HOLD last_run (skip the write) when skill-diff was too broken to justify
+	// consuming the gate budget, so a degraded run doesn't waste the 20h window.
 	if e.cfg.Phase == "" && !e.cfg.DryRun {
-		if err := UpdateRunTimestamp(); err != nil {
-			return fmt.Errorf("update timestamp: %w", err)
+		hold := shouldHoldLastRun(e.log.SkillDiffRan, e.log.SkillDiffFailed, e.log.SkillDiffTotal)
+		if hold {
+			fmt.Fprintf(os.Stderr, "last_run HELD: skill-diff %d/%d failed (>%.0f%% threshold); gate budget NOT consumed\n",
+				e.log.SkillDiffFailed, e.log.SkillDiffTotal, skillDiffHoldThreshold*100)
+			e.log.LastRunAdvanced = false
+		} else {
+			if err := UpdateRunTimestamp(); err != nil {
+				return fmt.Errorf("update timestamp: %w", err)
+			}
+			e.log.LastRunAdvanced = true
 		}
 	}
 
@@ -163,6 +203,17 @@ func (e *Engine) Run(ctx context.Context) error {
 	// Write report to workspace.
 	if err := e.writeReport(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not write report: %v\n", err)
+	}
+
+	// R2: surface skill-diff partial failure as a non-zero exit signal. The
+	// report and log have already been written above so observability output is
+	// preserved even though we return a (sentinel) error here. Gated on !DryRun:
+	// a --dry-run is a read-only preview and keeps its always-succeed contract
+	// (its degradation is still visible in the summary counts and the draft
+	// Coverage header) — the exit-3 signal is reserved for LIVE runs, the
+	// dangerous case that advances last_run.
+	if !e.cfg.DryRun && e.log.SkillDiffFailed > 0 {
+		return fmt.Errorf("%w: %d of %d skill-diff proposals failed", ErrSkillDiffPartial, e.log.SkillDiffFailed, e.log.SkillDiffTotal)
 	}
 
 	return nil
@@ -646,7 +697,45 @@ func (e *Engine) buildSummary() string {
 	if e.cfg.DryRun {
 		mode = "DRY-RUN"
 	}
-	return fmt.Sprintf("Dream run completed (%s): %d phases, %d items logged", mode, len(e.log.Phases), total)
+	summary := fmt.Sprintf("Dream run completed (%s): %d phases, %d items logged", mode, len(e.log.Phases), total)
+	if e.log.SkillDiffRan {
+		summary += fmt.Sprintf("; skill-diff: %d/%d ok, %d failed", e.log.SkillDiffOK, e.log.SkillDiffTotal, e.log.SkillDiffFailed)
+	}
+	if e.cfg.Phase == "" && !e.cfg.DryRun {
+		if e.log.LastRunAdvanced {
+			summary += "; last_run advanced"
+		} else {
+			summary += "; last_run HELD (degraded run)"
+		}
+	}
+	return summary
+}
+
+// shouldHoldLastRun reports whether last_run must be HELD (not advanced) because
+// the skill-diff sub-step failed on more than skillDiffHoldThreshold of its
+// candidates (R3). A run that never ran skill-diff, or ran it with zero
+// candidates, never holds.
+func shouldHoldLastRun(ran bool, failed, total int) bool {
+	if !ran || total <= 0 {
+		return false
+	}
+	return float64(failed)/float64(total) > skillDiffHoldThreshold
+}
+
+// buildDraftHeader builds the skill-diff draft header (R4). Reading only this
+// header must be enough to tell whether the file is a complete or partial run:
+// it carries the Mode, the Coverage (ok/total) and the explicit list of skills
+// that were NOT covered (the failed ones).
+func buildDraftHeader(date, modeLabel string, ok, total int, failedNames []string) string {
+	var h strings.Builder
+	fmt.Fprintf(&h, "# Skill Diff Draft — %s\n\n> Generated by Dream Engine Phase 4  \n> Mode: %s  \n> Coverage: %d/%d\n", date, modeLabel, ok, total)
+	if len(failedNames) > 0 {
+		fmt.Fprintf(&h, "> Uncovered skills (proposal failed): %s\n", strings.Join(failedNames, ", "))
+	} else {
+		h.WriteString("> Uncovered skills (proposal failed): none\n")
+	}
+	h.WriteString("\n---\n\n")
+	return h.String()
 }
 
 // writeReport writes the dream run report to workspace.
@@ -690,11 +779,23 @@ func (e *Engine) writeReport() error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
+// skillDiffResult carries the observable outcome of the skill-diff sub-step so
+// Run()/buildSummary() can surface partial failures instead of swallowing them.
+type skillDiffResult struct {
+	draftPath   string   // path to the written draft, if any
+	ran         bool     // true if the per-skill LLM loop actually executed
+	ok          int      // proposals successfully generated
+	failed      int      // proposals that failed
+	total       int      // candidate skills attempted (ok+failed)
+	failedNames []string // names of skills whose proposal failed
+}
+
 // skillDiff scans Engram insights for skill-improvement signals, calls the LLM to
 // generate a structured diff draft per skill, and writes the draft to workspace.
-// Returns (draftFilePath, logItems, error).
+// Returns (result, logItems, error). result is nil when the sub-step short-circuits
+// before running the per-skill loop (no skills / no candidates).
 // In dry-run mode it still generates the draft (for review) but marks it as dry-run.
-func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
+func (e *Engine) skillDiff(ctx context.Context) (*skillDiffResult, []string, error) {
 	var items []string
 
 	skillsDir := "/data/armyoftheagent/skills"
@@ -703,7 +804,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 	// List all skill directories.
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("read skills dir: %w", err)
+		return nil, nil, fmt.Errorf("read skills dir: %w", err)
 	}
 
 	// Collect skill names.
@@ -717,7 +818,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 
 	if len(skillNames) == 0 {
 		items = append(items, "skill diff: no skills found")
-		return "", items, nil
+		return nil, items, nil
 	}
 
 	// Search Engram for insights and directives. Use scrollAll pagination so
@@ -727,7 +828,7 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 		Filters: []memory.Filter{{Field: "type", Op: memory.OpEq, Value: string(memory.TypeInsight)}},
 	}, 2000)
 	if err != nil {
-		return "", nil, fmt.Errorf("scroll insights for skill diff: %w", err)
+		return nil, nil, fmt.Errorf("scroll insights for skill diff: %w", err)
 	}
 	allDirectives, _ := scrollAll(ctx, e.store, memory.ScrollOptions{
 		Limit:   200,
@@ -783,15 +884,20 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 
 	if len(candidates) == 0 {
 		items = append(items, "skill diff: no skills with 2+ relevant insights found")
-		return "", items, nil
+		return nil, items, nil
 	}
 
 	items = append(items, fmt.Sprintf("skill diff: %d skills have improvement signals", len(candidates)))
 
-	// Build the combined draft.
+	// Build the combined draft. Body is buffered separately from the header so the
+	// header can be built AFTER the loop with the true coverage counts and the list
+	// of uncovered (failed) skills (R4).
 	date := time.Now().Format("2006-01-02")
 	modeLabel := map[bool]string{true: "DRY-RUN", false: "LIVE"}[e.cfg.DryRun]
-	draftContent := fmt.Sprintf("# Skill Diff Draft — %s\n\n> Generated by Dream Engine Phase 4  \n> Mode: %s\n\n---\n\n", date, modeLabel)
+
+	var body strings.Builder
+	ok, failed := 0, 0
+	var failedNames []string
 
 	for _, c := range candidates {
 		items = append(items, fmt.Sprintf("  skill: %s (%d relevant memories)", c.name, len(c.memories)))
@@ -833,25 +939,43 @@ func (e *Engine) skillDiff(ctx context.Context) (string, []string, error) {
 
 		proposal, hErr := llm.Call(ctx, sb.String())
 		if hErr != nil {
+			failed++
+			failedNames = append(failedNames, c.name)
 			items = append(items, fmt.Sprintf("  llm error for %s: %v", c.name, hErr))
-			draftContent += fmt.Sprintf("## %s\n\nError generating proposal: %v\n\n---\n\n", c.name, hErr)
+			fmt.Fprintf(&body, "## %s\n\nError generating proposal: %v\n\n---\n\n", c.name, hErr)
 		} else {
+			ok++
 			items = append(items, fmt.Sprintf("  generated proposal for %s", c.name))
-			draftContent += proposal + "\n\n---\n\n"
+			body.WriteString(proposal + "\n\n---\n\n")
 		}
+	}
+
+	total := len(candidates)
+
+	// Build the header now that coverage and uncovered skills are known (R4).
+	// Reading only this header must be enough to tell the file is a fragment.
+	draftContent := buildDraftHeader(date, modeLabel, ok, total, failedNames) + body.String()
+
+	result := &skillDiffResult{
+		ran:         true,
+		ok:          ok,
+		failed:      failed,
+		total:       total,
+		failedNames: failedNames,
 	}
 
 	// Write the draft file.
 	if err := os.MkdirAll(wsDir, 0755); err != nil {
-		return "", items, fmt.Errorf("create workspace dir: %w", err)
+		return result, items, fmt.Errorf("create workspace dir: %w", err)
 	}
 	draftPath := filepath.Join(wsDir, fmt.Sprintf("skill-diff-draft-%s.md", date))
 	if writeErr := os.WriteFile(draftPath, []byte(draftContent), 0644); writeErr != nil {
-		return "", items, fmt.Errorf("write skill diff draft: %w", writeErr)
+		return result, items, fmt.Errorf("write skill diff draft: %w", writeErr)
 	}
+	result.draftPath = draftPath
 
 	items = append(items, fmt.Sprintf("skill diff draft written to: %s", draftPath))
-	return draftPath, items, nil
+	return result, items, nil
 }
 
 // ── W17 v1.1 helpers ────────────────────────────────────────────────────────
