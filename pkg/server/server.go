@@ -202,13 +202,14 @@ func (s *Server) registerTools() {
 
 	// Tool 3: memory_update
 	updateTool := mcp.NewTool("memory_update",
-		mcp.WithDescription("Update memories by semantic search. Finds old memories matching old_content, deletes them, and stores new_content. SAFETY: similarity_threshold must be >= 0.85 (3 prior mass-delete incidents at lower values)."),
-		mcp.WithString("old_content", mcp.Required(), mcp.Description("Search query to find old memories to replace.")),
+		mcp.WithDescription("Update memories by semantic search. Finds old memories matching old_content, deletes them, and stores new_content. similarity_threshold is a RAW COSINE similarity in [0,1] on the query\u2194memory vectors \u2014 NOT the composite relevance score shown by memory_search (which folds in recency/importance/confidence and routinely exceeds 1.0); do NOT copy a memory_search score into this field. SAFETY: similarity_threshold must be >= 0.85 (3 prior mass-delete incidents at lower values). If you already know the memory's id, pass id to take the exact-match path (memory_update_by_id semantics): semantic search and the cosine threshold are skipped."),
+		mcp.WithString("id", mcp.Description("Optional exact memory id. When set, takes the reliable exact-match correction path (SearchByIDs, no cosine): old_content and similarity_threshold are ignored; new_content replaces the identified memory.")),
+		mcp.WithString("old_content", mcp.Required(), mcp.Description("Search query to find old memories to replace. Ignored when id is set.")),
 		mcp.WithString("new_content", mcp.Required(), mcp.Description("New memory content to store.")),
 		mcp.WithString("type", mcp.Description("Memory type for the new memory."), mcp.Enum("identity", "event", "insight", "directive")),
 		mcp.WithNumber("importance", mcp.Description("Importance score. Per-type defaults if omitted: identity=6, directive=7, insight=5, event=4. Per-type bounds (values outside are clamped): identity [7,9], directive [6,10], insight [5,8], event [3,7]. Omit to use per-type default.")),
 		mcp.WithArray("tags", mcp.Description("Tags for the new memory."), mcp.WithStringItems()),
-		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum cosine similarity for deletion. Must be >= 0.85. Default: 0.7 (rejected — use 0.92 for single targeted replacement).")),
+		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum RAW COSINE similarity (query\u2194memory vectors, range [0,1]; NOT memory_search's composite score) for a memory to be replaced. Must be >= 0.85. The 0.7 default is BELOW the floor and is always rejected \u2014 pass 0.92 for a single targeted replacement.")),
 		mcp.WithString("source_type", mcp.Description("Fine-grained provenance for the new memory. Stored in metadata.source_type."), mcp.Enum("tool_output", "reflection", "web_search", "user_input", "calendar", "document")),
 		mcp.WithNumber("valid_until", mcp.Description("Optional expiration time as Unix timestamp. 0 or omitted = inherit from old memory.")),
 		mcp.WithBoolean("dry_run", mcp.Description("If true, preview which memories would be deleted/added without making changes. Default: false.")),
@@ -217,9 +218,10 @@ func (s *Server) registerTools() {
 
 	// Tool 4: memory_delete
 	deleteTool := mcp.NewTool("memory_delete",
-		mcp.WithDescription("Delete memories by semantic search. Finds memories matching the query above the similarity threshold and removes them. SAFETY: limit > 1 requires similarity_threshold >= 0.85."),
-		mcp.WithString("query", mcp.Required(), mcp.Description("Search query to find memories to delete.")),
-		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum cosine similarity for deletion. Default: 0.7 (rejected when limit > 1 — use >= 0.85).")),
+		mcp.WithDescription("Delete memories by semantic search. Finds memories matching the query above the similarity threshold and removes them. similarity_threshold is a RAW COSINE similarity in [0,1] on the query\u2194memory vectors \u2014 NOT the composite relevance score shown by memory_search (which folds in recency/importance/confidence and routinely exceeds 1.0); do NOT copy a memory_search score into this field. SAFETY: limit > 1 requires similarity_threshold >= 0.85. If you already know the memory's id, pass id to take the exact-match path (memory_delete_by_id semantics): semantic search and the cosine threshold are skipped."),
+		mcp.WithString("id", mcp.Description("Optional exact memory id. When set, takes the reliable exact-match soft-delete path (SearchByIDs, no cosine): query, similarity_threshold, and limit are ignored.")),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Search query to find memories to delete. Ignored when id is set.")),
+		mcp.WithNumber("similarity_threshold", mcp.Description("Minimum RAW COSINE similarity (query\u2194memory vectors, range [0,1]; NOT memory_search's composite score) for deletion. Default: 0.7 (rejected when limit > 1 \u2014 use >= 0.85).")),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of memories to delete. Default: 20.")),
 		mcp.WithBoolean("dry_run", mcp.Description("If true, preview which memories would be deleted without removing them. Default: false.")),
 	)
@@ -1134,6 +1136,28 @@ func getProvenanceHistory(metadata map[string]any) []memory.ProvenanceEntry {
 
 // handleUpdate implements the memory.update tool.
 func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// R2 id-priority short-circuit: an explicit id takes the exact-match
+	// correction path (SearchByIDs, same as memory_update_by_id) and SKIPS
+	// semantic search + the cosine threshold entirely. new_content is the
+	// replacement content; the byIDAllowed guard keeps caller isolation intact.
+	if id := request.GetString("id", ""); id != "" {
+		content, err := request.RequireString("new_content")
+		if err != nil {
+			return mcp.NewToolResultError("new_content is required"), nil
+		}
+		p := updateByIDParams{
+			Type:       request.GetString("type", ""),
+			Content:    content,
+			Importance: request.GetFloat("importance", 0),
+			Tags:       getStringSlice(request, "tags"),
+			ValidUntil: request.GetFloat("valid_until", 0),
+		}
+		if st := request.GetString("source_type", ""); st != "" {
+			p.Metadata = map[string]any{"source_type": st}
+		}
+		return s.updateByIDResult(ctx, id, p)
+	}
+
 	oldContent, err := request.RequireString("old_content")
 	if err != nil {
 		return mcp.NewToolResultError("old_content is required"), nil
@@ -1375,6 +1399,14 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	defer span.End()
 	span.SetAttributes(semconv.GenAIAttrs(semconv.OpDeleteMemory)...)
 
+	// R2 id-priority short-circuit: an explicit id takes the exact-match
+	// soft-delete path (SearchByIDs, same as memory_delete_by_id) and SKIPS
+	// semantic search + the cosine threshold entirely. The byIDAllowed guard
+	// keeps caller isolation intact.
+	if id := request.GetString("id", ""); id != "" {
+		return s.deleteByIDResult(ctx, id)
+	}
+
 	query, err := request.RequireString("query")
 	if err != nil {
 		return mcp.NewToolResultError("query is required"), nil
@@ -1512,7 +1544,14 @@ func (s *Server) handleDeleteByID(ctx context.Context, request mcp.CallToolReque
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	return s.deleteByIDResult(ctx, id)
+}
 
+// deleteByIDResult runs the isolation guard, soft-deletes (archives) the memory
+// with the given id via the deleteByID escape hatch (no vector search, no cosine
+// threshold), and builds the MCP tool result. Shared by memory_delete_by_id and
+// the id-priority short-circuit in memory_delete.
+func (s *Server) deleteByIDResult(ctx context.Context, id string) (*mcp.CallToolResult, error) {
 	// ISOLATION: an isolated caller may only touch its own collection. SearchByIDs
 	// fans out across ALL stores, so guard before mutating anything.
 	allowed, err := s.byIDAllowed(ctx, id)
@@ -1558,15 +1597,6 @@ func (s *Server) handleUpdateByID(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError("content is required"), nil
 	}
 
-	// ISOLATION: guard before mutating (SearchByIDs fans out across all stores).
-	allowed, err := s.byIDAllowed(ctx, id)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
-	}
-	if !allowed {
-		return byIDNotFound(id), nil
-	}
-
 	p := updateByIDParams{
 		Type:       request.GetString("type", ""),
 		Content:    content,
@@ -1577,6 +1607,24 @@ func (s *Server) handleUpdateByID(ctx context.Context, request mcp.CallToolReque
 	// source_type mirrors the PUT body: carried through metadata.source_type.
 	if st := request.GetString("source_type", ""); st != "" {
 		p.Metadata = map[string]any{"source_type": st}
+	}
+
+	return s.updateByIDResult(ctx, id, p)
+}
+
+// updateByIDResult runs the isolation guard, fully replaces the memory with the
+// given id via the updateByID escape hatch (no vector search, no cosine
+// threshold; id/lifecycle/CreatedAt preserved), and builds the MCP tool result.
+// Shared by memory_update_by_id and the id-priority short-circuit in
+// memory_update.
+func (s *Server) updateByIDResult(ctx context.Context, id string, p updateByIDParams) (*mcp.CallToolResult, error) {
+	// ISOLATION: guard before mutating (SearchByIDs fans out across all stores).
+	allowed, err := s.byIDAllowed(ctx, id)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+	}
+	if !allowed {
+		return byIDNotFound(id), nil
 	}
 
 	mem, advisories, err := s.updateByID(ctx, id, p)
