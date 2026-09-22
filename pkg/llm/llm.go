@@ -1,11 +1,14 @@
-// Package llm is the single shared LLM client for engram. It speaks the
-// OpenAI-compatible chat/completions protocol and is used by both the dream
-// and reflection engines.
+// Package llm is the single shared LLM client for engram. It is used by both
+// the dream and reflection engines.
 //
-// Migration note: this package replaces the previous per-package Anthropic
-// /v1/messages clients that read Claude Code OAuth credentials. There is no
-// credential-file / OAuth fallback anymore — configuration comes solely from
-// the ENGRAM_LLM_* env vars below.
+// Two providers are selectable via ENGRAM_LLM_PROVIDER:
+//   - "openrouter" (default): OpenAI-compatible POST {base}/chat/completions
+//     authenticated with ENGRAM_LLM_API_KEY. This is the original behaviour and
+//     is used bit-for-bit when the var is unset or unknown.
+//   - "anthropic": direct Anthropic Messages API POST {base}/v1/messages. This
+//     is a TEMPORARY workaround (2026-09-21) for OpenRouter's region block on
+//     Anthropic models; it reuses the Claude Code OAuth credential and reads it
+//     per-call so a rotating access token is always picked up fresh.
 package llm
 
 import (
@@ -25,6 +28,16 @@ const (
 	defaultBaseURL = "https://openrouter.ai/api/v1"
 	defaultModel   = "anthropic/claude-sonnet-5"
 
+	// providerOpenRouter is the default backend (unchanged behaviour).
+	providerOpenRouter = "openrouter"
+	// providerAnthropic is the direct Anthropic Messages API backend.
+	providerAnthropic = "anthropic"
+
+	// defaultAnthropicBaseURL / defaultAnthropicModel apply when
+	// ENGRAM_LLM_PROVIDER=anthropic and the corresponding var is unset.
+	defaultAnthropicBaseURL = "https://api.anthropic.com"
+	defaultAnthropicModel   = "claude-sonnet-5"
+
 	// maxTokens is the response ceiling for a single call. It unifies the two
 	// prior call-site values (dream 1024, reflection 1500) to the larger one so
 	// neither path truncates.
@@ -43,14 +56,46 @@ const (
 
 // config holds the resolved LLM client configuration.
 type config struct {
-	APIKey  string
-	BaseURL string
-	Model   string
+	Provider string
+	APIKey   string // openrouter bearer key; unused on the anthropic path
+	BaseURL  string
+	Model    string
 }
 
-// loadConfig resolves configuration from ENGRAM_LLM_* env vars. The API key is
-// required; base URL and model fall back to OpenRouter / Sonnet-5 defaults.
+// resolveProvider reads ENGRAM_LLM_PROVIDER. Unset or unknown => openrouter, so
+// the default behaviour is preserved bit-for-bit.
+func resolveProvider() string {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("ENGRAM_LLM_PROVIDER"))) == providerAnthropic {
+		return providerAnthropic
+	}
+	return providerOpenRouter
+}
+
+// loadConfig resolves configuration from ENGRAM_LLM_* env vars.
+//
+// openrouter (default): ENGRAM_LLM_API_KEY is required; base URL and model fall
+// back to OpenRouter / Sonnet-5 defaults.
+//
+// anthropic: ENGRAM_LLM_API_KEY is NOT required (credentials are resolved
+// per-call, see anthropic.go); base URL falls back to the Anthropic API and the
+// model falls back to claude-sonnet-5, with any leading "anthropic/" provider
+// prefix stripped so an OpenRouter-style ENGRAM_LLM_MODEL resolves cleanly.
 func loadConfig() (*config, error) {
+	provider := resolveProvider()
+	if provider == providerAnthropic {
+		baseURL := os.Getenv("ENGRAM_LLM_BASE_URL")
+		if baseURL == "" {
+			baseURL = defaultAnthropicBaseURL
+		}
+		baseURL = strings.TrimRight(baseURL, "/")
+		model := os.Getenv("ENGRAM_LLM_MODEL")
+		if model == "" {
+			model = defaultAnthropicModel
+		}
+		model = strings.TrimPrefix(model, "anthropic/")
+		return &config{Provider: provider, BaseURL: baseURL, Model: model}, nil
+	}
+
 	key := os.Getenv("ENGRAM_LLM_API_KEY")
 	if key == "" {
 		return nil, fmt.Errorf("no LLM API key configured (set ENGRAM_LLM_API_KEY)")
@@ -64,7 +109,7 @@ func loadConfig() (*config, error) {
 	if model == "" {
 		model = defaultModel
 	}
-	return &config{APIKey: key, BaseURL: baseURL, Model: model}, nil
+	return &config{Provider: provider, APIKey: key, BaseURL: baseURL, Model: model}, nil
 }
 
 // Meta carries observability metadata about a single LLM call. Token counts use
@@ -159,7 +204,16 @@ func CallWithBudget(ctx context.Context, prompt string, maxTokens int) (string, 
 	if err != nil {
 		return "", Meta{}, err
 	}
+	if cfg.Provider == providerAnthropic {
+		return callAnthropic(ctx, cfg, prompt, maxTokens)
+	}
+	return callOpenRouter(ctx, cfg, prompt, maxTokens)
+}
 
+// callOpenRouter performs the OpenAI-compatible chat/completions request. This
+// is the original CallWithBudget body, unchanged, so ENGRAM_LLM_PROVIDER unset
+// (or unknown) behaves bit-for-bit as before.
+func callOpenRouter(ctx context.Context, cfg *config, prompt string, maxTokens int) (string, Meta, error) {
 	reqBody, err := json.Marshal(map[string]any{
 		"model":      cfg.Model,
 		"max_tokens": maxTokens,
