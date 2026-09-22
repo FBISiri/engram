@@ -14,6 +14,7 @@ import (
 	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/llm"
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/statedir"
 )
 
 // Phase identifies a single dream engine phase.
@@ -577,14 +578,25 @@ func (e *Engine) generateInsight(ctx context.Context, tag string, group []memory
 // age floors; prune must too. See the 2026-09-05 8980c8a1 incident.
 const pruneMinAge = 7 * 24 * time.Hour
 
-// prune cleans up low-value memories.
+// Grace period (backlog #36). A memory becoming eligible for prune is NOT
+// deleted the same run it is first seen — that closes the hole where the
+// consolidate phase demotes a dormant memory and prune deletes it seconds
+// later in the SAME run. Instead it is MARKED, and only deleted once it has
+// been seen eligible across enough runs AND enough wall time has elapsed since
+// the first mark.
+const (
+	pruneGraceMinAge  = 72 * time.Hour // 3 days since FIRST mark
+	pruneGraceMinRuns = 2              // must be seen eligible in >=2 runs
+)
+
+// prune cleans up low-value memories, gated by a persistent grace period.
 func (e *Engine) prune(ctx context.Context) ([]string, error) {
 	var items []string
 
 	now := time.Now()
 	cutoff := float64(now.Add(-pruneMinAge).Unix())
 
-	// Find memories with importance <= 3 AND access_count = 0 AND age >= 7d.
+	// (a) Find memories with importance <= 3 AND access_count = 0 AND age >= 7d.
 	candidates, _, err := e.store.Scroll(ctx, memory.ScrollOptions{
 		Limit: 200,
 		Filters: []memory.Filter{
@@ -597,52 +609,183 @@ func (e *Engine) prune(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("scroll prune candidates: %w", err)
 	}
 
-	// Defense in depth: a store whose filter support is incomplete must still
-	// never delete a <7d memory. Re-filter in memory with the same cutoff.
+	// (b) In-memory re-filter. Defense in depth: a store whose filter support
+	// is incomplete must still never delete a <7d memory. Then drop directives.
+	//
+	// Directives are EXEMPT (chosen over grace): they are explicit user
+	// instructions / runbook pointers — low-volume, high-consequence. The
+	// 2026-09-21 incident deleted directive memories. Dropping them from the
+	// eligible set entirely (never marked, never deleted) is strictly safer
+	// than merely delaying the delete with a grace period.
 	eligible := make([]memory.Memory, 0, len(candidates))
 	skipped := 0
+	exemptDirective := 0
 	for _, m := range candidates {
-		if m.CreatedAt <= cutoff {
-			eligible = append(eligible, m)
-		} else {
+		if m.CreatedAt > cutoff {
 			skipped++
+			continue
 		}
+		if m.Type == memory.TypeDirective {
+			exemptDirective++
+			continue
+		}
+		eligible = append(eligible, m)
 	}
 
+	// (c) Summary lines.
 	items = append(items, fmt.Sprintf("prune candidates (importance<=3, access_count=0, age>=7d): %d", len(eligible)))
 	if skipped > 0 {
 		items = append(items, fmt.Sprintf("prune skipped (age<7d): %d", skipped))
 	}
+	if exemptDirective > 0 {
+		items = append(items, fmt.Sprintf("prune exempt (directive): %d", exemptDirective))
+	}
 
-	if len(eligible) > 0 {
-		verb := "deleted"
-		if e.cfg.DryRun {
-			verb = "would-delete"
-		}
-		ids := make([]string, 0, len(eligible))
-		for _, m := range eligible {
-			ids = append(ids, m.ID)
-			// Truncate content by runes (not bytes) so a multibyte UTF-8
-			// character is never split.
-			summary := m.Content
-			if r := []rune(summary); len(r) > 60 {
-				summary = string(r[:60])
-			}
-			ageDays := int(now.Sub(time.Unix(int64(m.CreatedAt), 0)).Hours() / 24)
-			items = append(items, fmt.Sprintf("  - %s [%s] %s... (type=%s, importance=%.0f, age=%dd)",
-				verb, m.ID, summary, m.Type, m.Importance, ageDays))
-		}
+	ageDaysOf := func(m memory.Memory) int {
+		return int(now.Sub(time.Unix(int64(m.CreatedAt), 0)).Hours() / 24)
+	}
 
-		if e.cfg.DryRun {
-			items = append(items, fmt.Sprintf("[dry-run] would delete %d memories", len(ids)))
+	// (d) DRY-RUN: read marks read-only, report, write/delete NOTHING.
+	if e.cfg.DryRun {
+		stateDir, derr := statedir.Dir()
+		var marks *pruneMarks
+		if derr == nil {
+			marks = loadPruneMarks(stateDir)
 		} else {
-			deleted, err := e.store.Delete(ctx, ids)
-			if err != nil {
-				items = append(items, fmt.Sprintf("delete error: %v", err))
+			marks = &pruneMarks{Marks: map[string]pruneMark{}}
+		}
+		wouldDelete := 0
+		for _, m := range eligible {
+			mk, ok := marks.Marks[m.ID]
+			// Simulate this run's increment to decide grace.
+			runs := 1
+			firstMarked := nowUnix()
+			if ok {
+				runs = mk.RunsMarked + 1
+				firstMarked = mk.FirstMarkedAt
+			}
+			due := runs >= pruneGraceMinRuns &&
+				now.Sub(time.Unix(int64(firstMarked), 0)) >= pruneGraceMinAge
+			if due {
+				wouldDelete++
+				items = append(items, fmt.Sprintf("  - would-delete [%s] %s... (type=%s, importance=%.0f, age=%dd)",
+					m.ID, runeTruncate(m.Content, 60), m.Type, m.Importance, ageDaysOf(m)))
 			} else {
-				items = append(items, fmt.Sprintf("deleted %d memories", deleted))
+				items = append(items, fmt.Sprintf("  - would-mark [%s] %s... (type=%s, importance=%.0f, age=%dd, runs=%d)",
+					m.ID, runeTruncate(m.Content, 60), m.Type, m.Importance, ageDaysOf(m), runs))
 			}
 		}
+		if len(eligible) > 0 {
+			items = append(items, fmt.Sprintf("[dry-run] would delete %d memories", wouldDelete))
+		}
+		return items, nil
+	}
+
+	// (e) LIVE.
+	stateDir, err := statedir.Dir()
+	if err != nil {
+		return nil, fmt.Errorf("prune state dir: %w", err)
+	}
+	marks := loadPruneMarks(stateDir)
+
+	// RECONCILE: any mark whose id is no longer eligible has recovered
+	// (accessed or importance raised), so its consecutive-run streak resets.
+	eligibleIDs := make(map[string]struct{}, len(eligible))
+	for _, m := range eligible {
+		eligibleIDs[m.ID] = struct{}{}
+	}
+	for id := range marks.Marks {
+		if _, ok := eligibleIDs[id]; !ok {
+			delete(marks.Marks, id)
+		}
+	}
+
+	// Mark/refresh each eligible memory, then decide who is due.
+	var deleteIDs []string
+	for _, m := range eligible {
+		mk, ok := marks.Marks[m.ID]
+		if !ok {
+			mk = pruneMark{
+				ID:            m.ID,
+				FirstMarkedAt: nowUnix(),
+				LastMarkedAt:  nowUnix(),
+				RunsMarked:    1,
+				Type:          string(m.Type),
+				Importance:    m.Importance,
+				CreatedAt:     m.CreatedAt,
+				Content:       runeTruncate(m.Content, 80),
+			}
+		} else {
+			mk.LastMarkedAt = nowUnix()
+			mk.RunsMarked++
+		}
+		marks.Marks[m.ID] = mk
+
+		due := mk.RunsMarked >= pruneGraceMinRuns &&
+			now.Sub(time.Unix(int64(mk.FirstMarkedAt), 0)) >= pruneGraceMinAge
+		if due {
+			deleteIDs = append(deleteIDs, m.ID)
+			items = append(items, fmt.Sprintf("  - deleted [%s] %s... (type=%s, importance=%.0f, age=%dd, runs=%d)",
+				m.ID, runeTruncate(m.Content, 60), m.Type, m.Importance, ageDaysOf(m), mk.RunsMarked))
+		} else {
+			items = append(items, fmt.Sprintf("  - marked [%s] %s... (type=%s, importance=%.0f, age=%dd, runs=%d)",
+				m.ID, runeTruncate(m.Content, 60), m.Type, m.Importance, ageDaysOf(m), mk.RunsMarked))
+		}
+	}
+
+	// WRITE THE PENDING-DELETE LIST BEFORE ANY Delete CALL (constraint C1).
+	if len(marks.Marks) > 0 {
+		pd := &pendingDelete{
+			GeneratedAt:      now.UTC().Format(time.RFC3339),
+			GraceMinAgeHours: int(pruneGraceMinAge / time.Hour),
+			GraceMinRuns:     pruneGraceMinRuns,
+			DeletingNow:      deleteIDs,
+		}
+		if pd.DeletingNow == nil {
+			pd.DeletingNow = []string{}
+		}
+		dueSet := make(map[string]struct{}, len(deleteIDs))
+		for _, id := range deleteIDs {
+			dueSet[id] = struct{}{}
+		}
+		for id, mk := range marks.Marks {
+			_, due := dueSet[id]
+			ageDays := int(now.Sub(time.Unix(int64(mk.CreatedAt), 0)).Hours() / 24)
+			pd.Pending = append(pd.Pending, pendingEntry{
+				ID:            id,
+				Type:          mk.Type,
+				Importance:    mk.Importance,
+				CreatedAt:     mk.CreatedAt,
+				FirstMarkedAt: mk.FirstMarkedAt,
+				RunsMarked:    mk.RunsMarked,
+				AgeDays:       ageDays,
+				DueForDelete:  due,
+			})
+		}
+		if err := writePendingDelete(stateDir, pd); err != nil {
+			// C1: never delete without a persisted pending-delete list. Abort
+			// the delete this run; keep marks intact so the streak/timestamps
+			// persist and the run retries cleanly once the disk is writable.
+			items = append(items, fmt.Sprintf("delete ABORTED: pending-delete list write failed: %v", err))
+			deleteIDs = nil
+		}
+	}
+
+	// Delete only those meeting the grace condition.
+	if len(deleteIDs) > 0 {
+		deleted, err := e.store.Delete(ctx, deleteIDs)
+		if err != nil {
+			items = append(items, fmt.Sprintf("delete error: %v", err))
+		} else {
+			items = append(items, fmt.Sprintf("deleted %d memories", deleted))
+			for _, id := range deleteIDs {
+				delete(marks.Marks, id)
+			}
+		}
+	}
+
+	if err := marks.save(stateDir); err != nil {
+		items = append(items, fmt.Sprintf("marks save error: %v", err))
 	}
 
 	return items, nil
