@@ -196,3 +196,111 @@ func TestReflectionRun_LastErrorSummary(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusFunnelFieldsAlwaysPresent verifies the reflection funnel is
+// serialized unconditionally on /health .reflection_runner: all 10 funnel keys
+// are present, the 9 int fields emit literal 0 (never omitted) when the last
+// run produced nothing, and per_question_counts serializes as [] (never null).
+func TestStatusFunnelFieldsAlwaysPresent(t *testing.T) {
+	funnelKeys := []string{
+		"input_count", "evidence_count", "per_question_counts",
+		"dialectic_ok", "dialectic_dropped_no_evidence", "dialectic_dropped_low_conf",
+		"insights_written", "insights_skipped", "insights_write_failed", "drafts_written",
+	}
+	intKeys := []string{
+		"input_count", "evidence_count", "dialectic_ok",
+		"dialectic_dropped_no_evidence", "dialectic_dropped_low_conf",
+		"insights_written", "insights_skipped", "insights_write_failed", "drafts_written",
+	}
+
+	assertKeysPresent := func(t *testing.T, raw map[string]json.RawMessage) {
+		t.Helper()
+		for _, k := range funnelKeys {
+			if _, ok := raw[k]; !ok {
+				t.Errorf("funnel key %q missing from status JSON", k)
+			}
+		}
+	}
+
+	// Negative case: a run that produced NOTHING — all counters 0, nil slice.
+	t.Run("empty_run_emits_zeros", func(t *testing.T) {
+		r := &reflectionRunner{lastResult: &reflection.RunResult{}}
+		data, err := json.Marshal(r.status())
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		assertKeysPresent(t, raw)
+		for _, k := range intKeys {
+			if string(raw[k]) != "0" {
+				t.Errorf("%s = %s, want 0", k, raw[k])
+			}
+		}
+		if string(raw["per_question_counts"]) != "[]" {
+			t.Errorf("per_question_counts = %s, want []", raw["per_question_counts"])
+		}
+	})
+
+	// nil lastResult: same guarantees (all zero, [] not null).
+	t.Run("nil_last_result_emits_zeros", func(t *testing.T) {
+		r := &reflectionRunner{}
+		data, err := json.Marshal(r.status())
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		assertKeysPresent(t, raw)
+		for _, k := range intKeys {
+			if string(raw[k]) != "0" {
+				t.Errorf("%s = %s, want 0", k, raw[k])
+			}
+		}
+		if string(raw["per_question_counts"]) != "[]" {
+			t.Errorf("per_question_counts = %s, want []", raw["per_question_counts"])
+		}
+	})
+
+	// Positive case: candidates came in and per-question counts surface.
+	t.Run("populated_run_surfaces_values", func(t *testing.T) {
+		r := &reflectionRunner{lastResult: &reflection.RunResult{
+			InputCount:                 7,
+			EvidenceCount:              5,
+			PerQuestionCounts:          []int{2, 3},
+			DialecticOkCount:           4,
+			DialecticDroppedNoEvidence: 1,
+			DialecticDroppedLowConf:    2,
+			InsightsWritten:            3,
+			InsightsSkipped:            1,
+			InsightsWriteFailed:        0,
+			DraftsWritten:              2,
+		}}
+		st := r.status()
+		if st.InputCount != 7 || st.EvidenceCount != 5 || st.DialecticOk != 4 ||
+			st.DialecticDroppedNoEvidence != 1 || st.DialecticDroppedLowConf != 2 ||
+			st.InsightsWritten != 3 || st.InsightsSkipped != 1 ||
+			st.InsightsWriteFailed != 0 || st.DraftsWritten != 2 {
+			t.Errorf("funnel counters not copied through: %+v", st)
+		}
+		data, err := json.Marshal(st)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		assertKeysPresent(t, raw)
+		if string(raw["per_question_counts"]) != "[2,3]" {
+			t.Errorf("per_question_counts = %s, want [2,3]", raw["per_question_counts"])
+		}
+		if string(raw["input_count"]) != "7" {
+			t.Errorf("input_count = %s, want 7", raw["input_count"])
+		}
+	})
+}

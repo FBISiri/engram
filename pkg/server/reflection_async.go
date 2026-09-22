@@ -49,6 +49,22 @@ type reflectionStatus struct {
 	Mode                 string   `json:"mode"`
 	Errors               []string `json:"errors"`
 	LastError            string   `json:"last_error"`
+
+	// Reflection funnel counters, mirrored verbatim from the last RunResult so a
+	// single /health poll can tell "no candidates came in" (InputCount==0) apart
+	// from "candidates came in but all filtered out" (InputCount>0,
+	// InsightsWritten==0). No omitempty: zero values MUST serialize as literal 0,
+	// and PerQuestionCounts MUST serialize as [] (never null) when empty.
+	InputCount                 int   `json:"input_count"`
+	EvidenceCount              int   `json:"evidence_count"`
+	PerQuestionCounts          []int `json:"per_question_counts"`
+	DialecticOk                int   `json:"dialectic_ok"`
+	DialecticDroppedNoEvidence int   `json:"dialectic_dropped_no_evidence"`
+	DialecticDroppedLowConf    int   `json:"dialectic_dropped_low_conf"`
+	InsightsWritten            int   `json:"insights_written"`
+	InsightsSkipped            int   `json:"insights_skipped"`
+	InsightsWriteFailed        int   `json:"insights_write_failed"`
+	DraftsWritten              int   `json:"drafts_written"`
 }
 
 // newRunID returns an 8-byte hex run identifier, falling back to a time-based
@@ -163,11 +179,12 @@ func (r *reflectionRunner) status() reflectionStatus {
 	defer r.mu.Unlock()
 
 	st := reflectionStatus{
-		Running:   r.running,
-		RunID:     r.runID,
-		LastRunID: r.lastRunID,
-		LastError: r.lastError,
-		Errors:    []string{},
+		Running:           r.running,
+		RunID:             r.runID,
+		LastRunID:         r.lastRunID,
+		LastError:         r.lastError,
+		Errors:            []string{},
+		PerQuestionCounts: []int{},
 	}
 	if !r.startedAt.IsZero() {
 		st.StartedAt = r.startedAt.Format(time.RFC3339)
@@ -185,6 +202,19 @@ func (r *reflectionRunner) status() reflectionStatus {
 		if len(r.lastResult.Errors) > 0 {
 			st.Errors = r.lastResult.Errors
 		}
+		// Funnel counters (no omitempty on the target struct; zeros serialize as 0).
+		st.InputCount = r.lastResult.InputCount
+		st.EvidenceCount = r.lastResult.EvidenceCount
+		if len(r.lastResult.PerQuestionCounts) > 0 {
+			st.PerQuestionCounts = append([]int{}, r.lastResult.PerQuestionCounts...)
+		}
+		st.DialecticOk = r.lastResult.DialecticOkCount
+		st.DialecticDroppedNoEvidence = r.lastResult.DialecticDroppedNoEvidence
+		st.DialecticDroppedLowConf = r.lastResult.DialecticDroppedLowConf
+		st.InsightsWritten = r.lastResult.InsightsWritten
+		st.InsightsSkipped = r.lastResult.InsightsSkipped
+		st.InsightsWriteFailed = r.lastResult.InsightsWriteFailed
+		st.DraftsWritten = r.lastResult.DraftsWritten
 	}
 	return st
 }

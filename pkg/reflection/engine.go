@@ -173,28 +173,28 @@ type RunResult struct {
 	// V2 fields (populated when Mode == "v2").
 	Mode            string   `json:"mode"`                      // "v1-flat" | "v2-focal"
 	FocalQuestions  []string `json:"focal_questions,omitempty"` // V2 only
-	EvidenceCount   int      `json:"evidence_count,omitempty"`  // V2: evidence set size
+	EvidenceCount   int      `json:"evidence_count"`            // V2: evidence set size
 	LLMCalls        int      `json:"llm_calls"`                 // total LLM calls
 	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`     // estimated USD cost
 
 	// V2 Part2 fields: per-question evidence retrieval observability.
 	EvidenceOverlap   int   `json:"evidence_overlap,omitempty"`
-	PerQuestionCounts []int `json:"per_question_counts,omitempty"`
+	PerQuestionCounts []int `json:"per_question_counts"`
 	DroppedNoEvidence int   `json:"dropped_no_evidence,omitempty"`
 	EvidenceSearchMs  int64 `json:"evidence_search_ms,omitempty"`
 
 	// V2 Part3 fields: dialectic insight observability.
-	DialecticOkCount           int   `json:"dialectic_ok_count,omitempty"`
+	DialecticOkCount           int   `json:"dialectic_ok_count"`
 	DialecticFailedCount       int   `json:"dialectic_failed_count,omitempty"`
-	DialecticDroppedNoEvidence int   `json:"dialectic_dropped_no_evidence,omitempty"`
-	DialecticDroppedLowConf    int   `json:"dialectic_dropped_low_conf,omitempty"`
+	DialecticDroppedNoEvidence int   `json:"dialectic_dropped_no_evidence"`
+	DialecticDroppedLowConf    int   `json:"dialectic_dropped_low_conf"`
 	DialecticLLMCalls          int   `json:"dialectic_llm_calls,omitempty"`
 	DialecticLLMMs             int64 `json:"dialectic_llm_ms,omitempty"`
 
 	// V2 Day5 fields: write-back observability.
-	InsightsWritten     int   `json:"insights_written,omitempty"`
-	InsightsSkipped     int   `json:"insights_skipped,omitempty"`
-	InsightsWriteFailed int   `json:"insights_write_failed,omitempty"`
+	InsightsWritten     int   `json:"insights_written"`
+	InsightsSkipped     int   `json:"insights_skipped"`
+	InsightsWriteFailed int   `json:"insights_write_failed"`
 	WriteBackMs         int64 `json:"write_back_ms,omitempty"`
 
 	// §1.1 v0.3: LLM confidence parsing counters (both V1 and V2 paths).
