@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
@@ -15,6 +16,14 @@ const (
 	reflectionLastRunFile = "reflection_last_run"
 	reflectionMaxPerDay   = 3
 	reflectionDailyFile   = "reflection_daily_count"
+
+	// Failure-aware backoff state (separate mechanism from LLM retry/backoff).
+	reflectionLastAttemptFile  = "reflection_last_attempt"         // RFC3339 timestamp
+	reflectionFailureCountFile = "reflection_consecutive_failures" // integer text
+
+	// failureBackoffBase / failureBackoffCap parameterise computeFailureBackoff.
+	failureBackoffBase = 40 * time.Minute
+	failureBackoffCap  = 6 * time.Hour
 )
 
 // siriDirPath returns the Siri state dir, creating it if needed.
@@ -24,13 +33,15 @@ func siriDirPath() (string, error) {
 
 // CheckResult is the output of a trigger check.
 type CheckResult struct {
-	ShouldTrigger       bool    `json:"should_trigger"`
-	SkipReason          string  `json:"skip_reason,omitempty"`
-	UnreflectedCount    int     `json:"unreflected_count"`
-	AccumulatedImportance float64 `json:"accumulated_importance"`
-	Threshold           float64 `json:"threshold"`
-	HoursSinceLastRun   float64 `json:"hours_since_last_run"`
-	RunsToday           int     `json:"runs_today"`
+	ShouldTrigger           bool    `json:"should_trigger"`
+	SkipReason              string  `json:"skip_reason,omitempty"`
+	UnreflectedCount        int     `json:"unreflected_count"`
+	AccumulatedImportance   float64 `json:"accumulated_importance"`
+	Threshold               float64 `json:"threshold"`
+	HoursSinceLastRun       float64 `json:"hours_since_last_run"`
+	RunsToday               int     `json:"runs_today"`
+	ConsecutiveFailures     int     `json:"consecutive_failures"`
+	FailureBackoffRemaining float64 `json:"failure_backoff_remaining_minutes,omitempty"`
 }
 
 // check evaluates whether reflection should run now.
@@ -53,6 +64,14 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 		dailyCount = 0
 	}
 	result.RunsToday = dailyCount
+
+	// Read consecutive-failure count early so ConsecutiveFailures is always
+	// populated for observability even when a gate blocks execution.
+	failCount, err := readFailureCount(filepath.Join(dir, reflectionFailureCountFile))
+	if err != nil {
+		failCount = 0
+	}
+	result.ConsecutiveFailures = failCount
 
 	// Gate 1: Time interval check.
 	lastRunPath := filepath.Join(dir, reflectionLastRunFile)
@@ -93,6 +112,23 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 	if gate1Blocked {
 		return result, nil, nil
 	}
+
+	// Failure backoff gate: after a run failed (all-429 etc.), lengthen the
+	// retry cadence so the scheduler stops hammering every interval. This is a
+	// SEPARATE mechanism from the LLM transient retry/backoff. Force bypasses it
+	// exactly like the other gates.
+	if failCount > 0 && !e.cfg.Force {
+		lastAttempt, _ := readTimestampFile(filepath.Join(dir, reflectionLastAttemptFile))
+		backoff := computeFailureBackoff(failCount)
+		if !lastAttempt.IsZero() && time.Since(lastAttempt) < backoff {
+			remaining := backoff - time.Since(lastAttempt)
+			result.FailureBackoffRemaining = remaining.Minutes()
+			result.SkipReason = fmt.Sprintf("failure backoff: %d consecutive failures, waiting %s (%.1fm remaining)",
+				failCount, backoff, remaining.Minutes())
+			return result, nil, nil
+		}
+	}
+
 	if gate2Blocked {
 		result.SkipReason = fmt.Sprintf("daily limit reached: %d/%d runs today", dailyCount, reflectionMaxPerDay)
 		return result, nil, nil
@@ -179,7 +215,81 @@ func updateLastRun() error {
 		return fmt.Errorf("write daily count: %w", err)
 	}
 
+	// Success clears any accumulated failure backoff (R3): reset consecutive
+	// failure count to 0 and stamp last-attempt = now.
+	if err := writeFailureCount(filepath.Join(dir, reflectionFailureCountFile), 0); err != nil {
+		return fmt.Errorf("reset failure count: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, reflectionLastAttemptFile),
+		[]byte(time.Now().UTC().Format(time.RFC3339)), 0644); err != nil {
+		return fmt.Errorf("write last attempt: %w", err)
+	}
+
 	return nil
+}
+
+// readFailureCount reads the consecutive-failure count from file.
+// Missing file → 0; unparseable → 0.
+func readFailureCount(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &n); err != nil {
+		return 0, nil
+	}
+	return n, nil
+}
+
+// writeFailureCount writes the consecutive-failure count to file.
+func writeFailureCount(path string, n int) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", n)), 0644)
+}
+
+// recordFailure increments the consecutive-failure count and stamps the
+// last-attempt time. Called when a reflection run produced no insights (all
+// failed), so the failure-backoff gate lengthens the retry cadence.
+func recordFailure() error {
+	dir, err := siriDirPath()
+	if err != nil {
+		return err
+	}
+	countPath := filepath.Join(dir, reflectionFailureCountFile)
+	n, _ := readFailureCount(countPath)
+	n++
+	if err := writeFailureCount(countPath, n); err != nil {
+		return fmt.Errorf("write failure count: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, reflectionLastAttemptFile),
+		[]byte(time.Now().UTC().Format(time.RFC3339)), 0644); err != nil {
+		return fmt.Errorf("write last attempt: %w", err)
+	}
+	return nil
+}
+
+// computeFailureBackoff returns the failure-backoff duration for n consecutive
+// failures. PURE function (no I/O). n<=0 → 0. Exponential: base 40m doubling
+// each additional failure, capped at 6h. n=1→40m, n=2→80m, n=3→160m,
+// n=4→320m, n>=5→capped 6h.
+func computeFailureBackoff(n int) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	backoff := failureBackoffBase
+	for i := 1; i < n; i++ {
+		backoff *= 2
+		if backoff >= failureBackoffCap {
+			return failureBackoffCap
+		}
+	}
+	if backoff > failureBackoffCap {
+		return failureBackoffCap
+	}
+	return backoff
 }
 
 // readTimestampFile reads a RFC3339 timestamp from a file. Returns zero time if not found.

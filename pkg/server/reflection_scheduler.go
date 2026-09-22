@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/reflection"
@@ -66,9 +68,92 @@ func (s *Server) StartReflectionScheduler(ctx context.Context, interval ...time.
 	fmt.Fprintf(os.Stderr, "[reflection-scheduler] started (interval: %s)\n", iv)
 }
 
+// defaultReflectionWindow is the quiet-hour window during which the scheduler
+// is allowed to trigger reflection runs. Overridable via ENGRAM_REFLECTION_WINDOW.
+const defaultReflectionWindow = "22:00-01:00"
+
+// parseReflectionWindow parses a "HH:MM-HH:MM" spec into minutes-since-midnight
+// for start and end. PURE, no globals. Errors on malformed input.
+func parseReflectionWindow(spec string) (startMin, endMin int, err error) {
+	parts := strings.Split(spec, "-")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid window %q: want HH:MM-HH:MM", spec)
+	}
+	startMin, err = parseHHMM(parts[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	endMin, err = parseHHMM(parts[1])
+	if err != nil {
+		return 0, 0, err
+	}
+	return startMin, endMin, nil
+}
+
+// parseHHMM parses "HH:MM" into minutes-since-midnight, validating ranges.
+func parseHHMM(s string) (int, error) {
+	hm := strings.Split(strings.TrimSpace(s), ":")
+	if len(hm) != 2 {
+		return 0, fmt.Errorf("invalid time %q: want HH:MM", s)
+	}
+	h, err := strconv.Atoi(hm[0])
+	if err != nil || h < 0 || h > 23 {
+		return 0, fmt.Errorf("invalid hour in %q", s)
+	}
+	m, err := strconv.Atoi(hm[1])
+	if err != nil || m < 0 || m > 59 {
+		return 0, fmt.Errorf("invalid minute in %q", s)
+	}
+	return h*60 + m, nil
+}
+
+// inReflectionWindow reports whether now (its minutes-since-midnight) falls in
+// [startMin, endMin). Supports midnight wrap: if start>end the window spans
+// midnight. start==end is treated as always-open (full day). End-exclusive.
+func inReflectionWindow(now time.Time, startMin, endMin int) bool {
+	nowMin := now.Hour()*60 + now.Minute()
+	if startMin == endMin {
+		return true // always open
+	}
+	if startMin < endMin {
+		return nowMin >= startMin && nowMin < endMin
+	}
+	// Wrap across midnight.
+	return nowMin >= startMin || nowMin < endMin
+}
+
+// reflectionWindowLocation returns the timezone used for the quiet window.
+func reflectionWindowLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*3600)
+	}
+	return loc
+}
+
 // evaluateAndMaybeRun checks the reflection trigger once and, when it fires,
 // starts a run via the shared single-flight runner.
 func (s *Server) evaluateAndMaybeRun(ctx context.Context) {
+	// Quiet-window gate: restrict scheduler triggering to a configured hour
+	// window (default 22:00-01:00 Asia/Shanghai). A parse error fails OPEN so a
+	// typo can't permanently disable reflection.
+	spec := os.Getenv("ENGRAM_REFLECTION_WINDOW")
+	if spec == "" {
+		spec = defaultReflectionWindow
+	}
+	tz := reflectionWindowLocation()
+	if startMin, endMin, err := parseReflectionWindow(spec); err != nil {
+		slog.Warn("reflection scheduler: invalid window spec, running anyway (fail-open)",
+			"window", spec, "error", err.Error())
+	} else {
+		now := time.Now().In(tz)
+		if !inReflectionWindow(now, startMin, endMin) {
+			slog.Info("reflection scheduler: outside quiet window",
+				"window", spec, "now", now.Format("15:04"))
+			return
+		}
+	}
+
 	eng := reflection.NewEngine(s.store, s.embedder, s.reflectionConfig())
 	res, err := eng.Check(ctx)
 	if err != nil {

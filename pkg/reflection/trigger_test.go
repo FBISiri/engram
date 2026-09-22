@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -504,5 +505,73 @@ func TestReadTimestampFile_CorruptedContent_FallsBackToMtime(t *testing.T) {
 	}
 	if time.Since(ts) > 10*time.Second {
 		t.Errorf("mtime fallback should be recent, got %v", ts)
+	}
+}
+
+// ── Failure-aware backoff (Task B) ──────────────────────────────────────────
+
+func TestCheck_FailureBackoff_LengthensCadence(t *testing.T) {
+	// (a) computeFailureBackoff strictly grows until the cap.
+	if computeFailureBackoff(1) <= 20*time.Minute {
+		t.Errorf("computeFailureBackoff(1)=%v, want > 20m", computeFailureBackoff(1))
+	}
+	if computeFailureBackoff(2) <= computeFailureBackoff(1) {
+		t.Errorf("backoff(2)=%v not > backoff(1)=%v", computeFailureBackoff(2), computeFailureBackoff(1))
+	}
+	if computeFailureBackoff(3) <= computeFailureBackoff(2) {
+		t.Errorf("backoff(3)=%v not > backoff(2)=%v", computeFailureBackoff(3), computeFailureBackoff(2))
+	}
+	if computeFailureBackoff(100) != 6*time.Hour {
+		t.Errorf("computeFailureBackoff(100)=%v, want cap 6h", computeFailureBackoff(100))
+	}
+
+	// (b) With failures=2 and a recent last_attempt, Check() must block.
+	cfg := Config{Threshold: 10, MinIntervalH: 2.0, MaxInputSize: 20}
+	eng, store := makeEngine(t, cfg)
+	for i := 0; i < 5; i++ {
+		addMemory(store, 5, false) // 25 > 10, and no last_run so Gate 1 passes
+	}
+	dir, _ := siriDirPath()
+	if err := writeFailureCount(filepath.Join(dir, reflectionFailureCountFile), 2); err != nil {
+		t.Fatalf("writeFailureCount: %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, reflectionLastAttemptFile),
+		[]byte(time.Now().UTC().Format(time.RFC3339)), 0644)
+
+	result, err := eng.Check(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ShouldTrigger {
+		t.Error("expected ShouldTrigger=false during failure backoff, got true")
+	}
+	if !strings.Contains(result.SkipReason, "failure backoff") {
+		t.Errorf("expected SkipReason mentioning 'failure backoff', got %q", result.SkipReason)
+	}
+	if result.ConsecutiveFailures != 2 {
+		t.Errorf("expected ConsecutiveFailures=2, got %d", result.ConsecutiveFailures)
+	}
+
+	// (c) Same setup but last_attempt far in the past → backoff elapsed → trigger.
+	old := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	_ = os.WriteFile(filepath.Join(dir, reflectionLastAttemptFile), []byte(old), 0644)
+	result, err = eng.Check(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.ShouldTrigger {
+		t.Errorf("expected ShouldTrigger=true after backoff elapsed, skip_reason=%q", result.SkipReason)
+	}
+
+	// (d) Success resets the failure count.
+	if err := updateLastRun(); err != nil {
+		t.Fatalf("updateLastRun: %v", err)
+	}
+	n, err := readFailureCount(filepath.Join(dir, reflectionFailureCountFile))
+	if err != nil {
+		t.Fatalf("readFailureCount: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected failure count reset to 0 after success, got %d", n)
 	}
 }

@@ -155,6 +155,10 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 		} else {
 			result.Errors = append(result.Errors,
 				"no insights produced (all failed) — sources not marked to allow retry")
+			if err := recordFailure(); err != nil {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("record failure failed: %v", err))
+			}
 		}
 	} else {
 		result.InsightsWritten = 0
