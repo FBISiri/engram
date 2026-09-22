@@ -93,18 +93,25 @@ type transientRetryConfig struct {
 // always uses the numbers below.
 //
 // JUSTIFICATION: the whole async reflection run has a 30-minute ctx budget
-// (pkg/server/reflection_async.go:111) and min-interval is measured in hours; a
-// run makes ~1 focal + N per-question dialectic LLM calls. A 90s per-call
-// transient budget with 4 attempts keeps even a ~6-call run (≈9min worst case)
-// well inside the 30min run budget, so a run can never hang behind backoff,
-// while still riding out a short 429 burst. Each call gets its own fresh 90s
-// budget; the caller ctx bounds the total via min-semantics (WithTimeout).
+// (pkg/server/reflection_async.go:111) while the upstream (api.anthropic.com)
+// rate-limit window is minutes-to-hours. The earlier 90s/4-attempt/20s-cap
+// policy exhausted all 4 attempts in seconds (the first minute-scale backoff
+// exceeded the 90s remaining deadline and the loop broke immediately), so it
+// never actually rode out a real 429 burst. This policy is minute-scale: 8
+// attempts, 60s base, 120s per-sleep cap, bounded by an 8-minute totalBudget.
+// Full-jitter sleeps between attempts sum to a theoretical worst case of
+// 60s + 6*120s = 13min, but the WithTimeout deadline HARD-CAPS total backoff at
+// the 8-minute totalBudget, which lands in the 5-10min target and stays
+// comfortably (<30min) inside the run budget so a single call can never hang
+// the run. maxBackoff=120s lets one sleep reach 2min so backoff actually bites
+// against a minute-scale window. Each call gets its own fresh budget; the caller
+// ctx bounds the total via min-semantics (WithTimeout).
 var defaultTransientRetryConfig = func() transientRetryConfig {
 	return transientRetryConfig{
-		maxAttempts: 4,
-		baseBackoff: 1 * time.Second,
-		maxBackoff:  20 * time.Second,
-		totalBudget: 90 * time.Second,
+		maxAttempts: 8,
+		baseBackoff: 60 * time.Second,
+		maxBackoff:  120 * time.Second,
+		totalBudget: 8 * time.Minute,
 	}
 }
 
@@ -160,6 +167,11 @@ func callWithTransientRetry(ctx context.Context, prompt string, budget int, stag
 		lastStatus int
 		retryAfter string
 		attempts   int
+
+		// Set only when the loop stops because a server-requested Retry-After
+		// exceeded the remaining budget (see below); named in the final error.
+		overReq       time.Duration
+		overRemaining time.Duration
 	)
 
 	for attempt := 0; attempt < cfg.maxAttempts; attempt++ {
@@ -203,13 +215,24 @@ func callWithTransientRetry(ctx context.Context, prompt string, budget int, stag
 		}
 
 		wait := cfg.backoffFor(attempt)
+		serverRequested := false
 		if lastStatus == 429 {
 			if ra, ok := llm.ParseRetryAfter(retryAfter, time.Now()); ok {
 				wait = ra
+				serverRequested = true
 			}
 		}
-		if wait > time.Until(deadline) {
-			// Can't fit another backoff+attempt within the budget: stop.
+		remaining := time.Until(deadline)
+		if wait > remaining {
+			// Can't fit another backoff+attempt within the budget: fail fast
+			// rather than sleeping past the deadline or busy-looping. A
+			// server-requested Retry-After larger than the remaining budget is
+			// NOT silently swallowed — it is recorded and named in the returned
+			// error so the caller sees exactly how long the upstream asked us to
+			// wait vs. how much budget was left.
+			if serverRequested {
+				overReq, overRemaining = wait, remaining
+			}
 			break
 		}
 		if err := cfg.sleep(ctx, wait); err != nil {
@@ -219,6 +242,10 @@ func callWithTransientRetry(ctx context.Context, prompt string, budget int, stag
 
 	elapsed := time.Since(start)
 	if lastStatus == 429 {
+		if overReq > 0 {
+			return lastResp, lastMeta, fmt.Errorf("llm rate limited (429): Retry-After %s exceeds remaining budget %s after %d attempts over %s: %w",
+				overReq.Round(time.Second), overRemaining.Round(time.Millisecond), attempts, elapsed.Round(time.Millisecond), lastErr)
+		}
 		return lastResp, lastMeta, fmt.Errorf("llm rate limited (429): exhausted %d attempts over %s: %w",
 			attempts, elapsed.Round(time.Millisecond), lastErr)
 	}

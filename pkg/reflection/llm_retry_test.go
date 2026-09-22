@@ -27,6 +27,93 @@ func fastTransientCfg(sleeps *[]time.Duration) transientRetryConfig {
 	}
 }
 
+func TestDefaultTransientRetryConfig_BackoffUnderRunBudget(t *testing.T) {
+	// INVARIANT: the max total backoff implied by the PRODUCTION policy must be
+	// strictly less than the reflection run budget (30min, per
+	// pkg/server/reflection_async.go:111). Assert against
+	// defaultTransientRetryConfig() itself so any future retune that breaks the
+	// bound fails CI. Uses cfg.backoffFor math (rand=1.0) — no real sleeping.
+	const runBudget = 30 * time.Minute
+	cfg := defaultTransientRetryConfig()
+	cfg.rand = func() float64 { return 1.0 } // worst-case full-jitter sleeps
+
+	// Theoretical worst case: sum of the max backoff for every inter-attempt gap
+	// (attempts 0..maxAttempts-2; the last attempt never sleeps).
+	var sumMax time.Duration
+	for attempt := 0; attempt < cfg.maxAttempts-1; attempt++ {
+		sumMax += cfg.backoffFor(attempt)
+	}
+	if sumMax >= runBudget {
+		t.Errorf("sum of max backoffs %s >= run budget %s", sumMax, runBudget)
+	}
+
+	// The WithTimeout deadline HARD-CAPS actual total backoff at totalBudget, so
+	// that too must stay under the run budget.
+	if cfg.totalBudget >= runBudget {
+		t.Errorf("totalBudget %s >= run budget %s", cfg.totalBudget, runBudget)
+	}
+
+	// The effective (deadline-capped) worst-case total backoff.
+	effective := sumMax
+	if cfg.totalBudget < effective {
+		effective = cfg.totalBudget
+	}
+	if effective >= runBudget {
+		t.Errorf("effective max total backoff %s >= run budget %s", effective, runBudget)
+	}
+
+	// Sanity: policy must actually be minute-scale (guards against a regression
+	// back to the too-small budget that motivated this retune).
+	if cfg.baseBackoff < time.Minute {
+		t.Errorf("baseBackoff %s not minute-scale", cfg.baseBackoff)
+	}
+	if cfg.maxBackoff <= 20*time.Second {
+		t.Errorf("maxBackoff %s too low (single sleep can't reach minute scale)", cfg.maxBackoff)
+	}
+	if cfg.maxAttempts < 7 {
+		t.Errorf("maxAttempts %d too low", cfg.maxAttempts)
+	}
+}
+
+// Retry-After larger than the remaining budget is NOT silently swallowed: the
+// loop fails fast and the returned error names the requested delay.
+func TestCallWithTransientRetry_RetryAfterOverBudget(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		calls++
+		// Server asks for a 1h wait, far beyond the tiny totalBudget.
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, RetryAfter: "3600", Body: "rate"}
+	}
+	var sleeps []time.Duration
+	cfg := transientRetryConfig{
+		maxAttempts: 8, baseBackoff: time.Second, maxBackoff: 10 * time.Second,
+		totalBudget: 100 * time.Millisecond, rand: func() float64 { return 1.0 },
+		sleep: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			return nil
+		},
+	}
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("over-budget Retry-After must stop after 1 call, got %d", calls)
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("must not sleep past the deadline, got %v", sleeps)
+	}
+	msg := err.Error()
+	for _, want := range []string{"rate limited", "Retry-After", "1h0m0s", "exceeds remaining budget"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("over-budget error missing %q: %q", want, msg)
+		}
+	}
+}
+
 func TestTruncationError(t *testing.T) {
 	// Non-length finish reason => nil.
 	if err := truncationError("focal", llm.Meta{FinishReason: "stop"}); err != nil {
