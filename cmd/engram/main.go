@@ -104,6 +104,12 @@ func exitFor(err error) {
 	if errors.Is(err, errUnknownFlag) {
 		os.Exit(2)
 	}
+	// Exit code 3 is dedicated to a skill-diff partial failure: the run itself
+	// completed (report + log written) but one or more skill-diff proposals
+	// failed, so the run must not be able to look successful.
+	if errors.Is(err, dream.ErrSkillDiffPartial) {
+		os.Exit(3)
+	}
 	os.Exit(1)
 }
 
@@ -452,11 +458,13 @@ func dreamRun(cfg *config.Config) error {
 		Phase:  phase,
 	})
 
-	if err := eng.Run(ctx); err != nil {
+	// Run writes the report/log even on a skill-diff partial failure, so always
+	// print the structured log before propagating the run error (R2).
+	runErr := eng.Run(ctx)
+	if err := eng.PrintLog(); err != nil && runErr == nil {
 		return err
 	}
-
-	return eng.PrintLog()
+	return runErr
 }
 
 func printUsage() {
