@@ -131,7 +131,9 @@ func callAnthropic(ctx context.Context, cfg *config, prompt string, maxTokens in
 	if resp.StatusCode != http.StatusOK {
 		// Keep the "llm returned status %d" shape reflection/alerting keys off,
 		// plus a short token-free body excerpt so the failure is diagnosable.
-		return "", Meta{}, fmt.Errorf("llm returned status %d: %s", resp.StatusCode, bodyExcerpt(body))
+		// A typed StatusError lets reflection classify transient failures
+		// (429/5xx) and honour Retry-After.
+		return "", Meta{}, &StatusError{StatusCode: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), Body: bodyExcerpt(body)}
 	}
 
 	var apiResp struct {

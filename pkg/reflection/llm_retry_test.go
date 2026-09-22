@@ -5,9 +5,27 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FBISiri/engram/pkg/llm"
 )
+
+// fastTransientCfg returns a transientRetryConfig with a fake sleep that records
+// requested durations instead of sleeping, deterministic rand=1.0 (full backoff),
+// and a generous wall budget so tests run instantly with no real network/time.
+func fastTransientCfg(sleeps *[]time.Duration) transientRetryConfig {
+	return transientRetryConfig{
+		maxAttempts: 4,
+		baseBackoff: 1 * time.Millisecond,
+		maxBackoff:  10 * time.Millisecond,
+		totalBudget: 60 * time.Second,
+		rand:        func() float64 { return 1.0 },
+		sleep: func(_ context.Context, d time.Duration) error {
+			*sleeps = append(*sleeps, d)
+			return nil
+		},
+	}
+}
 
 func TestTruncationError(t *testing.T) {
 	// Non-length finish reason => nil.
@@ -119,5 +137,221 @@ func TestDialecticPath_RecordsTruncationNotParseError(t *testing.T) {
 	}
 	if !strings.Contains(msg, "truncated") {
 		t.Errorf("expected truncation wording, got %q", stats.Errors[0])
+	}
+}
+
+// (a) 429-then-200 succeeds: two calls, second result returned.
+func TestCallWithTransientRetry_429ThenOK(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	var sleeps []time.Duration
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, mt int) (string, llm.Meta, error) {
+		calls++
+		if calls == 1 {
+			return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+		}
+		return "full", llm.Meta{FinishReason: "stop", MaxTokens: mt}, nil
+	}
+
+	resp, meta, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", fastTransientCfg(&sleeps))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls)
+	}
+	if resp != "full" || meta.FinishReason != "stop" {
+		t.Errorf("expected success result, got resp=%q meta=%+v", resp, meta)
+	}
+	if len(sleeps) != 1 {
+		t.Errorf("expected 1 backoff sleep, got %v", sleeps)
+	}
+}
+
+// (b) Retry-After honoured: recorded sleep == 2s, not the computed backoff.
+func TestCallWithTransientRetry_RetryAfterHonoured(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	var sleeps []time.Duration
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, mt int) (string, llm.Meta, error) {
+		calls++
+		if calls == 1 {
+			return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, RetryAfter: "2", Body: "rate"}
+		}
+		return "ok", llm.Meta{FinishReason: "stop", MaxTokens: mt}, nil
+	}
+
+	if _, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", fastTransientCfg(&sleeps)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sleeps) != 1 || sleeps[0] != 2*time.Second {
+		t.Errorf("expected Retry-After 2s sleep, got %v", sleeps)
+	}
+}
+
+// (c) 5xx retried then 200.
+func TestCallWithTransientRetry_5xxRetried(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	var sleeps []time.Duration
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, mt int) (string, llm.Meta, error) {
+		calls++
+		if calls == 1 {
+			return "", llm.Meta{}, &llm.StatusError{StatusCode: 503, Body: "unavailable"}
+		}
+		return "ok", llm.Meta{FinishReason: "stop", MaxTokens: mt}, nil
+	}
+
+	resp, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", fastTransientCfg(&sleeps))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 || resp != "ok" {
+		t.Errorf("expected 5xx retried to success, calls=%d resp=%q", calls, resp)
+	}
+}
+
+// (d) 4xx-other NOT retried: returns on attempt 1, error surfaced.
+func TestCallWithTransientRetry_4xxNotRetried(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	var sleeps []time.Duration
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		calls++
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 400, Body: "bad request"}
+	}
+
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", fastTransientCfg(&sleeps))
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 call (no retry), got %d", calls)
+	}
+	if !strings.Contains(err.Error(), "llm returned status 400") {
+		t.Errorf("expected surfaced 400 error, got %q", err.Error())
+	}
+	if len(sleeps) != 0 {
+		t.Errorf("expected no sleeps, got %v", sleeps)
+	}
+}
+
+// (e) budget/ctx-cancel bounds: (1) fake sleep returns ctx.Err() -> loop stops;
+// (2) tiny totalBudget -> loop can't fit another sleep.
+func TestCallWithTransientRetry_CtxCancelBoundsLoop(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		calls++
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+	}
+	cfg := transientRetryConfig{
+		maxAttempts: 4, baseBackoff: time.Millisecond, maxBackoff: 10 * time.Millisecond,
+		totalBudget: 60 * time.Second, rand: func() float64 { return 1.0 },
+		sleep: func(_ context.Context, _ time.Duration) error { return context.Canceled },
+	}
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", cfg)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Fatalf("sleep-cancel must stop loop after 1 call, got %d", calls)
+	}
+}
+
+func TestCallWithTransientRetry_TinyBudgetBounds(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		calls++
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+	}
+	cfg := transientRetryConfig{
+		maxAttempts: 4, baseBackoff: time.Second, maxBackoff: 10 * time.Second,
+		totalBudget: 50 * time.Millisecond, rand: func() float64 { return 1.0 },
+		sleep: func(_ context.Context, _ time.Duration) error { return nil },
+	}
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", cfg)
+	if err == nil {
+		t.Fatal("expected exhaustion error")
+	}
+	if calls != 1 {
+		t.Fatalf("tiny budget must not fit another sleep, got %d calls", calls)
+	}
+}
+
+// (f) exhausted-429 error text: rate limited + attempt count + elapsed + status.
+func TestCallWithTransientRetry_Exhausted429ErrorText(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	var sleeps []time.Duration
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+	}
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", fastTransientCfg(&sleeps))
+	if err == nil {
+		t.Fatal("expected exhaustion error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"rate limited", "exhausted 4 attempts", "over", "llm returned status 429"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("exhaustion error missing %q: %q", want, msg)
+		}
+	}
+}
+
+// (g) length-doubling composes with a first-budget transient 429: 429 then
+// length at budget 4000, then success at doubled budget 8000.
+func TestCallLLMWithRetry_TransientThenLengthThenDoubledSuccess(t *testing.T) {
+	origSeam := callLLMMetaBudget
+	origCfg := defaultTransientRetryConfig
+	t.Cleanup(func() {
+		callLLMMetaBudget = origSeam
+		defaultTransientRetryConfig = origCfg
+	})
+
+	var sleeps []time.Duration
+	defaultTransientRetryConfig = func() transientRetryConfig { return fastTransientCfg(&sleeps) }
+
+	var budgets []int
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, mt int) (string, llm.Meta, error) {
+		calls++
+		budgets = append(budgets, mt)
+		switch calls {
+		case 1:
+			return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+		case 2:
+			return "trunc", llm.Meta{FinishReason: "length", MaxTokens: mt}, nil
+		default:
+			return "full", llm.Meta{FinishReason: "stop", MaxTokens: mt}, nil
+		}
+	}
+
+	resp, meta, err := callLLMWithRetry(context.Background(), "p", 4000, 8000, "dialectic q1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "full" || meta.FinishReason != "stop" {
+		t.Errorf("expected doubled-budget success, got resp=%q meta=%+v", resp, meta)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls (429, length, success), got %d", calls)
+	}
+	if len(budgets) != 3 || budgets[0] != 4000 || budgets[1] != 4000 || budgets[2] != 8000 {
+		t.Errorf("budget sequence = %v, want [4000 4000 8000]", budgets)
 	}
 }
