@@ -527,3 +527,22 @@ func TestMemoryReflectedAtQdrantRoundtrip(t *testing.T) {
 		}
 	})
 }
+
+// TestPointToMemory_SupersededBy verifies superseded_by round-trips through the
+// memoryToPoint → pointToMemory cycle so the supersession chain is readable.
+func TestPointToMemory_SupersededBy(t *testing.T) {
+	mem := &memory.Memory{
+		ID:           "11111111-1111-1111-1111-111111111111",
+		Type:         memory.TypeEvent,
+		Content:      "old",
+		Source:       "agent",
+		Importance:   5,
+		SupersededBy: "22222222-2222-2222-2222-222222222222",
+	}
+	vector := make([]float32, 4)
+	pt, _ := memoryToPoint(mem, vector)
+	restored := pointToMemory(pt.Id, pt.Payload)
+	if restored.SupersededBy != mem.SupersededBy {
+		t.Errorf("SupersededBy: got %q, want %q", restored.SupersededBy, mem.SupersededBy)
+	}
+}

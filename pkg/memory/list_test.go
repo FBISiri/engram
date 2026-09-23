@@ -271,3 +271,142 @@ func TestListMemories_SmallLimitReturnsNewest_InclusiveMultiPage(t *testing.T) {
 		}
 	}
 }
+
+// filterStore is a fake Store that applies created_at/collection/type/tags
+// filters and the IncludeSuperseded semantics, for ListSuperseded tests.
+type filterStore struct {
+	items []Memory
+}
+
+func (f *filterStore) Scroll(_ context.Context, opts ScrollOptions) ([]Memory, string, error) {
+	var out []Memory
+	for _, m := range f.items {
+		if !opts.IncludeSuperseded && m.SupersededBy != "" {
+			continue
+		}
+		if !fsMatch(m, opts.Filters) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, "", nil
+}
+
+func fsMatch(m Memory, filters []Filter) bool {
+	for _, fl := range filters {
+		switch fl.Field {
+		case FieldCreatedAt:
+			switch fl.Op {
+			case OpGte:
+				if m.CreatedAt < fl.Value.(float64) {
+					return false
+				}
+			case OpLte:
+				if m.CreatedAt > fl.Value.(float64) {
+					return false
+				}
+			}
+		case FieldCollection:
+			if fl.Op == OpIn && !fsInAny([]string{m.Collection}, fl.Value.([]string)) {
+				return false
+			}
+		case "type":
+			if fl.Op == OpIn && !fsInAny([]string{string(m.Type)}, fl.Value.([]string)) {
+				return false
+			}
+		case "tags":
+			if fl.Op == OpIn && !fsInAny(m.Tags, fl.Value.([]string)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func fsInAny(have, want []string) bool {
+	for _, w := range want {
+		for _, h := range have {
+			if h == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (f *filterStore) Insert(context.Context, *Memory, []float32) error { return nil }
+func (f *filterStore) Search(context.Context, []float32, SearchOptions) ([]ScoredMemory, error) {
+	return nil, nil
+}
+func (f *filterStore) Delete(context.Context, []string) (int, error)           { return 0, nil }
+func (f *filterStore) Update(context.Context, string, map[string]any) error    { return nil }
+func (f *filterStore) SearchByIDs(context.Context, []string) ([]Memory, error) { return nil, nil }
+func (f *filterStore) EnsureCollection(context.Context) error                  { return nil }
+func (f *filterStore) Stats(context.Context) (*CollectionStats, error)         { return nil, nil }
+func (f *filterStore) DeleteExpired(context.Context) (int, error)              { return 0, nil }
+
+func lsIDs(mems []Memory) []string {
+	ids := make([]string, len(mems))
+	for i, m := range mems {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
+func lsContains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestListSuperseded(t *testing.T) {
+	store := &filterStore{items: []Memory{
+		{ID: "A", Type: TypeEvent, Tags: []string{"x"}, CreatedAt: 100, Collection: "engram_user", SupersededBy: "B"},
+		{ID: "C", Type: TypeInsight, Tags: []string{"y"}, CreatedAt: 200, Collection: "engram_user", SupersededBy: "D"},
+		{ID: "E", Type: TypeEvent, Tags: []string{"x"}, CreatedAt: 300, Collection: "engram_reflection", SupersededBy: "F"},
+		{ID: "N", Type: TypeEvent, Tags: []string{"x"}, CreatedAt: 150, Collection: "engram_user"}, // not superseded
+	}}
+	ctx := context.Background()
+
+	// Only superseded returned.
+	got, err := ListSuperseded(ctx, store, ListSupersededOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := lsIDs(got)
+	if lsContains(ids, "N") {
+		t.Errorf("must exclude non-superseded N; ids=%v", ids)
+	}
+	for _, want := range []string{"A", "C", "E"} {
+		if !lsContains(ids, want) {
+			t.Errorf("want %s in %v", want, ids)
+		}
+	}
+
+	// Type filter narrows.
+	got, _ = ListSuperseded(ctx, store, ListSupersededOptions{Types: []string{"insight"}})
+	if ids = lsIDs(got); len(ids) != 1 || ids[0] != "C" {
+		t.Errorf("type filter: want [C], got %v", ids)
+	}
+
+	// Tag filter narrows.
+	got, _ = ListSuperseded(ctx, store, ListSupersededOptions{Tags: []string{"y"}})
+	if ids = lsIDs(got); len(ids) != 1 || ids[0] != "C" {
+		t.Errorf("tag filter: want [C], got %v", ids)
+	}
+
+	// Collection filter narrows.
+	got, _ = ListSuperseded(ctx, store, ListSupersededOptions{Collections: []string{"engram_reflection"}})
+	if ids = lsIDs(got); len(ids) != 1 || ids[0] != "E" {
+		t.Errorf("collection filter: want [E], got %v", ids)
+	}
+
+	// Time window narrows.
+	got, _ = ListSuperseded(ctx, store, ListSupersededOptions{TimeStart: 150, TimeEnd: 250})
+	if ids = lsIDs(got); len(ids) != 1 || ids[0] != "C" {
+		t.Errorf("time filter: want [C], got %v", ids)
+	}
+}

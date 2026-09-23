@@ -130,6 +130,10 @@ func (s *mockStore) Search(_ context.Context, vector []float32, opts memory.Sear
 		if opts.ExcludeArchived && sp.mem.LifecycleStatus == memory.LifecycleArchived {
 			continue
 		}
+		// Mirror qdrant: exclude superseded memories unless explicitly included.
+		if !opts.IncludeSuperseded && sp.mem.SupersededBy != "" {
+			continue
+		}
 		sim := cosineSimilarity(vector, sp.vector)
 		entries = append(entries, scoredEntry{mem: sp.mem, score: sim})
 	}
@@ -238,6 +242,10 @@ func (s *mockStore) Scroll(_ context.Context, opts memory.ScrollOptions) ([]memo
 			continue
 		}
 		if !matchFilters(sp.mem, opts.Filters) {
+			continue
+		}
+		// Mirror qdrant: exclude superseded memories unless explicitly included.
+		if !opts.IncludeSuperseded && sp.mem.SupersededBy != "" {
 			continue
 		}
 		results = append(results, sp.mem)

@@ -38,26 +38,28 @@ type Store interface {
 
 // ScrollOptions configures a filter-based scroll query (no vector needed).
 type ScrollOptions struct {
-	Limit   int
-	Filters []Filter
-	Offset  string // opaque offset token from previous Scroll call; empty for first page
+	Limit             int
+	Filters           []Filter
+	Offset            string // opaque offset token from previous Scroll call; empty for first page
+	IncludeSuperseded bool   // when true, superseded (superseded_by set) memories are NOT excluded
 }
 
 // SearchOptions configures a vector search query.
 type SearchOptions struct {
-	Limit           int
-	Filters         []Filter
-	ExcludeArchived bool // when true, memories with lifecycle_status="archived" are excluded
+	Limit             int
+	Filters           []Filter
+	ExcludeArchived   bool // when true, memories with lifecycle_status="archived" are excluded
+	IncludeSuperseded bool // when true, superseded (superseded_by set) memories are NOT excluded
 }
 
 // FilterOp is a filter operation.
 type FilterOp string
 
 const (
-	OpEq    FilterOp = "eq"
-	OpIn    FilterOp = "in"
-	OpGte   FilterOp = "gte"
-	OpLte   FilterOp = "lte"
+	OpEq      FilterOp = "eq"
+	OpIn      FilterOp = "in"
+	OpGte     FilterOp = "gte"
+	OpLte     FilterOp = "lte"
 	OpRange   FilterOp = "range"
 	OpIsEmpty FilterOp = "is_empty"
 	OpIsNull  FilterOp = "is_null"

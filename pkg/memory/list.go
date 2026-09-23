@@ -32,6 +32,9 @@ type ListMemoriesOptions struct {
 	TimeEnd     float64  // Unix ts upper bound; 0 = no upper bound.
 	Collections []string // logical collection names; empty = all collections.
 	Limit       int      // <= 0 => DefaultListLimit.
+	// IncludeSuperseded, when true, does NOT exclude superseded (superseded_by
+	// set) memories. AUDIT/TRACEABILITY use only; default false.
+	IncludeSuperseded bool
 }
 
 // BuildTimeWindowScrollOptions translates a time-window listing request into
@@ -57,7 +60,7 @@ func BuildTimeWindowScrollOptions(opts ListMemoriesOptions) ScrollOptions {
 		filters = append(filters, Filter{Field: FieldCollection, Op: OpIn, Value: opts.Collections})
 	}
 
-	return ScrollOptions{Limit: limit, Filters: filters}
+	return ScrollOptions{Limit: limit, Filters: filters, IncludeSuperseded: opts.IncludeSuperseded}
 }
 
 // ListMemories performs a filter-only, time-window listing: it paginates
@@ -134,6 +137,94 @@ func ListMemories(ctx context.Context, store Store, opts ListMemoriesOptions) ([
 
 	// Recent Memory view: keep the NEWEST `limit` entries (tail of the ascending
 	// slice); the returned slice stays ascending for chronological display.
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	return all, nil
+}
+
+// ListSupersededOptions describes an audit-only listing request that enumerates
+// ONLY superseded memories (superseded_by non-empty). Types/tags/time-window/
+// collections all become store-side Scroll filters.
+type ListSupersededOptions struct {
+	TimeStart   float64  // created_at lower bound; 0 = none
+	TimeEnd     float64  // created_at upper bound; 0 = none
+	Collections []string // logical collection names; empty = all (fan-out)
+	Types       []string // memory types; empty = all
+	Tags        []string // match ANY tag; empty = all
+	Limit       int      // <=0 => DefaultListLimit
+}
+
+// ListSuperseded enumerates ONLY memories whose SupersededBy is non-empty
+// (the complement of the default read paths). Implemented as forward
+// enumeration (Scroll with IncludeSuperseded=true) + in-Go superseded_by
+// filter — no new index. Audit/diagnostic use only.
+func ListSuperseded(ctx context.Context, store Store, opts ListSupersededOptions) ([]Memory, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+
+	var filters []Filter
+	if opts.TimeStart > 0 {
+		filters = append(filters, Filter{Field: FieldCreatedAt, Op: OpGte, Value: opts.TimeStart})
+	}
+	if opts.TimeEnd > 0 {
+		filters = append(filters, Filter{Field: FieldCreatedAt, Op: OpLte, Value: opts.TimeEnd})
+	}
+	if len(opts.Collections) > 0 {
+		filters = append(filters, Filter{Field: FieldCollection, Op: OpIn, Value: opts.Collections})
+	}
+	if len(opts.Types) > 0 {
+		filters = append(filters, Filter{Field: "type", Op: OpIn, Value: opts.Types})
+	}
+	if len(opts.Tags) > 0 {
+		filters = append(filters, Filter{Field: "tags", Op: OpIn, Value: opts.Tags})
+	}
+
+	scrollOpts := ScrollOptions{
+		Limit:             scrollPageSize,
+		Filters:           filters,
+		IncludeSuperseded: true,
+	}
+
+	var all []Memory
+	seen := make(map[string]struct{})
+	offset := ""
+	for {
+		pageOpts := scrollOpts
+		pageOpts.Offset = offset
+		page, next, err := store.Scroll(ctx, pageOpts)
+		if err != nil {
+			return nil, err
+		}
+
+		newInPage := 0
+		for _, m := range page {
+			if _, dup := seen[m.ID]; dup {
+				continue
+			}
+			seen[m.ID] = struct{}{}
+			newInPage++
+			if m.SupersededBy == "" {
+				continue // keep ONLY superseded entries
+			}
+			all = append(all, m)
+		}
+
+		if next == "" || newInPage == 0 {
+			break
+		}
+		offset = next
+	}
+
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt < all[j].CreatedAt
+		}
+		return all[i].ID < all[j].ID
+	})
+
 	if len(all) > limit {
 		all = all[len(all)-limit:]
 	}

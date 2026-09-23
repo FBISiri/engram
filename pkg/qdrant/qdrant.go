@@ -201,7 +201,9 @@ func (s *Store) Search(ctx context.Context, vector []float32, opts memory.Search
 		mustConds = append(mustConds, userFilter.Must...)
 	}
 	// Exclude superseded memories (superseded_by field is absent for valid memories).
-	mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	if !opts.IncludeSuperseded {
+		mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	}
 	// Exclude expired memories: MustNot (valid_until > 0 AND valid_until < now).
 	now := float64(time.Now().Unix())
 	mustNotConds := []*qdrant.Condition{
@@ -435,7 +437,9 @@ func (s *Store) Scroll(ctx context.Context, opts memory.ScrollOptions) ([]memory
 	if filter != nil {
 		mustConds = append(mustConds, filter.Must...)
 	}
-	mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	if !opts.IncludeSuperseded {
+		mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	}
 	now := float64(time.Now().Unix())
 	mustNotConds := []*qdrant.Condition{
 		qdrant.NewFilterAsCondition(&qdrant.Filter{
@@ -540,7 +544,9 @@ func (s *Store) ScrollWithVectors(ctx context.Context, opts memory.ScrollOptions
 	if filter != nil {
 		mustConds = append(mustConds, filter.Must...)
 	}
-	mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	if !opts.IncludeSuperseded {
+		mustConds = append(mustConds, qdrant.NewIsEmpty(fieldSupersededBy))
+	}
 	now := float64(time.Now().Unix())
 	mustNotConds := []*qdrant.Condition{
 		qdrant.NewFilterAsCondition(&qdrant.Filter{

@@ -173,16 +173,18 @@ func (s *Server) registerTools() {
 		mcp.WithArray("source_type", mcp.Description("Filter by provenance source_type (tool_output, reflection, web_search, user_input, calendar, document). Memories must match at least one."), mcp.WithStringItems()),
 		mcp.WithString("task_id", mcp.Description("Optional event-loop task identifier. Recorded in the trajectory log to join retrievals to task outcomes (Memory Worth analysis).")),
 		mcp.WithBoolean("include_archived", mcp.Description("If true, also return archived (soft-deleted) memories. Default: false (archived/soft-deleted entries are hidden).")),
+		mcp.WithBoolean("include_superseded", mcp.Description("AUDIT/TRACEABILITY ONLY \u2014 do NOT use for normal recall. If true, ALSO return superseded memories (those with a non-empty superseded_by pointing at their replacement); such stale entries are normally hidden. Default: false. Each returned item carries superseded_by so callers can spot stale content at a glance.")),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
 	// Tool 1b: memory_list — filter-only time-window listing (no vector search).
 	listTool := mcp.NewTool("memory_list",
-		mcp.WithDescription("List memories within a time window without semantic search (no embedding cost). Filter-only pass-through to the store's scroll query. Excludes superseded/expired entries. Results are sorted by created_at ascending. Each entry includes source_collection identifying which collection it came from."),
+		mcp.WithDescription("List memories within a time window without semantic search (no embedding cost). Filter-only pass-through to the store's scroll query. Superseded and expired entries are EXCLUDED BY DEFAULT; superseded entries can be included via include_superseded (AUDIT-ONLY \u2014 not for normal recall). Results are sorted by created_at ascending. Each entry includes source_collection identifying which collection it came from, and superseded_by (non-empty => stale/replaced)."),
 		mcp.WithNumber("time_start", mcp.Description("List memories created at or after this Unix timestamp.")),
 		mcp.WithNumber("time_end", mcp.Description("List memories created at or before this Unix timestamp.")),
 		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: all collections (fan-out)."), mcp.WithStringItems()),
 		mcp.WithNumber("limit", mcp.Description("Maximum number of entries to return. Default: 50. Values above 100 are capped to 100.")),
+		mcp.WithBoolean("include_superseded", mcp.Description("AUDIT/TRACEABILITY ONLY \u2014 do NOT use for normal recall. If true, ALSO return superseded memories (those with a non-empty superseded_by pointing at their replacement); such stale entries are normally hidden. Default: false. Each returned item carries superseded_by so callers can spot stale content at a glance.")),
 	)
 	s.mcpServer.AddTool(listTool, s.handleList)
 
@@ -233,6 +235,25 @@ func (s *Server) registerTools() {
 		mcp.WithString("id", mcp.Required(), mcp.Description("Exact id of the memory to soft-delete (archive).")),
 	)
 	s.mcpServer.AddTool(deleteByIDTool, s.handleDeleteByID)
+
+	// Tool 4b-get: memory_get_by_id — read-only fetch by exact id (no cosine, no hide filters).
+	getByIDTool := mcp.NewTool("memory_get_by_id",
+		mcp.WithDescription("Read a single memory by its exact id (READ-ONLY, non-destructive). Bypasses all similarity thresholds AND the superseded/archived hide filters, so it can retrieve a superseded or soft-deleted memory that memory_search/memory_list will not surface. The returned object includes superseded_by (non-empty => this memory was replaced; follow it to the successor). Unlike memory_delete_by_id / memory_update_by_id this makes NO changes."),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Exact id of the memory to fetch.")),
+	)
+	s.mcpServer.AddTool(getByIDTool, s.handleGetByID)
+
+	// Tool 4b-superseded: memory_list_superseded — read-only audit listing of superseded memories.
+	listSupersededTool := mcp.NewTool("memory_list_superseded",
+		mcp.WithDescription("AUDIT/TRACEABILITY ONLY \u2014 do NOT use for normal recall. Lists memories that HAVE BEEN SUPERSEDED (superseded_by is non-empty, i.e. replaced by a newer memory) \u2014 the complement of normal search/list. Use this to diagnose a memory that was (mis)marked as superseded and has become invisible to memory_search/memory_list. Every returned item carries a non-empty superseded_by pointing at its replacement, so stale content is identifiable at a glance. Supports collections/types/tags/time-window filters and a limit."),
+		mcp.WithNumber("time_start", mcp.Description("List memories created at or after this Unix timestamp.")),
+		mcp.WithNumber("time_end", mcp.Description("List memories created at or before this Unix timestamp.")),
+		mcp.WithArray("collections", mcp.Description("Filter by collection names (e.g. engram_user, engram_reflection). Default: all collections (fan-out)."), mcp.WithStringItems()),
+		mcp.WithArray("types", mcp.Description("Filter by memory types (identity, event, insight, directive)."), mcp.WithStringItems()),
+		mcp.WithArray("tags", mcp.Description("Filter by tags. Memories must have at least one matching tag."), mcp.WithStringItems()),
+		mcp.WithNumber("limit", mcp.Description("Maximum number of entries to return. Default: 50, capped at 100.")),
+	)
+	s.mcpServer.AddTool(listSupersededTool, s.handleListSuperseded)
 
 	// Tool 4c: memory_update_by_id — reliable correction by exact id (no cosine).
 	updateByIDTool := mcp.NewTool("memory_update_by_id",
@@ -329,6 +350,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	// R3: by default MCP search hides archived (soft-deleted) memories, matching
 	// REST vector search. Set include_archived=true to surface them.
 	includeArchived := request.GetBool("include_archived", false)
+	includeSuperseded := request.GetBool("include_superseded", false)
 
 	// Build filters
 	var filters []memory.Filter
@@ -431,9 +453,10 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	results, err := s.store.Search(ctx, vec, memory.SearchOptions{
-		Limit:           fetchLimit,
-		Filters:         filters,
-		ExcludeArchived: !includeArchived,
+		Limit:             fetchLimit,
+		Filters:           filters,
+		ExcludeArchived:   !includeArchived,
+		IncludeSuperseded: includeSuperseded,
 	})
 	if err != nil {
 		span.RecordError(err)
@@ -492,6 +515,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		Metadata            map[string]any `json:"metadata,omitempty"`
 		SourceCollection    string         `json:"source_collection"`
 		SourceType          string         `json:"source_type,omitempty"`
+		SupersededBy        string         `json:"superseded_by,omitempty"`
 	}
 
 	output := make([]searchResult, len(results))
@@ -517,6 +541,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			Metadata:            r.Metadata,
 			SourceCollection:    collectionOrFallback(r.Collection, collection.CollectionUser),
 			SourceType:          sourceTypeFromMetadata(r.Metadata),
+			SupersededBy:        r.SupersededBy,
 		}
 	}
 
@@ -579,10 +604,11 @@ func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*
 	}
 
 	opts := memory.ListMemoriesOptions{
-		TimeStart:   request.GetFloat("time_start", 0),
-		TimeEnd:     request.GetFloat("time_end", 0),
-		Collections: collections,
-		Limit:       limit,
+		TimeStart:         request.GetFloat("time_start", 0),
+		TimeEnd:           request.GetFloat("time_end", 0),
+		Collections:       collections,
+		Limit:             limit,
+		IncludeSuperseded: request.GetBool("include_superseded", false),
 	}
 
 	mems, err := memory.ListMemories(ctx, s.store, opts)
@@ -602,6 +628,7 @@ func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*
 		SourceCollection string         `json:"source_collection"`
 		Metadata         map[string]any `json:"metadata,omitempty"`
 		SourceType       string         `json:"source_type,omitempty"`
+		SupersededBy     string         `json:"superseded_by,omitempty"`
 	}
 
 	output := make([]listResult, len(mems))
@@ -616,6 +643,7 @@ func (s *Server) handleList(ctx context.Context, request mcp.CallToolRequest) (*
 			SourceCollection: collectionOrFallback(m.Collection, collection.CollectionUser),
 			Metadata:         m.Metadata,
 			SourceType:       sourceTypeFromMetadata(m.Metadata),
+			SupersededBy:     m.SupersededBy,
 		}
 	}
 
@@ -1662,6 +1690,135 @@ func byIDNotFound(id string) *mcp.CallToolResult {
 	}
 	data, _ := json.Marshal(result)
 	return mcp.NewToolResultText(string(data))
+}
+
+// memoryReadItem is the read-only JSON shape shared by memory_get_by_id and
+// memory_list_superseded. It always exposes superseded_by so a supersession
+// chain is dereferenceable.
+type memoryReadItem struct {
+	ID               string         `json:"id"`
+	Type             string         `json:"type"`
+	Content          string         `json:"content"`
+	Source           string         `json:"source"`
+	Importance       float64        `json:"importance"`
+	Tags             []string       `json:"tags"`
+	CreatedAt        float64        `json:"created_at"`
+	UpdatedAt        float64        `json:"updated_at"`
+	ValidUntil       float64        `json:"valid_until,omitempty"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+	SourceCollection string         `json:"source_collection"`
+	SourceType       string         `json:"source_type,omitempty"`
+	SupersededBy     string         `json:"superseded_by,omitempty"`
+}
+
+// toMemoryReadItem projects a memory.Memory into the read-only item shape.
+func toMemoryReadItem(m memory.Memory) memoryReadItem {
+	return memoryReadItem{
+		ID:               m.ID,
+		Type:             string(m.Type),
+		Content:          m.Content,
+		Source:           m.Source,
+		Importance:       m.Importance,
+		Tags:             m.Tags,
+		CreatedAt:        m.CreatedAt,
+		UpdatedAt:        m.UpdatedAt,
+		ValidUntil:       m.ValidUntil,
+		Metadata:         m.Metadata,
+		SourceCollection: collectionOrFallback(m.Collection, collection.CollectionUser),
+		SourceType:       sourceTypeFromMetadata(m.Metadata),
+		SupersededBy:     m.SupersededBy,
+	}
+}
+
+// handleGetByID implements memory_get_by_id: a READ-ONLY fetch by exact id via
+// SearchByIDs (no vector search, no cosine, no superseded/archived hide filter).
+// Respects isolation: an isolated caller may only read its own collection.
+func (s *Server) handleGetByID(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := request.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+
+	mems, err := s.store.SearchByIDs(ctx, []string{id})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+	}
+	if len(mems) == 0 {
+		return mcp.NewToolResultText("null"), nil
+	}
+
+	m := mems[0]
+	// ISOLATION: an isolated caller may not read another collection by id.
+	if own, isolated := isolatedCaller(ctx); isolated && m.Collection != own {
+		return mcp.NewToolResultText("null"), nil
+	}
+
+	data, err := json.Marshal(toMemoryReadItem(m))
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// handleListSuperseded implements memory_list_superseded: a READ-ONLY audit
+// listing of memories whose superseded_by is non-empty. Respects isolation.
+func (s *Server) handleListSuperseded(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	limit := request.GetInt("limit", memory.DefaultListLimit)
+	if limit <= 0 {
+		limit = memory.DefaultListLimit
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Resolve collection scope (same isolation logic as handleList).
+	var collections []string
+	if own, isolated := isolatedCaller(ctx); isolated {
+		collections = []string{own}
+	} else if cols := getStringSlice(request, "collections"); len(cols) > 0 {
+		for _, col := range cols {
+			if _, ok := collection.DefaultRegistry.Get(col); !ok {
+				return mcp.NewToolResultError(fmt.Sprintf("unknown collection: %s", col)), nil
+			}
+		}
+		collections = cols
+	}
+
+	// Validate types against the memory type set.
+	types := getStringSlice(request, "types")
+	for _, t := range types {
+		if !memory.ValidTypes[memory.MemoryType(t)] {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid memory type: %s", t)), nil
+		}
+	}
+
+	opts := memory.ListSupersededOptions{
+		TimeStart:   request.GetFloat("time_start", 0),
+		TimeEnd:     request.GetFloat("time_end", 0),
+		Collections: collections,
+		Types:       types,
+		Tags:        getStringSlice(request, "tags"),
+		Limit:       limit,
+	}
+
+	mems, err := memory.ListSuperseded(ctx, s.store, opts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("scroll error: %v", err)), nil
+	}
+
+	output := make([]memoryReadItem, len(mems))
+	for i, m := range mems {
+		output[i] = toMemoryReadItem(m)
+	}
+	if len(output) == 0 {
+		return mcp.NewToolResultText("[]"), nil
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
 }
 
 // =============================================================================
