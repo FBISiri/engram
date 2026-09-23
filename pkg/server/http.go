@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/collection"
+	"github.com/FBISiri/engram/pkg/llm"
 	"github.com/FBISiri/engram/pkg/metrics"
 	"github.com/FBISiri/engram/pkg/reflection"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -234,6 +235,7 @@ type healthResponse struct {
 	MemoryCount      map[string]uint64       `json:"memory_count,omitempty"`
 	LastReflection   *reflection.CheckResult `json:"last_reflection,omitempty"`
 	ReflectionRunner *reflectionStatus       `json:"reflection_runner,omitempty"`
+	LastRatelimit    *llm.RateLimitSnapshot  `json:"last_ratelimit,omitempty"`
 	EmbeddingLatency *embeddingLatency       `json:"embedding_latency,omitempty"`
 }
 
@@ -291,6 +293,10 @@ func (h *HTTPServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if h.srv.reflectionRunner != nil {
 		st := h.srv.reflectionRunner.status()
 		resp.ReflectionRunner = &st
+	}
+
+	if snap := llm.LastRateLimit(); snap != nil {
+		resp.LastRatelimit = snap
 	}
 
 	if h.srv.metrics != nil {

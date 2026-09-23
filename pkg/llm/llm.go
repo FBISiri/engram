@@ -243,7 +243,7 @@ func callOpenRouter(ctx context.Context, cfg *config, prompt string, maxTokens i
 		// Read a short body excerpt so the typed StatusError is diagnosable, and
 		// align to the "llm returned status %d: " prefix the anthropic path uses.
 		body, _ := io.ReadAll(resp.Body)
-		return "", Meta{}, &StatusError{StatusCode: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), Body: bodyExcerpt(body)}
+		return "", Meta{}, newStatusError(providerOpenRouter, resp, body)
 	}
 
 	body, err := io.ReadAll(resp.Body)

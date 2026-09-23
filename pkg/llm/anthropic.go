@@ -133,7 +133,7 @@ func callAnthropic(ctx context.Context, cfg *config, prompt string, maxTokens in
 		// plus a short token-free body excerpt so the failure is diagnosable.
 		// A typed StatusError lets reflection classify transient failures
 		// (429/5xx) and honour Retry-After.
-		return "", Meta{}, &StatusError{StatusCode: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), Body: bodyExcerpt(body)}
+		return "", Meta{}, newStatusError(providerAnthropic, resp, body)
 	}
 
 	var apiResp struct {

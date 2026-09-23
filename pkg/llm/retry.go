@@ -19,6 +19,8 @@ type StatusError struct {
 	StatusCode int
 	RetryAfter string
 	Body       string
+	// RateLimit is populated for 429 responses; nil otherwise.
+	RateLimit *RateLimitSnapshot
 }
 
 func (e *StatusError) Error() string {
