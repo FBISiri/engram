@@ -300,7 +300,11 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 
 	start := time.Now()
 	result := &RunResult{DryRun: e.cfg.DryRun, Mode: mode + "-flat"}
-	defer func() { setRunSpanAttributes(span, result) }()
+	runSucceeded := false
+	defer func() {
+		setRunSpanAttributes(span, result)
+		finalizeFailureAccounting(result, runSucceeded)
+	}()
 
 	// Evaluate trigger conditions.
 	checkResult, unreflected, err := e.check(ctx)
@@ -498,13 +502,10 @@ func (e *Engine) Run(ctx context.Context) (*RunResult, error) {
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("update last run failed: %v", err))
 			}
+			runSucceeded = true
 		} else {
 			result.Errors = append(result.Errors,
 				"no insights produced — sources not marked to allow retry")
-			if err := recordFailure(); err != nil {
-				result.Errors = append(result.Errors,
-					fmt.Sprintf("record failure failed: %v", err))
-			}
 		}
 	} else {
 		// Dry run: no writes occurred; keep counters at zero.

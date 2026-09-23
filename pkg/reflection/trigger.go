@@ -271,6 +271,37 @@ func recordFailure() error {
 	return nil
 }
 
+// finalizeFailureAccounting is the SINGLE unified exit point for failure-backoff
+// accounting. Run/RunV2 defer it so EVERY error early-return path (Stage 1
+// generateFocalQuestions failure, dialectic failure, "no insights produced",
+// LLM call failure, unparseable insights, …) funnels through one place instead
+// of scattered recordFailure() calls that the dominant 429 path bypassed.
+//
+// Classification:
+//   - result==nil or !Triggered  → no-op. A gated skip (min-interval, daily
+//     cap, below-threshold, no memories, check error) is neither success nor
+//     failure and must not touch the counter.
+//   - succeeded==true            → no-op. The run marked sources and
+//     updateLastRun() already reset the counter to 0.
+//   - DryRun                      → no-op. A diagnostic dry run (never the
+//     scheduler, which sets DryRun=false) must not corrupt the real backoff
+//     state even if its Stage 1 call hits a 429.
+//   - Triggered, not succeeded, and produced ≥1 error → count it as a
+//     consecutive failure and stamp last_attempt so the backoff gate lengthens
+//     the cadence. A benign post-trigger skip that sets SkipReason but no Errors
+//     (e.g. "no unreflected memories available") is NOT a failure.
+func finalizeFailureAccounting(result *RunResult, succeeded bool) {
+	if result == nil || !result.Triggered || succeeded || result.DryRun {
+		return
+	}
+	if len(result.Errors) == 0 {
+		return
+	}
+	if err := recordFailure(); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("record failure failed: %v", err))
+	}
+}
+
 // computeFailureBackoff returns the failure-backoff duration for n consecutive
 // failures. PURE function (no I/O). n<=0 → 0. Exponential: base 40m doubling
 // each additional failure, capped at 6h. n=1→40m, n=2→80m, n=3→160m,

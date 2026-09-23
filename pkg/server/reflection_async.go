@@ -126,15 +126,11 @@ func (r *reflectionRunner) start(
 
 		result, err := fn(ctx)
 
+		logErr := reflectionRunLogError(err, result)
+
 		r.mu.Lock()
 		r.lastResult = result
-		if err != nil {
-			r.lastError = err.Error()
-		} else if result != nil && len(result.Errors) > 0 {
-			r.lastError = summarizeReflectionErrors(result.Errors)
-		} else {
-			r.lastError = ""
-		}
+		r.lastError = logErr
 		r.lastRunAt = time.Now()
 		r.lastRunID = id
 		r.mu.Unlock()
@@ -148,15 +144,31 @@ func (r *reflectionRunner) start(
 			created = result.InsightsCreated
 			dur = result.Duration
 		}
-		errStr := ""
-		if err != nil {
-			errStr = err.Error()
-		}
+		// A run that returned err==nil but populated result.Errors (the dominant
+		// Stage 1 429 mode: RunV2 returns result,nil) is a FAILED run. logErr is
+		// derived from result.Errors in that case so journalctl never renders a
+		// failed run as a successful one with error="".
 		slog.Info("reflection run finished",
-			"run_id", id, "insights_created", created, "duration", dur, "error", errStr)
+			"run_id", id, "insights_created", created, "duration", dur, "error", logErr)
 	}()
 
 	return true, id, at
+}
+
+// reflectionRunLogError derives the single error string that represents a
+// reflection run's outcome for BOTH the runner's LastError field and the
+// "reflection run finished" structured log. A transport error (err!=nil) wins;
+// otherwise a nil error with a populated result.Errors (the Stage 1 429 mode
+// where RunV2 returns result,nil) is condensed via summarizeReflectionErrors so
+// a failed run is never logged with error="". Success → "".
+func reflectionRunLogError(err error, result *reflection.RunResult) string {
+	if err != nil {
+		return err.Error()
+	}
+	if result != nil && len(result.Errors) > 0 {
+		return summarizeReflectionErrors(result.Errors)
+	}
+	return ""
 }
 
 // summarizeReflectionErrors condenses a reflection run's Errors slice into a

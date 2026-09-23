@@ -20,7 +20,11 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 
 	start := time.Now()
 	result := &RunResult{DryRun: e.cfg.DryRun, Mode: "v2-focal"}
-	defer func() { setRunSpanAttributes(span, result) }()
+	runSucceeded := false
+	defer func() {
+		setRunSpanAttributes(span, result)
+		finalizeFailureAccounting(result, runSucceeded)
+	}()
 
 	checkResult, unreflected, err := e.check(ctx)
 	if err != nil {
@@ -152,13 +156,10 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 				result.Errors = append(result.Errors,
 					fmt.Sprintf("update last run failed: %v", err))
 			}
+			runSucceeded = true
 		} else {
 			result.Errors = append(result.Errors,
 				"no insights produced (all failed) — sources not marked to allow retry")
-			if err := recordFailure(); err != nil {
-				result.Errors = append(result.Errors,
-					fmt.Sprintf("record failure failed: %v", err))
-			}
 		}
 	} else {
 		result.InsightsWritten = 0
