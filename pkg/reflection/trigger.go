@@ -3,6 +3,7 @@ package reflection
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -299,6 +300,16 @@ func finalizeFailureAccounting(result *RunResult, succeeded bool) {
 	}
 	if err := recordFailure(); err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("record failure failed: %v", err))
+		return
+	}
+	// Active alert layer: read the freshly-incremented count and emit a signal
+	// with the next backoff and the most recent rate-limit snapshot so a degraded
+	// run is visible without scraping counters.
+	if dir, derr := siriDirPath(); derr == nil {
+		if n, rerr := readFailureCount(filepath.Join(dir, reflectionFailureCountFile)); rerr == nil {
+			log.Printf("[reflection][ALERT] reflection run failed: %d consecutive failures, next backoff %s (last_ratelimit=%s)",
+				n, computeFailureBackoff(n), formatLastRateLimit())
+		}
 	}
 }
 

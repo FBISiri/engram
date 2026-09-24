@@ -60,7 +60,7 @@ func TestFailureAccounting_Stage1_429_Reachable(t *testing.T) {
 		FocalInputSize: 50,
 		FocalQuestions: 3,
 	}
-	eng, store := makeEngine(t, cfg) // makeEngine also sets HOME=tempdir, but ENGRAM_STATE_DIR wins
+	eng, store := makeEngineWithEmbedder(t, cfg, &mockEmbedder{dim: 8}) // ENGRAM_STATE_DIR wins over HOME
 	// Enough unreflected importance to trigger, and >= minEvidenceCount sources.
 	for i := 0; i < 5; i++ {
 		addMemory(store, 10, false) // 5*10 = 50 > threshold 10

@@ -81,6 +81,13 @@ type transientRetryConfig struct {
 	maxBackoff  time.Duration // per-sleep cap
 	totalBudget time.Duration // TOTAL wall bound across all attempts
 
+	// max429NoRetryAfter bails early after this many CONSECUTIVE 429s that gave
+	// no within-budget Retry-After guidance (missing Retry-After, or one that
+	// exceeds the remaining budget). 0 = disabled. Preserves the run budget for
+	// Stages 2/3 when the upstream is in a long throttle window the retry loop
+	// cannot ride out anyway.
+	max429NoRetryAfter int
+
 	// sleep is injectable; nil => real ctx-aware sleep. It must be ctx-aware and
 	// return ctx.Err() if ctx is done before d elapses.
 	sleep func(ctx context.Context, d time.Duration) error
@@ -106,12 +113,18 @@ type transientRetryConfig struct {
 // the run. maxBackoff=120s lets one sleep reach 2min so backoff actually bites
 // against a minute-scale window. Each call gets its own fresh budget; the caller
 // ctx bounds the total via min-semantics (WithTimeout).
+//
+// max429NoRetryAfter=2 adds an early-bail: after 2 consecutive 429s that give no
+// within-budget Retry-After to ride out, stop burning the run budget on a
+// throttle window the loop cannot outlast, so the degraded Stage-1 fallback path
+// can still run Stages 2/3.
 var defaultTransientRetryConfig = func() transientRetryConfig {
 	return transientRetryConfig{
-		maxAttempts: 8,
-		baseBackoff: 60 * time.Second,
-		maxBackoff:  120 * time.Second,
-		totalBudget: 8 * time.Minute,
+		maxAttempts:        8,
+		baseBackoff:        60 * time.Second,
+		maxBackoff:         120 * time.Second,
+		totalBudget:        8 * time.Minute,
+		max429NoRetryAfter: 2,
 	}
 }
 
@@ -168,6 +181,11 @@ func callWithTransientRetry(ctx context.Context, prompt string, budget int, stag
 		retryAfter string
 		attempts   int
 
+		// R2 early-bail accounting: count consecutive 429s with no within-budget
+		// Retry-After guidance; bail once it reaches cfg.max429NoRetryAfter.
+		no429Guidance int
+		earlyBail     bool
+
 		// Set only when the loop stops because a server-requested Retry-After
 		// exceeded the remaining budget (see below); named in the final error.
 		overReq       time.Duration
@@ -223,6 +241,20 @@ func callWithTransientRetry(ctx context.Context, prompt string, budget int, stag
 			}
 		}
 		remaining := time.Until(deadline)
+		if cfg.max429NoRetryAfter > 0 {
+			if lastStatus == 429 && (!serverRequested || wait > remaining) {
+				no429Guidance++
+				if no429Guidance >= cfg.max429NoRetryAfter {
+					if serverRequested && wait > remaining {
+						overReq, overRemaining = wait, remaining
+					}
+					earlyBail = true
+					break
+				}
+			} else {
+				no429Guidance = 0
+			}
+		}
 		if wait > remaining {
 			// Can't fit another backoff+attempt within the budget: fail fast
 			// rather than sleeping past the deadline or busy-looping. A
@@ -242,6 +274,10 @@ func callWithTransientRetry(ctx context.Context, prompt string, budget int, stag
 
 	elapsed := time.Since(start)
 	if lastStatus == 429 {
+		if earlyBail {
+			return lastResp, lastMeta, fmt.Errorf("llm rate limited (429): bailed early after %d consecutive 429s with no within-budget Retry-After to preserve run budget (%d attempts over %s): %w",
+				no429Guidance, attempts, elapsed.Round(time.Millisecond), lastErr)
+		}
 		if overReq > 0 {
 			return lastResp, lastMeta, fmt.Errorf("llm rate limited (429): Retry-After %s exceeds remaining budget %s after %d attempts over %s: %w",
 				overReq.Round(time.Second), overRemaining.Round(time.Millisecond), attempts, elapsed.Round(time.Millisecond), lastErr)

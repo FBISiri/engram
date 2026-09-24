@@ -68,9 +68,17 @@ func (e *Engine) RunV2(ctx context.Context) (*RunResult, error) {
 	questions, err := generateFocalQuestions(ctx, batch, numQuestions)
 	result.LLMCalls++
 	if err != nil {
-		result.Errors = append(result.Errors, fmt.Sprintf("focal question generation failed: %v", err))
-		result.Duration = formatDuration(time.Since(start))
-		return result, nil
+		fbQuestions, source := focalFallbackQuestions(numQuestions)
+		result.FocalFallback = true
+		result.FocalFallbackSource = source
+		result.Errors = append(result.Errors, fmt.Sprintf(
+			"focal question generation failed: %v (degraded: continuing with %s fallback questions)", err, source))
+		// R3 active signal on the degraded OUTPUT path:
+		log.Printf("[reflection][ALERT] degraded run: focal Stage 1 failed, continuing with %s fallback questions (last_ratelimit=%s): %v",
+			source, formatLastRateLimit(), err)
+		questions = fbQuestions
+	} else if perr := persistFocalQuestions(questions); perr != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("persist focal questions failed: %v", perr))
 	}
 	result.FocalQuestions = questions
 

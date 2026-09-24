@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FBISiri/engram/pkg/embedding"
 	"github.com/FBISiri/engram/pkg/memory"
 )
 
@@ -92,9 +93,15 @@ func (s *triggerMockStore) DeleteExpired(_ context.Context) (int, error) { retur
 // config, and overrides the ~/.siri directory to a temp dir so tests don't
 // touch the real filesystem.
 func makeEngine(t *testing.T, cfg Config) (*Engine, *triggerMockStore) {
+	return makeEngineWithEmbedder(t, cfg, nil)
+}
+
+// makeEngineWithEmbedder is makeEngine with an explicit embedder, for tests that
+// exercise stages past Stage 1 (e.g. the degraded focal-fallback path).
+func makeEngineWithEmbedder(t *testing.T, cfg Config, embedder embedding.Embedder) (*Engine, *triggerMockStore) {
 	t.Helper()
 	store := newTriggerMockStore()
-	eng := NewEngine(store, nil, cfg)
+	eng := NewEngine(store, embedder, cfg)
 	// Override home → temp dir so siriDirPath() creates files under t.TempDir().
 	t.Setenv("HOME", t.TempDir())
 	return eng, store

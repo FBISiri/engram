@@ -400,6 +400,68 @@ func TestCallWithTransientRetry_Exhausted429ErrorText(t *testing.T) {
 	}
 }
 
+// R2: max429NoRetryAfter>0 bails early after N consecutive 429s that give no
+// within-budget Retry-After, with a DISTINCT error; =0 keeps old exhaustion.
+func TestCallWithTransientRetry_EarlyBailNoRetryAfter(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		calls++
+		// Always 429 with NO Retry-After header.
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+	}
+	var sleeps []time.Duration
+	cfg := transientRetryConfig{
+		maxAttempts: 8, baseBackoff: time.Millisecond, maxBackoff: 10 * time.Millisecond,
+		totalBudget: 60 * time.Second, rand: func() float64 { return 1.0 },
+		max429NoRetryAfter: 2,
+		sleep: func(_ context.Context, d time.Duration) error {
+			sleeps = append(sleeps, d)
+			return nil
+		},
+	}
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", cfg)
+	if err == nil {
+		t.Fatal("expected early-bail error")
+	}
+	// attempt 0: count=1 (sleeps once), attempt 1: count=2 -> bail before sleep.
+	if calls != 2 {
+		t.Fatalf("expected bail after 2 calls, got %d", calls)
+	}
+	if !strings.Contains(err.Error(), "bailed early") {
+		t.Errorf("expected distinct early-bail message, got %q", err.Error())
+	}
+}
+
+// R2 guard: max429NoRetryAfter=0 (fastTransientCfg) still exhausts all attempts
+// with the OLD exhaustion message — early-bail branch stays disabled.
+func TestCallWithTransientRetry_EarlyBailDisabledExhausts(t *testing.T) {
+	orig := callLLMMetaBudget
+	t.Cleanup(func() { callLLMMetaBudget = orig })
+
+	calls := 0
+	callLLMMetaBudget = func(_ context.Context, _ string, _ int) (string, llm.Meta, error) {
+		calls++
+		return "", llm.Meta{}, &llm.StatusError{StatusCode: 429, Body: "rate"}
+	}
+	var sleeps []time.Duration
+	_, _, err := callWithTransientRetry(context.Background(), "p", 4000, "focal", fastTransientCfg(&sleeps))
+	if err == nil {
+		t.Fatal("expected exhaustion error")
+	}
+	if calls != 4 {
+		t.Fatalf("expected all 4 attempts, got %d", calls)
+	}
+	if strings.Contains(err.Error(), "bailed early") {
+		t.Errorf("early-bail must be disabled at max429NoRetryAfter=0, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "exhausted 4 attempts") {
+		t.Errorf("expected old exhaustion message, got %q", err.Error())
+	}
+}
+
 // (g) length-doubling composes with a first-budget transient 429: 429 then
 // length at budget 4000, then success at doubled budget 8000.
 func TestCallLLMWithRetry_TransientThenLengthThenDoubledSuccess(t *testing.T) {

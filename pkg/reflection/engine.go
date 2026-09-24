@@ -173,6 +173,12 @@ type RunResult struct {
 	// V2 fields (populated when Mode == "v2").
 	Mode            string   `json:"mode"`                      // "v1-flat" | "v2-focal"
 	FocalQuestions  []string `json:"focal_questions,omitempty"` // V2 only
+
+	// FocalFallback marks a DEGRADED V2 run where Stage 1 focal question
+	// generation failed (e.g. 429) and the run continued with fallback
+	// questions instead of losing Stages 2/3 entirely.
+	FocalFallback       bool   `json:"focal_fallback,omitempty"`
+	FocalFallbackSource string `json:"focal_fallback_source,omitempty"` // "persisted" | "preset"
 	EvidenceCount   int      `json:"evidence_count"`            // V2: evidence set size
 	LLMCalls        int      `json:"llm_calls"`                 // total LLM calls
 	LLMCostEstimate float64  `json:"llm_cost_estimate_usd"`     // estimated USD cost
