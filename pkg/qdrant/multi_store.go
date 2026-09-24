@@ -354,7 +354,10 @@ func (m *MultiStore) ScrollExpired(ctx context.Context, opts memory.ScrollOption
 	return all, "", nil
 }
 
-// DeleteExpired removes expired memories from all physical collections.
+// DeleteExpired removes expired memories from all physical collections. Each
+// underlying Store applies its own expiry dwell window (G4): expired points are
+// only hard-deleted after clearing the decision-age grace. The returned count
+// is the number of points actually deleted this tick across all collections.
 func (m *MultiStore) DeleteExpired(ctx context.Context) (int, error) {
 	total := 0
 	for _, s := range m.stores {

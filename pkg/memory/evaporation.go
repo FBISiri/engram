@@ -27,8 +27,15 @@ type EvaporationConfig struct {
 	DryRun     bool   `json:"dry_run"`     // when true the sweep performs no store.Update
 	DecayBasis string `json:"decay_basis"` // "last_access" (default) | "created"
 
-	MinAgeDays      float64 `json:"min_age_days"`     // P8: never evaporate younger than this
-	ObservationDays float64 `json:"observation_days"` // window between deprecate and delete-eligible
+	MinAgeDays      float64 `json:"min_age_days"`     // P8: never evaporate younger than this (OBJECT AGE, from created_at)
+	ObservationDays float64 `json:"observation_days"` // deprecate->delete-eligible window for the policy path (DECISION AGE, from deprecated_at)
+	// NOTE (G4): neither of the two fields above governs the store-level
+	// expiry/GC hard-delete path. That path uses its OWN independent DECISION-AGE
+	// grace, the expiry dwell window (ENGRAM_EXPIRY_DWELL_HOURS, default 72h,
+	// measured from a persisted expiry_eligible_at stamp; see pkg/qdrant
+	// Store.dwellWindow / DeleteExpired). Object age (MinAgeDays) and decision age
+	// (ObservationDays / the dwell window) are orthogonal: never make one
+	// parameter serve both roles.
 
 	// Protection rule parameters (P1..P7).
 	ProtectImportance       float64      `json:"protect_importance"`         // P2

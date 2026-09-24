@@ -49,6 +49,15 @@ func hasTag(tags []string, target string) bool {
 }
 
 // isExpiryCandidate returns true if m is eligible for policy-based deletion.
+//
+// G4 decision: this policy path is NOT gated by the store-level expiry DWELL
+// window. It is only reachable via the human-triggered HTTP handlers
+// (DELETE /memories/expired, dry_run by default, confirm=true required, with a
+// pre-deletion markdown snapshot), and its evaporation-deprecated branch already
+// enforces a decision-age grace via ObservationDays. The dwell window instead
+// guards the UNATTENDED automatic path (runExpiryTick -> store.DeleteExpired),
+// which previously had zero grace. Adding the dwell here would double-gate an
+// already human-supervised, snapshotted operation.
 func isExpiryCandidate(m *memory.Memory, cfg memory.EvaporationConfig, now time.Time) bool {
 	// Evaporation-deprecated memories are candidates ONLY once they have
 	// cleared BOTH the protection rules and the observation window (spec §4.4,

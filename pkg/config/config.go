@@ -19,6 +19,15 @@ type Config struct {
 	QdrantURL    string
 	QdrantAPIKey string
 	QdrantUseTLS bool
+	// ExpiryDwellWindow surfaces ENGRAM_EXPIRY_DWELL_HOURS (default 72h) for
+	// config visibility/consistency. This is the store-level expiry/GC DWELL
+	// grace: a DECISION-AGE window measured from the moment a memory became
+	// delete-eligible (persisted expiry_eligible_at stamp), ORTHOGONAL to every
+	// object-age threshold (created_at / Evaporation.MinAgeDays /
+	// Evaporation.ObservationDays / policy maxAgeDays). Visibility mirror only:
+	// pkg/qdrant.New reads ENGRAM_EXPIRY_DWELL_HOURS directly (pkg/qdrant cannot
+	// import pkg/config), so this field mirrors rather than feeds that value.
+	ExpiryDwellWindow time.Duration
 
 	// Embedding
 	EmbedderProvider   string // "openai" | "voyage"
@@ -138,6 +147,7 @@ func Load() *Config {
 		QdrantURL:    envStr("ENGRAM_QDRANT_URL", "localhost:6334"),
 		QdrantAPIKey: envStr("ENGRAM_QDRANT_API_KEY", ""),
 		QdrantUseTLS: envBool("ENGRAM_QDRANT_USE_TLS", false),
+		ExpiryDwellWindow: time.Duration(envFloat("ENGRAM_EXPIRY_DWELL_HOURS", 72) * float64(time.Hour)),
 
 		// Embedding
 		EmbedderProvider:   envStr("ENGRAM_EMBEDDER_PROVIDER", "openai"),

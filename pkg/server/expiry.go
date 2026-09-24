@@ -66,6 +66,13 @@ func StartExpiryCleanup(ctx context.Context, store memory.Store, interval time.D
 // The breakdown is a best-effort snapshot at scan time: a memory could expire
 // in the tiny window between the scan and the delete. This is observability,
 // not a guarantee.
+//
+// ATTRIBUTION DELTA (G4): scanExpiring counts every memory that is EXPIRED
+// (valid_until in the past), i.e. the delete-eligible candidate set. DeleteExpired
+// now returns only the count ACTUALLY deleted this tick — expired points still
+// inside the expiry dwell window (or being stamped for the first time) are
+// skipped and will be deleted on a later tick. So n <= sum(byCollection); the
+// per-collection/per-reason maps describe candidates, not deletions.
 func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetrics.Metrics, t time.Time) {
 	byCollection, byReason, evapByType := scanExpiring(ctx, store, t)
 
