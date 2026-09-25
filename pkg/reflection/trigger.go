@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,17 @@ const (
 	// failureBackoffBase / failureBackoffCap parameterise computeFailureBackoff.
 	failureBackoffBase = 40 * time.Minute
 	failureBackoffCap  = 6 * time.Hour
+
+	// Circuit-breaker knobs (separate from failure backoff): after a threshold
+	// of consecutive failures the scheduler stops evaluating (open) until a
+	// cooldown elapses, then allows ONE probe run.
+	envBreakerThreshold     = "ENGRAM_REFLECTION_BREAKER_THRESHOLD"
+	envBreakerCooldownH     = "ENGRAM_REFLECTION_BREAKER_COOLDOWN_H"
+	defaultBreakerThreshold = 4
+	defaultBreakerCooldownH = 24.0
+
+	// reflectionPausedFile pauses ONLY the periodic scheduler when present.
+	reflectionPausedFile = "reflection_paused"
 )
 
 // siriDirPath returns the Siri state dir, creating it if needed.
@@ -43,6 +55,7 @@ type CheckResult struct {
 	RunsToday               int     `json:"runs_today"`
 	ConsecutiveFailures     int     `json:"consecutive_failures"`
 	FailureBackoffRemaining float64 `json:"failure_backoff_remaining_minutes,omitempty"`
+	CircuitOpen             bool    `json:"circuit_open"`
 }
 
 // check evaluates whether reflection should run now.
@@ -114,11 +127,35 @@ func (e *Engine) check(ctx context.Context) (*CheckResult, []memory.Memory, erro
 		return result, nil, nil
 	}
 
+	// Circuit-breaker gate: after a threshold of consecutive failures, stop
+	// evaluating entirely (open) until a cooldown elapses, then allow ONE probe
+	// run to fall through to the normal gates. Placed BEFORE the failure-backoff
+	// gate so it wins. Force bypasses it exactly like the other gates.
+	probing := false
+	if !e.cfg.Force {
+		threshold := breakerThreshold()
+		cooldown := breakerCooldown()
+		lastAttempt, _ := readTimestampFile(filepath.Join(dir, reflectionLastAttemptFile))
+		open, probeAllowed := circuitState(failCount, threshold, lastAttempt, cooldown, time.Now())
+		if open {
+			result.CircuitOpen = true
+			if !probeAllowed {
+				result.SkipReason = fmt.Sprintf("circuit open: %d consecutive failures >= threshold %d; reset %s to 0 or wait cooldown %s",
+					failCount, threshold, filepath.Join(dir, reflectionFailureCountFile), cooldown)
+				return result, nil, nil
+			}
+			// Half-open: allow ONE probe run past the failure-backoff gate. A
+			// failed probe re-stamps last_attempt (recordFailure), so the next
+			// probe waits another cooldown; success resets the counter to 0.
+			probing = true
+		}
+	}
+
 	// Failure backoff gate: after a run failed (all-429 etc.), lengthen the
 	// retry cadence so the scheduler stops hammering every interval. This is a
 	// SEPARATE mechanism from the LLM transient retry/backoff. Force bypasses it
 	// exactly like the other gates.
-	if failCount > 0 && !e.cfg.Force {
+	if failCount > 0 && !e.cfg.Force && !probing {
 		lastAttempt, _ := readTimestampFile(filepath.Join(dir, reflectionLastAttemptFile))
 		backoff := computeFailureBackoff(failCount)
 		if !lastAttempt.IsZero() && time.Since(lastAttempt) < backoff {
@@ -305,12 +342,115 @@ func finalizeFailureAccounting(result *RunResult, succeeded bool) {
 	// Active alert layer: read the freshly-incremented count and emit a signal
 	// with the next backoff and the most recent rate-limit snapshot so a degraded
 	// run is visible without scraping counters.
-	if dir, derr := siriDirPath(); derr == nil {
-		if n, rerr := readFailureCount(filepath.Join(dir, reflectionFailureCountFile)); rerr == nil {
-			log.Printf("[reflection][ALERT] reflection run failed: %d consecutive failures, next backoff %s (last_ratelimit=%s)",
-				n, computeFailureBackoff(n), formatLastRateLimit())
+	dir, derr := siriDirPath()
+	if derr != nil {
+		return
+	}
+	countPath := filepath.Join(dir, reflectionFailureCountFile)
+	n, _ := readFailureCount(countPath)
+	// Fast-trip: credential/billing errors (401/402/403) are non-transient by
+	// nature; open the breaker immediately (bump count to >= threshold) instead
+	// of climbing the exponential backoff ladder. Detection is string-based:
+	// RunResult carries errors as strings only, so we match the exact prefix
+	// "llm returned status <code>" that (*llm.StatusError).Error() produces.
+	if code := creditErrorStatus(result.Errors); code != 0 {
+		threshold := breakerThreshold()
+		if n < threshold {
+			n = threshold
+			if werr := writeFailureCount(countPath, n); werr != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("fast-trip write failed: %v", werr))
+			}
+		}
+		log.Printf("[reflection][ALERT] fast-trip: llm status %d (credential/billing) — opening circuit at %d failures (threshold %d)",
+			code, n, threshold)
+	}
+	log.Printf("[reflection][ALERT] reflection run failed: %d consecutive failures, next backoff %s (last_ratelimit=%s)",
+		n, computeFailureBackoff(n), formatLastRateLimit())
+}
+
+// creditErrorStatus scans reflection error strings for a non-transient
+// credential/billing LLM status (401/402/403). PURE. RunResult carries errors
+// as strings, not wrapped error values, so it matches the exact prefix
+// "llm returned status <code>" emitted by (*llm.StatusError).Error(). Returns
+// the lowest credit-error status code found, or 0 when none match (429/5xx are
+// transient and deliberately excluded so they keep climbing the backoff ladder).
+func creditErrorStatus(errs []string) int {
+	for _, code := range []int{401, 402, 403} {
+		needle := fmt.Sprintf("llm returned status %d", code)
+		for _, e := range errs {
+			if strings.Contains(e, needle) {
+				return code
+			}
 		}
 	}
+	return 0
+}
+
+// breakerThreshold reads ENGRAM_REFLECTION_BREAKER_THRESHOLD (default 4). Values
+// < 1 or unparseable fall back to the default.
+func breakerThreshold() int {
+	v := strings.TrimSpace(os.Getenv(envBreakerThreshold))
+	if v == "" {
+		return defaultBreakerThreshold
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return defaultBreakerThreshold
+	}
+	return n
+}
+
+// breakerCooldown reads ENGRAM_REFLECTION_BREAKER_COOLDOWN_H (float hours,
+// default 24). Negative or unparseable falls back to the default.
+func breakerCooldown() time.Duration {
+	v := strings.TrimSpace(os.Getenv(envBreakerCooldownH))
+	if v == "" {
+		return time.Duration(defaultBreakerCooldownH * float64(time.Hour))
+	}
+	h, err := strconv.ParseFloat(v, 64)
+	if err != nil || h < 0 {
+		return time.Duration(defaultBreakerCooldownH * float64(time.Hour))
+	}
+	return time.Duration(h * float64(time.Hour))
+}
+
+// circuitState reports the breaker state. PURE (no I/O). The circuit is OPEN
+// when failCount >= threshold. When open, exactly one probe is allowed once the
+// cooldown has elapsed since lastAttempt (a zero lastAttempt is treated as
+// cooldown-elapsed so the breaker can never latch permanently). threshold < 1
+// is clamped to 1.
+func circuitState(failCount, threshold int, lastAttempt time.Time, cooldown time.Duration, now time.Time) (open bool, probeAllowed bool) {
+	if threshold < 1 {
+		threshold = 1
+	}
+	open = failCount >= threshold
+	if !open {
+		return false, false
+	}
+	if lastAttempt.IsZero() || now.Sub(lastAttempt) >= cooldown {
+		probeAllowed = true
+	}
+	return open, probeAllowed
+}
+
+// SchedulerPaused reports whether the periodic reflection scheduler is paused,
+// via either ENGRAM_REFLECTION_PAUSED=1|true or a <stateDir>/reflection_paused
+// file (stateDir resolved exactly like siriDirPath). It affects ONLY the
+// scheduler; the manual reflection_run MCP tool is unaffected. The second
+// return value is a human-readable reason for logging.
+func SchedulerPaused() (bool, string) {
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_REFLECTION_PAUSED")); v == "1" || strings.EqualFold(v, "true") {
+		return true, "env ENGRAM_REFLECTION_PAUSED=" + v
+	}
+	dir, err := siriDirPath()
+	if err != nil {
+		return false, ""
+	}
+	p := filepath.Join(dir, reflectionPausedFile)
+	if _, err := os.Stat(p); err == nil {
+		return true, "file " + p
+	}
+	return false, ""
 }
 
 // computeFailureBackoff returns the failure-backoff duration for n consecutive

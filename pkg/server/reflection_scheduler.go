@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	rand "math/rand/v2"
 	"os"
 	"strconv"
 	"strings"
@@ -48,6 +49,10 @@ func (s *Server) StartReflectionScheduler(ctx context.Context, interval ...time.
 			fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
 			return
 		case <-initial.C:
+			if !s.jitterWait(ctx, iv) {
+				fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
+				return
+			}
 			s.evaluateAndMaybeRun(ctx)
 		}
 
@@ -60,6 +65,10 @@ func (s *Server) StartReflectionScheduler(ctx context.Context, interval ...time.
 				fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
 				return
 			case <-ticker.C:
+				if !s.jitterWait(ctx, iv) {
+					fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
+					return
+				}
 				s.evaluateAndMaybeRun(ctx)
 			}
 		}
@@ -131,9 +140,59 @@ func reflectionWindowLocation() *time.Location {
 	return loc
 }
 
+// defaultReflectionJitter is the default upper bound for the per-evaluation
+// random jitter, overridable via ENGRAM_REFLECTION_JITTER (Go duration).
+const defaultReflectionJitter = 5 * time.Minute
+
+// jitterMax computes the jitter upper bound from an env value and the tick
+// interval. PURE. Default 5m; parse errors / negatives fall back to the
+// default; the result is capped at interval/2 so jitter never approaches a full
+// interval.
+func jitterMax(envVal string, iv time.Duration) time.Duration {
+	max := defaultReflectionJitter
+	if envVal != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(envVal)); err == nil && d >= 0 {
+			max = d
+		}
+	}
+	if cap := iv / 2; max > cap {
+		max = cap
+	}
+	if max < 0 {
+		return 0
+	}
+	return max
+}
+
+// jitterWait sleeps a random duration in [0, jitterMax] before an evaluation,
+// cancellable via ctx. Returns false if ctx was cancelled during the wait so
+// the caller can stop the scheduler goroutine.
+func (s *Server) jitterWait(ctx context.Context, iv time.Duration) bool {
+	max := jitterMax(os.Getenv("ENGRAM_REFLECTION_JITTER"), iv)
+	if max <= 0 {
+		return ctx.Err() == nil
+	}
+	d := time.Duration(rand.Int64N(int64(max) + 1))
+	slog.Info("reflection scheduler: jitter wait", "jitter", d.String(), "max", max.String())
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 // evaluateAndMaybeRun checks the reflection trigger once and, when it fires,
 // starts a run via the shared single-flight runner.
 func (s *Server) evaluateAndMaybeRun(ctx context.Context) {
+	// Pause gate: a paused scheduler returns WITHOUT evaluating. Manual
+	// reflection_run is unaffected (it never calls this method).
+	if paused, reason := reflection.SchedulerPaused(); paused {
+		slog.Info("reflection scheduler: paused", "reason", reason)
+		return
+	}
 	// Quiet-window gate: restrict scheduler triggering to a configured hour
 	// window (default 22:00-01:00 Asia/Shanghai). A parse error fails OPEN so a
 	// typo can't permanently disable reflection.
