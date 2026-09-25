@@ -12,6 +12,16 @@ import (
 	"time"
 )
 
+// claudeCodeSystemPrompt is the exact top-level system prompt that Claude Code
+// OAuth tokens are entitled to serve. Anthropic OAuth (Claude Code) tokens only
+// serve /v1/messages requests that carry the Claude Code identity system
+// prompt; a request WITHOUT it is rejected with a misleading fake
+// rate_limit_error (HTTP 429 {"type":"rate_limit_error","message":"Error"})
+// even when quota is nearly unused. Sending this exact string on the OAuth path
+// makes claude-sonnet-5 return HTTP 200. Only add it for the OAuth bearer path;
+// the X-Api-Key path must NOT set it.
+const claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
+
 // claudeCredentialsPath is the on-disk Claude Code OAuth credentials file. It is
 // a package var (not const) only so tests can point it at a temp file; in
 // production it is always the path below. The token here rotates (short TTL,
@@ -92,13 +102,19 @@ func callAnthropic(ctx context.Context, cfg *config, prompt string, maxTokens in
 		return "", Meta{}, err
 	}
 
-	reqBody, err := json.Marshal(map[string]any{
+	bodyMap := map[string]any{
 		"model":      cfg.Model,
 		"max_tokens": maxTokens,
 		"messages": []map[string]any{
 			{"role": "user", "content": prompt},
 		},
-	})
+	}
+	// OAuth (Claude Code) tokens require the Claude Code identity system prompt;
+	// without it Anthropic returns a fake 429. Not set for the X-Api-Key path.
+	if creds.token != "" {
+		bodyMap["system"] = claudeCodeSystemPrompt
+	}
+	reqBody, err := json.Marshal(bodyMap)
 	if err != nil {
 		return "", Meta{}, fmt.Errorf("marshal request: %w", err)
 	}

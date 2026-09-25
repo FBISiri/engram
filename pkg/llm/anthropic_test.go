@@ -250,6 +250,51 @@ func TestCallWithBudget_Anthropic_OAuthTokenHeaders(t *testing.T) {
 	}
 }
 
+// Fake-429 fix: the OAuth path must send the Claude Code identity system
+// prompt; the X-Api-Key path must not send any system field.
+func TestCallWithBudget_Anthropic_SystemPromptOAuthOnly(t *testing.T) {
+	capture := func(t *testing.T, oauth bool) (systemField any, present bool) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			systemField, present = req["system"]
+			_, _ = io.WriteString(w, `{"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}`)
+		}))
+		defer srv.Close()
+
+		t.Setenv("ENGRAM_LLM_PROVIDER", "anthropic")
+		t.Setenv("ENGRAM_LLM_API_KEY", "")
+		t.Setenv("ENGRAM_LLM_BASE_URL", srv.URL)
+		if oauth {
+			t.Setenv("ANTHROPIC_API_KEY", "")
+			t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-xyz")
+		} else {
+			t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+			t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+		}
+		if _, _, err := CallWithBudget(context.Background(), "focal prompt", 1500); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return systemField, present
+	}
+
+	t.Run("oauth path sends system==const", func(t *testing.T) {
+		sys, present := capture(t, true)
+		if !present {
+			t.Fatal("OAuth path must include a top-level system field")
+		}
+		if s, _ := sys.(string); s != claudeCodeSystemPrompt {
+			t.Errorf("system = %q, want %q", s, claudeCodeSystemPrompt)
+		}
+	})
+	t.Run("api-key path sends no system", func(t *testing.T) {
+		_, present := capture(t, false)
+		if present {
+			t.Error("X-Api-Key path must NOT send a system field")
+		}
+	})
+}
+
 // R5: non-200 keeps "llm returned status %d" and appends a body excerpt.
 func TestCallWithBudget_Anthropic_Non200IncludesStatusAndExcerpt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
