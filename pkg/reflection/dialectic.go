@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,16 +41,16 @@ type DialecticInsight struct {
 
 // DialecticStats tracks Part3 observability counters.
 type DialecticStats struct {
-	OkCount            int      `json:"ok_count"`
-	FailedCount        int      `json:"failed_count"`
-	DroppedNoEvidence  int      `json:"dropped_no_evidence"`
-	DroppedLowConf     int      `json:"dropped_low_conf"`
-	LLMCalls           int      `json:"llm_calls"`
-	LLMMs              int64    `json:"llm_ms"`
-	LLMConfHighCount   int      `json:"llm_conf_high_count"`
-	LLMConfMidCount    int      `json:"llm_conf_mid_count"`
-	LLMConfLowCount    int      `json:"llm_conf_low_count"`
-	Errors             []string `json:"errors,omitempty"`
+	OkCount           int      `json:"ok_count"`
+	FailedCount       int      `json:"failed_count"`
+	DroppedNoEvidence int      `json:"dropped_no_evidence"`
+	DroppedLowConf    int      `json:"dropped_low_conf"`
+	LLMCalls          int      `json:"llm_calls"`
+	LLMMs             int64    `json:"llm_ms"`
+	LLMConfHighCount  int      `json:"llm_conf_high_count"`
+	LLMConfMidCount   int      `json:"llm_conf_mid_count"`
+	LLMConfLowCount   int      `json:"llm_conf_low_count"`
+	Errors            []string `json:"errors,omitempty"`
 }
 
 // dialecticLLMResponse is the expected JSON schema from the LLM.
@@ -190,6 +191,23 @@ func promptIDForm(id string) string {
 	return id
 }
 
+// evidenceLabelIndex parses an ordinal evidence label into its 1-based index.
+// Accepted forms (uppercase E only, deterministic): "E3" and "[E3]", with
+// optional surrounding whitespace. Returns (0, false) for anything else.
+func evidenceLabelIndex(sid string) (int, bool) {
+	s := strings.TrimSpace(sid)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	if len(s) < 2 || s[0] != 'E' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
 func buildDialecticPrompt(pq PerQuestionEvidence) string {
 	var sb strings.Builder
 	sb.WriteString("You are the dialectic reflection engine for an AI agent named Siri.\n\n")
@@ -197,27 +215,27 @@ func buildDialecticPrompt(pq PerQuestionEvidence) string {
 	fmt.Fprintf(&sb, "Below are %d evidence memories retrieved for this question. ", len(pq.Evidence))
 	sb.WriteString("Synthesize a dialectic insight that identifies tensions, contradictions, or nuanced patterns across these memories.\n\n")
 
-	sb.WriteString("Evidence:\n")
+	sb.WriteString("Evidence (each item is labelled [E1], [E2], ...):\n")
 	for i, m := range pq.Evidence {
 		content := m.Content
 		if len(content) > 300 {
 			content = content[:300] + "..."
 		}
-		fmt.Fprintf(&sb, "%d. [id=%s] %s\n", i+1, promptIDForm(m.ID), content)
+		fmt.Fprintf(&sb, "[E%d] %s\n", i+1, content)
 	}
 
 	sb.WriteString("\nRespond with EXACTLY ONE JSON object (no markdown fences, no extra text):\n")
 	sb.WriteString(`{
   "content": "2-4 sentences synthesizing the dialectic insight",
   "tensions": ["tension 1", "tension 2"],
-  "source_ids": ["id1", "id2"],
+  "source_ids": ["E1", "E2"],
   "confidence": 0.8,
   "importance": 7,
   "tags": ["tag1", "tag2"]
 }`)
 	sb.WriteString("\n\nRules:\n")
 	sb.WriteString("- tensions: ALWAYS include this field. If no contradictions exist, use an empty array []. Max 5 entries.\n")
-	sb.WriteString("- source_ids: list the evidence IDs (from the [id=...] prefixes above) that ground this insight. Minimum 2.\n")
+	sb.WriteString("- source_ids: list the evidence LABELS (the [E#] markers above, e.g. \"E1\", \"E3\") that ground this insight. Copy them exactly; do NOT invent labels. Minimum 2.\n")
 	sb.WriteString("- confidence: 0.0-1.0, how well-grounded this insight is in the evidence.\n")
 	sb.WriteString("- importance: 1-10 integer.\n")
 	sb.WriteString("- tags: max 5, lowercase, hyphen-separated.\n")
@@ -329,29 +347,24 @@ func repairStructuralSemicolons(s string) string {
 // resolveEvidenceID maps a source_id from the LLM to a canonical evidence id,
 // or reports that it cannot be trusted. It NEVER invents ids: a returned id is
 // always already present in the evidence set (prompt injection defense).
-//   - direct hit (full id or prompt id form) -> returned verbatim
-//   - otherwise, if sid is >= 8 chars and is a prefix of EXACTLY ONE full
-//     evidence id, treat it as a truncated/garbled id and repair to that full id
-//   - otherwise -> not resolvable (caller drops it)
+// Resolution order (first match wins):
+//  1. ordinal label form "E<n>" or "[E<n>]" (1-based position in this
+//     question's evidence set) -> full id at that position; out-of-range
+//     labels (e.g. E0, E99) are dropped, not invented
+//  2. exact full id -> returned verbatim (backward compat)
+//  3. exact 12-char prompt id form -> returned verbatim (backward compat for
+//     older prompts that echoed hex ids)
+//  4. otherwise -> not resolvable (caller drops it). Fuzzy/prefix matching is
+//     deliberately NOT done: labels make it unnecessary and it could mis-map.
 func resolveEvidenceID(sid string, evidenceIDs map[string]struct{}, fullIDs []string) (string, bool) {
+	if n, ok := evidenceLabelIndex(sid); ok {
+		if n >= 1 && n <= len(fullIDs) {
+			return fullIDs[n-1], true
+		}
+		return "", false
+	}
 	if _, ok := evidenceIDs[sid]; ok {
 		return sid, true
-	}
-	if len(sid) >= 8 {
-		match := ""
-		count := 0
-		for _, full := range fullIDs {
-			if strings.HasPrefix(full, sid) {
-				match = full
-				count++
-				if count > 1 {
-					break
-				}
-			}
-		}
-		if count == 1 {
-			return match, true
-		}
 	}
 	return "", false
 }
@@ -415,8 +428,16 @@ func parseDialecticResponse(response string, pq PerQuestionEvidence, meta llm.Me
 		fullIDs = append(fullIDs, m.ID)
 	}
 	validIDs := make([]string, 0, len(parsed.SourceIDs))
+	seen := make(map[string]struct{}, len(parsed.SourceIDs))
 	for _, sid := range parsed.SourceIDs {
 		if resolved, ok := resolveEvidenceID(sid, evidenceIDs, fullIDs); ok {
+			// Dedupe on the resolved full UUID (preserve first-occurrence
+			// order): distinct labels/ids that point at the same evidence
+			// must not fake corroboration for the >= 2 gate below.
+			if _, dup := seen[resolved]; dup {
+				continue
+			}
+			seen[resolved] = struct{}{}
 			validIDs = append(validIDs, resolved)
 		} else {
 			warnings = append(warnings, fmt.Sprintf("source_id %q dropped: not in evidence set (prompt injection defense)", sid))

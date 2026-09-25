@@ -215,43 +215,60 @@ func TestParseDialecticResponse_MissingTensionsDegrades(t *testing.T) {
 	}
 }
 
-// Prefix repair: a truncated-but-unique prefix (>= 8 chars) resolves to the
-// canonical full evidence id; an ambiguous prefix is dropped, not trusted.
-func TestParseDialecticResponse_PrefixRepair(t *testing.T) {
-	// "abcdef01-longtail-1" and "abcdef01-longtail-2" share the "abcdef01" prefix.
+// Prefix repair has been REMOVED: a truncated-but-unique prefix is no longer
+// repaired to the full id — it is DROPPED (labels make prefix repair
+// unnecessary and it could mis-map). Exact full ids still resolve.
+func TestParseDialecticResponse_PrefixDropped(t *testing.T) {
 	pq := PerQuestionEvidence{Question: "q", Evidence: makeEvidence(
 		"abcdef0123456789-unique", "99998888-second", "77776666-third",
 	)}
 
-	// Unique truncated prefix repairs to the full id.
-	good := `{"content":"c","tensions":["t"],` +
+	// A unique truncated prefix + one exact id: the prefix is dropped, leaving
+	// only 1 valid id (< 2), so the question is discarded with a warning naming
+	// the dropped prefix.
+	resp := `{"content":"c","tensions":["t"],` +
 		`"source_ids":["abcdef01234","99998888-second"],` +
 		`"confidence":0.5,"importance":4,"tags":["x"]}`
-	insight, warnings, err := parseDialecticResponse(good, pq, llm.Meta{}, "dialectic-q1")
-	if err != nil {
-		t.Fatalf("expected prefix repair to succeed, got: %v (warnings=%v)", err, warnings)
+	insight, warnings, err := parseDialecticResponse(resp, pq, llm.Meta{}, "dialectic-q1")
+	if insight != nil || err == nil {
+		t.Fatalf("expected nil insight + error (prefix dropped -> 1 valid), got insight=%v err=%v", insight, err)
 	}
-	if insight.SourceIDs[0] != "abcdef0123456789-unique" {
-		t.Errorf("expected prefix repaired to full id, got %q", insight.SourceIDs[0])
+	if !strings.Contains(strings.Join(warnings, " "), "abcdef01234") {
+		t.Errorf("expected warning naming dropped prefix, got: %v", warnings)
 	}
 
-	// Ambiguous prefix (matches >1 full id) must be dropped, not trusted.
-	amb := PerQuestionEvidence{Question: "q", Evidence: makeEvidence(
-		"sharedpre-aaa-1", "sharedpre-bbb-2", "cleanid-3",
-	)}
-	resp := `{"content":"c","tensions":["t"],` +
-		`"source_ids":["sharedpre","cleanid-3","sharedpre-aaa-1"],` +
+	// Two exact full ids alongside a dropped prefix still keep the question.
+	resp2 := `{"content":"c","tensions":["t"],` +
+		`"source_ids":["abcdef01234","99998888-second","77776666-third"],` +
 		`"confidence":0.5,"importance":4,"tags":["x"]}`
-	ins2, warn2, err2 := parseDialecticResponse(resp, amb, llm.Meta{}, "dialectic-q1")
+	ins2, warn2, err2 := parseDialecticResponse(resp2, pq, llm.Meta{}, "dialectic-q1")
 	if err2 != nil {
-		t.Fatalf("expected 2 valid ids after dropping ambiguous prefix, got: %v", err2)
+		t.Fatalf("expected 2 exact ids to survive, got: %v", err2)
 	}
 	for _, id := range ins2.SourceIDs {
-		if id == "sharedpre" {
-			t.Error("ambiguous prefix must not be trusted")
+		if id == "abcdef0123456789-unique" || id == "abcdef01234" {
+			t.Error("prefix must not be repaired/trusted")
 		}
 	}
-	if !strings.Contains(strings.Join(warn2, " "), "sharedpre") {
-		t.Errorf("expected warning naming dropped ambiguous prefix, got: %v", warn2)
+	if !strings.Contains(strings.Join(warn2, " "), "abcdef01234") {
+		t.Errorf("expected warning naming dropped prefix, got: %v", warn2)
+	}
+}
+
+// A 9-char true prefix of an evidence id is dropped (no fuzzy/prefix repair).
+func TestParseDialecticResponse_NinateCharPrefixDropped(t *testing.T) {
+	pq := PerQuestionEvidence{Question: "q", Evidence: makeEvidence(
+		"abcdef0123456789-unique", "99998888-second",
+	)}
+	// "abcdef012" is a 9-char true prefix of the first evidence id.
+	resp := `{"content":"c","tensions":["t"],` +
+		`"source_ids":["abcdef012","99998888-second"],` +
+		`"confidence":0.5,"importance":4,"tags":["x"]}`
+	insight, warnings, err := parseDialecticResponse(resp, pq, llm.Meta{}, "dialectic-q1")
+	if insight != nil || err == nil {
+		t.Fatalf("expected nil insight + error (9-char prefix dropped), got insight=%v err=%v", insight, err)
+	}
+	if !strings.Contains(strings.Join(warnings, " "), "abcdef012") {
+		t.Errorf("expected warning naming dropped 9-char prefix, got: %v", warnings)
 	}
 }
