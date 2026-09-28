@@ -1,6 +1,6 @@
 module github.com/FBISiri/engram
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/google/uuid v1.6.0
@@ -13,7 +13,7 @@ require (
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	google.golang.org/grpc v1.83.2
 )
 
