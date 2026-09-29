@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,37 +60,47 @@ func hasTag(tags []string, target string) bool {
 // which previously had zero grace. Adding the dwell here would double-gate an
 // already human-supervised, snapshotted operation.
 func isExpiryCandidate(m *memory.Memory, cfg memory.EvaporationConfig, now time.Time) bool {
-	// Evaporation-deprecated memories are candidates ONLY once they have
-	// cleared BOTH the protection rules and the observation window (spec §4.4,
-	// G1 fix). An evaporation flag must never be a skeleton key past the
-	// importance/tag/type guards that exist for independent reasons.
+	candidate, _ := expiryCandidateDecision(m, cfg, now)
+	return candidate
+}
+
+// expiryCandidateDecision is the reason-carrying form of isExpiryCandidate. The
+// candidate boolean is byte-for-byte identical to the original isExpiryCandidate
+// logic (R3); exemptRule is a non-empty exemption reason ONLY for
+// evaporation-deprecated memories spared by a protection rule / observation
+// window, and "" otherwise (including for ordinary policy non-candidates and for
+// actual candidates). It exists purely to make evaporation exemptions countable.
+func expiryCandidateDecision(m *memory.Memory, cfg memory.EvaporationConfig, now time.Time) (candidate bool, exemptRule string) {
 	if m.LifecycleStatus == memory.LifecycleDeprecated {
 		if reason, _ := m.Metadata["deprecated_reason"].(string); reason == "evaporation" {
-			if exempt, _ := memory.EvaporationExempt(m, cfg, now); exempt {
-				return false
+			if exempt, rule := memory.EvaporationExempt(m, cfg, now); exempt {
+				return false, rule
 			}
 			depAt, ok := deprecatedAt(m)
 			if !ok {
-				return false // cannot verify the observation window → do not delete
+				return false, "no_deprecated_at" // cannot verify the observation window → do not delete
 			}
 			window := time.Duration(cfg.ObservationDays * 24 * float64(time.Hour))
-			return now.Sub(depAt) > window
+			if now.Sub(depAt) > window {
+				return true, ""
+			}
+			return false, "observation_window"
 		}
 	}
 
 	policy, ok := defaultPolicies[m.Type]
 	if !ok {
-		return false // identity or unknown type: never delete
+		return false, "" // identity or unknown type: never delete
 	}
 
 	// Safety: importance >= 8 is always protected
 	if m.Importance >= 8 {
-		return false
+		return false, ""
 	}
 
 	// Must be below the importance threshold for its type
 	if m.Importance >= policy.minImportance {
-		return false
+		return false, ""
 	}
 
 	// Compute age threshold (tag overrides lift it to 365 days)
@@ -99,7 +110,7 @@ func isExpiryCandidate(m *memory.Memory, cfg memory.EvaporationConfig, now time.
 	}
 
 	ageDays := now.Sub(time.Unix(int64(m.CreatedAt), 0)).Hours() / 24
-	return ageDays > ageThreshold
+	return ageDays > ageThreshold, ""
 }
 
 // deprecatedAt extracts metadata["deprecated_at"] (unix seconds) as a time.
@@ -132,8 +143,11 @@ func contentPreview(s string) string {
 // maxExpiryPerRun candidates eligible for policy-based deletion.
 func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate, error) {
 	now := time.Now()
+	cfg := h.srv.evaporationConfig()
 	var candidates []ExpiryCandidate
 	var offset string
+	exemptByRule := map[string]int{}
+	exempted := 0
 
 	for {
 		mems, nextOffset, err := h.srv.store.Scroll(ctx.Context(), memory.ScrollOptions{
@@ -145,7 +159,15 @@ func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate,
 		}
 
 		for _, m := range mems {
-			if !isExpiryCandidate(&m, h.srv.evaporationConfig(), now) {
+			candidate, rule := expiryCandidateDecision(&m, cfg, now)
+			if !candidate {
+				if rule != "" {
+					exemptByRule[rule]++
+					exempted++
+					if h.srv.metrics != nil {
+						h.srv.metrics.ShadowExemptByRule.WithLabelValues(rule).Inc()
+					}
+				}
 				continue
 			}
 			ageDays := now.Sub(time.Unix(int64(m.CreatedAt), 0)).Hours() / 24
@@ -158,6 +180,7 @@ func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate,
 				Tags:           m.Tags,
 			})
 			if len(candidates) >= maxExpiryPerRun {
+				log.Printf("[expiry-policy] candidates=%d exempted=%d by_rule=%v", len(candidates), exempted, exemptByRule)
 				return candidates, nil
 			}
 		}
@@ -168,6 +191,7 @@ func (h *HTTPServer) findExpiryCandidates(ctx *http.Request) ([]ExpiryCandidate,
 		offset = nextOffset
 	}
 
+	log.Printf("[expiry-policy] candidates=%d exempted=%d by_rule=%v", len(candidates), exempted, exemptByRule)
 	return candidates, nil
 }
 

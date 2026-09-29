@@ -46,6 +46,10 @@ type Metrics struct {
 	EvaporationDryRunCandidatesTotal *prometheus.CounterVec // engram_evaporation_dry_run_candidates_total
 	// EvaporationHardDeletedTotal counts memories hard-deleted via the expiry path, by type.
 	EvaporationHardDeletedTotal *prometheus.CounterVec // engram_evaporation_hard_deleted_total
+	// ShadowExemptByRule counts memories spared from policy-based expiry in the
+	// findExpiryCandidates path, by exemption rule (evaporation protection rules
+	// P1..P8, observation_window, no_deprecated_at). Shadow/observability only.
+	ShadowExemptByRule *prometheus.CounterVec // engram_shadow_exempt_by_rule_total
 	// ImportanceMean/ImportanceP90 export the CP2 importance-monitor rolling
 	// statistics per collection.
 	ImportanceMean *prometheus.GaugeVec // engram_importance_mean{collection}
@@ -137,7 +141,11 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		Name: "engram_evaporation_hard_deleted_total",
 		Help: "Total memories hard-deleted via the expiry path, by type.",
 	}, []string{"type"})
-	reg.MustRegister(evaporationScannedTotal, evaporationExemptedTotal, evaporationDryRunCandidatesTotal, evaporationHardDeletedTotal)
+	shadowExemptByRule := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_shadow_exempt_by_rule_total",
+		Help: "Total memories spared from policy-based expiry (findExpiryCandidates), by exemption rule (P1..P8|observation_window|no_deprecated_at).",
+	}, []string{"rule"})
+	reg.MustRegister(evaporationScannedTotal, evaporationExemptedTotal, evaporationDryRunCandidatesTotal, evaporationHardDeletedTotal, shadowExemptByRule)
 
 	// Pre-declare evaporation counter series at 0 so they appear on /metrics
 	// from process start (before any sweep/expiry has run). Types are read from
@@ -151,6 +159,11 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		for _, rule := range exemptRules {
 			evaporationExemptedTotal.WithLabelValues(string(t), rule).Add(0)
 		}
+	}
+	// Pre-declare shadow-exempt series (fixed rule set) so they appear at 0 from
+	// process start.
+	for _, rule := range append(append([]string{}, exemptRules...), "observation_window", "no_deprecated_at") {
+		shadowExemptByRule.WithLabelValues(rule).Add(0)
 	}
 
 	importanceMean := prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -203,6 +216,7 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		EvaporationExemptedTotal:         evaporationExemptedTotal,
 		EvaporationDryRunCandidatesTotal: evaporationDryRunCandidatesTotal,
 		EvaporationHardDeletedTotal:      evaporationHardDeletedTotal,
+		ShadowExemptByRule:               shadowExemptByRule,
 		ImportanceMean:                   importanceMean,
 		ImportanceP90:                    importanceP90,
 		SearchTopScore:                   searchTopScore,

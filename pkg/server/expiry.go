@@ -75,6 +75,10 @@ func StartExpiryCleanup(ctx context.Context, store memory.Store, interval time.D
 // per-collection/per-reason maps describe candidates, not deletions.
 func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetrics.Metrics, t time.Time) {
 	byCollection, byReason, evapByType := scanExpiring(ctx, store, t)
+	scanned := 0
+	for _, c := range byCollection {
+		scanned += c
+	}
 
 	n, err := store.DeleteExpired(ctx)
 	if err != nil {
@@ -83,14 +87,18 @@ func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetri
 	}
 	if n > 0 {
 		fmt.Fprintf(os.Stderr,
-			"[expiry] deleted %d expired memories at %s collection=%v reason=%v\n",
-			n, t.Format(time.RFC3339), byCollection, byReason)
+			"[expiry] deleted %d expired memories at %s scanned=%d collection=%v reason=%v\n",
+			n, t.Format(time.RFC3339), scanned, byCollection, byReason)
 		if metrics != nil {
 			for typ, count := range evapByType {
 				metrics.EvaporationHardDeletedTotal.WithLabelValues(typ).Add(float64(count))
 			}
 		}
+		return
 	}
+	// Heartbeat: a tick that deletes nothing still emits exactly one line so
+	// "tick ran, deleted 0" is distinguishable from "tick never ran".
+	fmt.Fprintf(os.Stderr, "[expiry] tick ok at %s scanned=%d deleted=0\n", t.Format(time.RFC3339), scanned)
 }
 
 // expiredScroller is an OPTIONAL interface implemented by stores that can
