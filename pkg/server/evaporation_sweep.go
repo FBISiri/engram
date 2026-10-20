@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -81,7 +80,7 @@ func (s *Server) StartEvaporationSweep(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Fprintf(os.Stderr, "[evaporation] sweep goroutine stopped\n")
+				stderrf("[evaporation] sweep goroutine stopped\n")
 				return
 			case t := <-ticker.C:
 				s.evaporationSweepTick(ctx, t)
@@ -89,13 +88,13 @@ func (s *Server) StartEvaporationSweep(ctx context.Context) {
 				if next := s.sweepInterval(); next != cur {
 					ticker.Reset(next)
 					cur = next
-					fmt.Fprintf(os.Stderr, "[evaporation] sweep interval reset to %s\n", next)
+					stderrf("[evaporation] sweep interval reset to %s\n", next)
 				}
 			}
 		}
 	}()
 
-	fmt.Fprintf(os.Stderr, "[evaporation] sweep goroutine started (interval: %s)\n", interval)
+	stderrf("[evaporation] sweep goroutine started (interval: %s)\n", interval)
 }
 
 // sweepInterval returns the current effective sweep interval, defaulting to 6h
@@ -119,7 +118,7 @@ func (s *Server) evaporationSweepTick(ctx context.Context, t time.Time) (int, in
 	deprecated, skipped, err := runEvaporationSweep(ctx, s.store, cfg, s.metrics)
 	evapSweepClock.markSwept(t)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[evaporation] sweep error at %s: %v\n", t.Format(time.RFC3339), err)
+		stderrf("[evaporation] sweep error at %s: %v\n", t.Format(time.RFC3339), err)
 		return deprecated, skipped
 	}
 	return deprecated, skipped
@@ -213,7 +212,7 @@ sweep:
 				"metadata":         meta,
 			}
 			if err := store.Update(ctx, mem.ID, fields); err != nil {
-				fmt.Fprintf(os.Stderr, "[evaporation] update failed for %s: %v\n", mem.ID, err)
+				stderrf("[evaporation] update failed for %s: %v\n", mem.ID, err)
 				skipped++
 				continue
 			}
@@ -232,7 +231,7 @@ sweep:
 		offset = nextOffset
 	}
 
-	fmt.Fprintf(os.Stderr,
+	stderrf(
 		"[evaporation] sweep at %s dry_run=%t scanned=%d candidates=%d deprecated=%d exempted=%d skipped=%d by_rule=%v by_type=%v\n",
 		start.Format(time.RFC3339), cfg.DryRun, scanned, candidates, deprecated, exempted, skipped, byRule, byType)
 

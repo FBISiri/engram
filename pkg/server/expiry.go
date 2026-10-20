@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
@@ -47,7 +45,7 @@ func StartExpiryCleanup(ctx context.Context, store memory.Store, interval time.D
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Fprintf(os.Stderr, "[expiry] cleanup goroutine stopped\n")
+				stderrf("[expiry] cleanup goroutine stopped\n")
 				return
 			case t := <-ticker.C:
 				runExpiryTick(ctx, store, metrics, t)
@@ -55,7 +53,7 @@ func StartExpiryCleanup(ctx context.Context, store memory.Store, interval time.D
 		}
 	}()
 
-	fmt.Fprintf(os.Stderr, "[expiry] cleanup goroutine started (interval: %s)\n", interval)
+	stderrf("[expiry] cleanup goroutine started (interval: %s)\n", interval)
 }
 
 // runExpiryTick performs one expiry cleanup pass: it pre-scans the store to
@@ -82,11 +80,11 @@ func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetri
 
 	n, err := store.DeleteExpired(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[expiry] cleanup error at %s: %v\n", t.Format(time.RFC3339), err)
+		stderrf("[expiry] cleanup error at %s: %v\n", t.Format(time.RFC3339), err)
 		return
 	}
 	if n > 0 {
-		fmt.Fprintf(os.Stderr,
+		stderrf(
 			"[expiry] deleted %d expired memories at %s scanned=%d collection=%v reason=%v\n",
 			n, t.Format(time.RFC3339), scanned, byCollection, byReason)
 		if metrics != nil {
@@ -98,7 +96,7 @@ func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetri
 	}
 	// Heartbeat: a tick that deletes nothing still emits exactly one line so
 	// "tick ran, deleted 0" is distinguishable from "tick never ran".
-	fmt.Fprintf(os.Stderr, "[expiry] tick ok at %s scanned=%d deleted=0\n", t.Format(time.RFC3339), scanned)
+	stderrf("[expiry] tick ok at %s scanned=%d deleted=0\n", t.Format(time.RFC3339), scanned)
 }
 
 // expiredScroller is an OPTIONAL interface implemented by stores that can

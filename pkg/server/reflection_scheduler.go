@@ -46,11 +46,11 @@ func (s *Server) StartReflectionScheduler(ctx context.Context, interval ...time.
 		select {
 		case <-ctx.Done():
 			initial.Stop()
-			fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
+			stderrf("[reflection-scheduler] goroutine stopped\n")
 			return
 		case <-initial.C:
 			if !s.jitterWait(ctx, iv) {
-				fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
+				stderrf("[reflection-scheduler] goroutine stopped\n")
 				return
 			}
 			s.evaluateAndMaybeRun(ctx)
@@ -62,11 +62,11 @@ func (s *Server) StartReflectionScheduler(ctx context.Context, interval ...time.
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
+				stderrf("[reflection-scheduler] goroutine stopped\n")
 				return
 			case <-ticker.C:
 				if !s.jitterWait(ctx, iv) {
-					fmt.Fprintf(os.Stderr, "[reflection-scheduler] goroutine stopped\n")
+					stderrf("[reflection-scheduler] goroutine stopped\n")
 					return
 				}
 				s.evaluateAndMaybeRun(ctx)
@@ -74,7 +74,7 @@ func (s *Server) StartReflectionScheduler(ctx context.Context, interval ...time.
 		}
 	}()
 
-	fmt.Fprintf(os.Stderr, "[reflection-scheduler] started (interval: %s)\n", iv)
+	stderrf("[reflection-scheduler] started (interval: %s)\n", iv)
 }
 
 // defaultReflectionWindow is the quiet-hour window during which the scheduler

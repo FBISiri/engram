@@ -307,7 +307,7 @@ func (h *HTTPServer) handleDeleteExpired(w http.ResponseWriter, r *http.Request)
 	// Write snapshot before deletion so it exists even if delete partially fails.
 	snapshotPath, snapErr := writeExpirySnapshot(candidates)
 	if snapErr != nil {
-		fmt.Fprintf(os.Stderr, "expiry: snapshot write error: %v\n", snapErr)
+		stderrf("expiry: snapshot write error: %v\n", snapErr)
 	}
 
 	ids := make([]string, len(candidates))

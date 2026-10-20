@@ -24,18 +24,19 @@ func TestExpiryTickHeartbeat(t *testing.T) {
 		{ID: "a", Type: memory.TypeEvent, Collection: "engram_user", ValidUntil: future},
 	}}
 
-	// runExpiryTick writes to os.Stderr directly (like the rest of expiry.go),
-	// not via package log, so capture stderr through a pipe.
+	// runExpiryTick writes diagnostics via the package stderr sink; redirect
+	// the sink through a pipe (race-free, unlike reassigning os.Stderr) and
+	// restore it on return.
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldStderr := os.Stderr
-	os.Stderr = w
+	defer func() { _ = r.Close() }()
+	prev := setStderrWriter(w)
 
 	runExpiryTick(context.Background(), store, nil, time.Now())
 
-	os.Stderr = oldStderr
+	setStderrWriter(prev)
 	_ = w.Close()
 	b, err := io.ReadAll(r)
 	if err != nil {
