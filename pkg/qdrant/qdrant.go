@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/qdrant/go-client/qdrant"
@@ -657,6 +658,139 @@ type expiredPoint struct {
 	validUntil float64 // unix seconds; expiry boundary of the current episode
 }
 
+// Expiry action values for ExpiryRecord.Action.
+const (
+	ExpiryActionDeleted   = "deleted"   // point physically removed this tick
+	ExpiryActionProtected = "protected" // importance>=8 guard: left in place, TTL untouched
+	ExpiryActionHealed    = "healed"    // stale TTL cleared (recomputed permanent): valid_until/eligible_at zeroed
+)
+
+// expiryImportanceFloor mirrors the human expiry path's permanent protection
+// for high-importance memories (pkg/server/expiry_policy.go expiryCandidateDecision:
+// "importance >= 8 is always protected"). The unattended expiry tick MUST apply
+// the same floor so the two "expired" delete paths have identical protection
+// semantics (P17 R1). Keep this in sync with that path; it is deliberately
+// NOT silently duplicating a bare magic number.
+const expiryImportanceFloor = 8.0
+
+// ExpiryRecord is the per-point outcome of one DeleteExpiredDetailed pass.
+// Action is one of ExpiryActionDeleted / ExpiryActionProtected / ExpiryActionHealed.
+type ExpiryRecord struct {
+	ID            string
+	Collection    string
+	Type          string
+	Action        string
+	Importance    float64
+	ValidUntil    float64
+	CreatedAt     float64
+	ContentPrefix string
+}
+
+// expiredPointDetail is the richer expired-point view used by
+// DeleteExpiredDetailed: the dwell inputs plus the fields needed to recompute
+// the TTL (self-heal) and to build an audit ExpiryRecord.
+type expiredPointDetail struct {
+	id         string
+	typ        string
+	content    string
+	tags       []string
+	importance float64
+	validUntil float64
+	eligibleAt float64
+	createdAt  float64
+}
+
+// payloadNumber reads a Qdrant numeric payload value tolerating BOTH
+// DoubleValue and IntegerValue encodings. Qdrant may persist a whole number
+// (e.g. importance=10) as an integer; reading it with GetDoubleValue alone
+// would silently yield 0 and bypass the imp>=8 guard, so we fall back to the
+// integer encoding.
+func payloadNumber(payload map[string]*qdrant.Value, key string) float64 {
+	v, ok := payload[key]
+	if !ok {
+		return 0
+	}
+	if d := v.GetDoubleValue(); d != 0 {
+		return d
+	}
+	return float64(v.GetIntegerValue())
+}
+
+// payloadToExpiredPointDetail maps a Qdrant point id + payload into the detail
+// view consumed by classifyExpired. Extracted as a pure seam so the payload
+// decoding (double/integer/string/missing-field) is unit-testable.
+func payloadToExpiredPointDetail(id string, payload map[string]*qdrant.Value) expiredPointDetail {
+	return expiredPointDetail{
+		id:         id,
+		typ:        getString(payload, fieldType),
+		content:    getString(payload, fieldContent),
+		tags:       getStringSlice(payload, fieldTags),
+		importance: payloadNumber(payload, fieldImportance),
+		validUntil: payloadNumber(payload, fieldValidUntil),
+		eligibleAt: payloadNumber(payload, fieldExpiryEligibleAt),
+		createdAt:  payloadNumber(payload, fieldCreatedAt),
+	}
+}
+
+// expiryContentPrefix returns a single-line, <=120-rune prefix of content for
+// audit records.
+func expiryContentPrefix(content string) string {
+	s := strings.ReplaceAll(content, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	r := []rune(s)
+	if len(r) > 120 {
+		r = r[:120]
+	}
+	return strings.TrimSpace(string(r))
+}
+
+// expiryVerdict is the per-point outcome of classifyExpired.
+type expiryVerdict int
+
+const (
+	verdictHeal    expiryVerdict = iota // recomputed TTL is permanent → clear stale stamp
+	verdictProtect                      // importance >= floor → never delete, leave TTL
+	verdictStamp                        // dwell: first observation → stamp, skip
+	verdictDelete                       // dwell cleared → delete now
+	verdictWait                         // inside dwell window → skip this tick
+)
+
+// classifyExpired is the pure P17 decision for one already-expired point, in
+// the documented order: self-heal (recomputed permanent) WINS over the
+// importance guard, which in turn precedes the normal dwell logic. Pure and
+// deterministic so the guard/heal/dwell interplay is unit-testable without a
+// live Qdrant.
+func classifyExpired(p *expiredPointDetail, cfg memory.TTLConfig, dwell time.Duration, now time.Time) expiryVerdict {
+	recomputed := memory.ComputeValidUntil(cfg, memory.MemoryType(p.typ), p.importance, p.tags, 0)
+	if recomputed == 0 {
+		return verdictHeal
+	}
+	if p.importance >= expiryImportanceFloor {
+		return verdictProtect
+	}
+	switch decideExpiryDwell(p.eligibleAt, p.validUntil, dwell, now) {
+	case dwellStamp:
+		return verdictStamp
+	case dwellDelete:
+		return verdictDelete
+	default:
+		return verdictWait
+	}
+}
+
+func (s *Store) expiryRecord(p *expiredPointDetail, action string) ExpiryRecord {
+	return ExpiryRecord{
+		ID:            p.id,
+		Collection:    s.collection,
+		Type:          p.typ,
+		Action:        action,
+		Importance:    p.importance,
+		ValidUntil:    p.validUntil,
+		CreatedAt:     p.createdAt,
+		ContentPrefix: expiryContentPrefix(p.content),
+	}
+}
+
 // expiryDwellDecision is the per-point verdict of the dwell planner.
 type expiryDwellDecision int
 
@@ -715,23 +849,52 @@ func planExpiryDwell(points []expiredPoint, dwell time.Duration, now time.Time) 
 }
 
 // DeleteExpired removes memories whose valid_until > 0 AND valid_until < now,
-// but ONLY after they have cleared the expiry DWELL window (G4). The dwell
-// window is a DECISION-AGE grace: a point first observed as delete-eligible is
-// STAMPED with expiry_eligible_at=now and SKIPPED this tick (mark-then-delete-
-// later, persisted in the payload so it survives restarts); it becomes
-// deletable only once (now - expiry_eligible_at) >= dwellWindow. This is
-// orthogonal to object age (created_at / MinAgeDays / maxAgeDays): a memory
-// just demoted/marked into the expired range gets a full observation grace
-// instead of being evaporated on the very next tick. When dwellWindow <= 0 the
-// window is disabled and expired points delete immediately (legacy behaviour).
-//
-// Returns the number of points actually deleted this tick (excludes points that
-// were merely stamped or are still inside the window).
+// but ONLY after they have cleared the expiry DWELL window (G4) and ONLY when
+// they are not protected/healed by the P17 guards. It is a thin wrapper over
+// DeleteExpiredDetailed that returns the number of points ACTUALLY deleted this
+// tick (Action==ExpiryActionDeleted), preserving the historical contract so the
+// memory.Store interface signature and every existing caller/mock are untouched.
 func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
+	records, err := s.DeleteExpiredDetailed(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for i := range records {
+		if records[i].Action == ExpiryActionDeleted {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// DeleteExpiredDetailed is the richer expiry pass behind DeleteExpired. For each
+// already-expired point it decides, in this order:
+//
+//  1. SELF-HEAL (P17 R2/P2): recompute the TTL from the current
+//     type+importance+tags via ComputeValidUntil(..., explicit=0). If the matrix
+//     says permanent (0), the point carries a STALE finite valid_until that
+//     nobody recomputed after its importance rose — CANCEL the delete, clear the
+//     stamp (valid_until=0 + expiry_eligible_at=0) and record Action="healed".
+//     Healed WINS over protected when both apply (a high-importance insight is
+//     both permanent-by-matrix and >=8), so the stale stamp is actively cleared
+//     rather than merely skipped.
+//  2. IMPORTANCE GUARD (P17 R1/P0): a point with importance >= expiryImportanceFloor
+//     is NEVER physically deleted by this unattended path (mirrors the human
+//     path in pkg/server/expiry_policy.go). Record Action="protected", leave the
+//     valid_until untouched, do not stamp.
+//  3. DWELL (G4): otherwise apply the existing decision-age grace — stamp
+//     expiry_eligible_at and skip on first observation, delete only after the
+//     dwell window clears.
+//
+// The returned records cover deleted/protected/healed outcomes (not points that
+// were merely stamped or are still inside the dwell window). The dwell semantics,
+// stamping and reflected_at guard are unchanged from before.
+func (s *Store) DeleteExpiredDetailed(ctx context.Context) ([]ExpiryRecord, error) {
 	now := float64(time.Now().Unix())
 
 	// First, scroll to collect the expired points (with payload so we can read
-	// the persisted expiry_eligible_at dwell stamp).
+	// the persisted expiry_eligible_at dwell stamp and the TTL inputs).
 	expiredFilter := &qdrant.Filter{
 		Must: []*qdrant.Condition{
 			qdrant.NewRange(fieldValidUntil, &qdrant.Range{Gt: qdrant.PtrOf(0.0)}),
@@ -741,7 +904,7 @@ func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
 
 	// Page through expired points in batches of 100.
 	const batchSize = uint32(100)
-	var expired []expiredPoint
+	var expired []expiredPointDetail
 	idToPoint := map[string]*qdrant.PointId{}
 	var offset *qdrant.PointId
 
@@ -758,21 +921,14 @@ func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
 
 		results, err := s.client.Scroll(ctx, req)
 		if err != nil {
-			return 0, fmt.Errorf("qdrant: delete_expired scroll: %w", err)
+			return nil, fmt.Errorf("qdrant: delete_expired scroll: %w", err)
 		}
 		if len(results) == 0 {
 			break
 		}
 		for _, pt := range results {
 			id := extractString(pt.Id)
-			var eligibleAt, validUntil float64
-			if v, ok := pt.Payload[fieldExpiryEligibleAt]; ok {
-				eligibleAt = v.GetDoubleValue()
-			}
-			if v, ok := pt.Payload[fieldValidUntil]; ok {
-				validUntil = v.GetDoubleValue()
-			}
-			expired = append(expired, expiredPoint{id: id, eligibleAt: eligibleAt, validUntil: validUntil})
+			expired = append(expired, payloadToExpiredPointDetail(id, pt.Payload))
 			idToPoint[id] = pt.Id
 		}
 		// If we got fewer than batchSize, we've reached the end.
@@ -784,29 +940,71 @@ func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
 	}
 
 	if len(expired) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
-	plan := planExpiryDwell(expired, s.dwellWindow, time.Now())
+	nowT := time.Now()
+	ttlCfg := memory.DefaultTTLConfig()
+	var toHeal, toStamp, toDelete []string
+	var healPts, deletePts []*expiredPointDetail
+	var records []ExpiryRecord
+
+	for i := range expired {
+		p := &expired[i]
+		switch classifyExpired(p, ttlCfg, s.dwellWindow, nowT) {
+		case verdictHeal:
+			toHeal = append(toHeal, p.id)
+			healPts = append(healPts, p)
+		case verdictProtect:
+			records = append(records, s.expiryRecord(p, ExpiryActionProtected))
+		case verdictStamp:
+			toStamp = append(toStamp, p.id)
+		case verdictDelete:
+			toDelete = append(toDelete, p.id)
+			deletePts = append(deletePts, p)
+		case verdictWait:
+			// inside dwell window → skip silently this tick.
+		}
+	}
+
 	wait := true
+
+	// Self-heal: clear the stale finite TTL (valid_until=0 → permanent) and zero
+	// the dwell stamp so the point leaves the expired set. Only emit the "healed"
+	// audit record when the write actually succeeded, so a persistent write
+	// failure does not spam the audit log with the same ids every tick.
+	if len(toHeal) > 0 {
+		healPayload := qdrant.NewValueMap(map[string]any{fieldValidUntil: 0.0, fieldExpiryEligibleAt: 0.0})
+		_, healErr := s.client.SetPayload(ctx, &qdrant.SetPayloadPoints{
+			CollectionName: s.collection,
+			Wait:           &wait,
+			Payload:        healPayload,
+			PointsSelector: pointsSelector(idsToPoints(toHeal, idToPoint)),
+		})
+		if healErr == nil {
+			for _, p := range healPts {
+				records = append(records, s.expiryRecord(p, ExpiryActionHealed))
+			}
+		}
+	}
 
 	// Mark-then-delete-later: stamp expiry_eligible_at=now on points first
 	// observed delete-eligible, then SKIP them this tick. Persisted so the dwell
 	// clock survives restarts. Best-effort — a failed stamp just retries next tick.
-	if len(plan.toStamp) > 0 {
+	if len(toStamp) > 0 {
 		stampNow := qdrant.NewValueMap(map[string]any{fieldExpiryEligibleAt: now})
 		_, _ = s.client.SetPayload(ctx, &qdrant.SetPayloadPoints{
 			CollectionName: s.collection,
 			Wait:           &wait,
 			Payload:        stampNow,
-			PointsSelector: pointsSelector(idsToPoints(plan.toStamp, idToPoint)),
+			PointsSelector: pointsSelector(idsToPoints(toStamp, idToPoint)),
 		})
 	}
 
-	if len(plan.toDelete) == 0 {
-		return 0, nil
+	if len(toDelete) == 0 {
+		return records, nil
 	}
-	deleteIDs := idsToPoints(plan.toDelete, idToPoint)
+	deleteIDs := idsToPoints(toDelete, idToPoint)
 
 	// Guard: stamp reflected_at on the points we are about to delete so the
 	// reflection engine's fetchUnreflected (IsEmpty filter) won't return them
@@ -826,10 +1024,13 @@ func (s *Store) DeleteExpired(ctx context.Context) (int, error) {
 		Points:         pointsSelector(deleteIDs),
 	})
 	if err != nil {
-		return 0, fmt.Errorf("qdrant: delete_expired delete: %w", err)
+		return nil, fmt.Errorf("qdrant: delete_expired delete: %w", err)
 	}
 
-	return len(deleteIDs), nil
+	for _, p := range deletePts {
+		records = append(records, s.expiryRecord(p, ExpiryActionDeleted))
+	}
+	return records, nil
 }
 
 // idsToPoints maps a slice of string ids back to their *qdrant.PointId via the

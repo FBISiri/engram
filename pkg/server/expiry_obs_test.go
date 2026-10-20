@@ -168,7 +168,7 @@ func TestScanExpiringBreakdown(t *testing.T) {
 		mk("engram_reflection", "ttl"),
 		{Type: memory.TypeEvent, Collection: "engram_user", ValidUntil: past}, // no metadata reason
 	}}
-	byColl, byReason, _ := scanExpiring(context.Background(), store, time.Now())
+	byColl, byReason, _, _ := scanExpiring(context.Background(), store, time.Now())
 	if byColl["engram_user"] != 2 || byColl["engram_reflection"] != 1 {
 		t.Fatalf("byCollection=%v", byColl)
 	}

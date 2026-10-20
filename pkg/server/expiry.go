@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
 	engrammetrics "github.com/FBISiri/engram/pkg/metrics"
+	"github.com/FBISiri/engram/pkg/qdrant"
 )
 
 // DefaultExpiryInterval is the default period between expiry cleanup runs.
@@ -72,10 +75,18 @@ func StartExpiryCleanup(ctx context.Context, store memory.Store, interval time.D
 // skipped and will be deleted on a later tick. So n <= sum(byCollection); the
 // per-collection/per-reason maps describe candidates, not deletions.
 func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetrics.Metrics, t time.Time) {
-	byCollection, byReason, evapByType := scanExpiring(ctx, store, t)
+	byCollection, byReason, evapByType, evapIDs := scanExpiring(ctx, store, t)
 	scanned := 0
 	for _, c := range byCollection {
 		scanned += c
+	}
+
+	// Prefer the richer path (D1): when the store implements DeleteExpiredDetailed,
+	// use it so we can audit deleted/healed ids and surface protected counts.
+	// Otherwise fall back to the legacy count-only DeleteExpired path unchanged.
+	if de, ok := store.(detailedExpirer); ok {
+		runExpiryTickDetailed(ctx, de, metrics, t, scanned, byCollection, byReason, evapIDs)
+		return
 	}
 
 	n, err := store.DeleteExpired(ctx)
@@ -99,6 +110,118 @@ func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetri
 	stderrf("[expiry] tick ok at %s scanned=%d deleted=0\n", t.Format(time.RFC3339), scanned)
 }
 
+// detailedExpirer is the OPTIONAL richer expiry interface (D1), satisfied by
+// *qdrant.Store and *qdrant.MultiStore. When present it lets runExpiryTick
+// audit deleted/healed ids and report protected counts without changing the
+// memory.Store signature (which 12 out-of-scope mocks implement).
+type detailedExpirer interface {
+	DeleteExpiredDetailed(context.Context) ([]qdrant.ExpiryRecord, error)
+}
+
+// runExpiryTickDetailed is the detailedExpirer branch: it keeps the exact
+// log/metrics semantics of the legacy branch (same "deleted N" line with
+// scanned/collection/reason, same heartbeat, same EvaporationHardDeletedTotal
+// feed) and additionally (a) appends an id-level audit record per deleted and
+// per healed memory and (b) extends the log line with ids=/healed=/protected=.
+func runExpiryTickDetailed(
+	ctx context.Context,
+	de detailedExpirer,
+	metrics *engrammetrics.Metrics,
+	t time.Time,
+	scanned int,
+	byCollection, byReason map[string]int,
+	evapIDs map[string]struct{},
+) {
+	records, err := de.DeleteExpiredDetailed(ctx)
+	if err != nil {
+		stderrf("[expiry] cleanup error at %s: %v\n", t.Format(time.RFC3339), err)
+		return
+	}
+
+	var deletedIDs, healedIDs, protectedIDs []string
+	var audits []deleteAuditRecord
+	// evapDeletedByType counts ONLY the points ACTUALLY deleted this tick whose
+	// pre-scan reason was evaporation (intersection of deleted ids with the
+	// evaporation-reason candidate set). This preserves the historical metric
+	// semantics while excluding protected/healed imp>=8 points that were never
+	// physically deleted.
+	evapDeletedByType := map[string]int{}
+	nowTS := t.Format(time.RFC3339)
+	for i := range records {
+		r := records[i]
+		switch r.Action {
+		case qdrant.ExpiryActionDeleted:
+			deletedIDs = append(deletedIDs, r.ID)
+			audits = append(audits, expiryAuditRecord(r, nowTS))
+			if _, ok := evapIDs[r.ID]; ok {
+				evapDeletedByType[r.Type]++
+			}
+		case qdrant.ExpiryActionHealed:
+			healedIDs = append(healedIDs, r.ID)
+			audits = append(audits, expiryAuditRecord(r, nowTS))
+		case qdrant.ExpiryActionProtected:
+			protectedIDs = append(protectedIDs, r.ID)
+		}
+	}
+	writeDeleteAudit(audits...)
+
+	n := len(deletedIDs)
+	if n > 0 {
+		stderrf(
+			"[expiry] deleted %d expired memories at %s scanned=%d collection=%v reason=%v ids=%s%s\n",
+			n, nowTS, scanned, byCollection, byReason, capIDs(deletedIDs), healedProtectedSuffix(healedIDs, protectedIDs))
+		if metrics != nil {
+			for typ, count := range evapDeletedByType {
+				metrics.EvaporationHardDeletedTotal.WithLabelValues(typ).Add(float64(count))
+			}
+		}
+		return
+	}
+	// Heartbeat (deleted=0); still report heal/protected activity when present.
+	stderrf("[expiry] tick ok at %s scanned=%d deleted=0%s\n",
+		nowTS, scanned, healedProtectedSuffix(healedIDs, protectedIDs))
+}
+
+// expiryAuditRecord maps a qdrant.ExpiryRecord to an audit line for the
+// expiry_tick path.
+func expiryAuditRecord(r qdrant.ExpiryRecord, ts string) deleteAuditRecord {
+	return deleteAuditRecord{
+		TS:            ts,
+		Path:          "expiry_tick",
+		ID:            r.ID,
+		Collection:    r.Collection,
+		Type:          r.Type,
+		Importance:    r.Importance,
+		CreatedAt:     r.CreatedAt,
+		ValidUntil:    r.ValidUntil,
+		ContentPrefix: r.ContentPrefix,
+		Reason:        expiryReasonUnset,
+		Action:        r.Action,
+	}
+}
+
+// healedProtectedSuffix renders " healed=[...] protected=N [...]" additions to
+// the expiry log line, omitting each when its count is zero.
+func healedProtectedSuffix(healedIDs, protectedIDs []string) string {
+	var sb strings.Builder
+	if len(healedIDs) > 0 {
+		fmt.Fprintf(&sb, " healed=%d %s", len(healedIDs), capIDs(healedIDs))
+	}
+	if len(protectedIDs) > 0 {
+		fmt.Fprintf(&sb, " protected=%d %s", len(protectedIDs), capIDs(protectedIDs))
+	}
+	return sb.String()
+}
+
+// capIDs renders an id list capped at 10 entries with a "+K more" suffix.
+func capIDs(ids []string) string {
+	const maxIDs = 10
+	if len(ids) <= maxIDs {
+		return "[" + strings.Join(ids, " ") + "]"
+	}
+	return fmt.Sprintf("[%s +%d more]", strings.Join(ids[:maxIDs], " "), len(ids)-maxIDs)
+}
+
 // expiredScroller is an OPTIONAL interface implemented by stores that can
 // return ONLY expired memories directly (the logical complement of Scroll).
 // scanExpiring type-asserts the store to this interface and, when available,
@@ -110,12 +233,16 @@ type expiredScroller interface {
 
 // scanExpiring pages through the store (same Scroll(Limit:100, Offset)
 // pagination pattern as handleEvaporationStatus) and tallies memories that are
-// expired at time t. Returns per-collection and per-reason counts, plus a
-// per-type count restricted to evaporation-reason expirations.
-func scanExpiring(ctx context.Context, store memory.Store, t time.Time) (byCollection, byReason, evapByType map[string]int) {
+// expired at time t. Returns per-collection and per-reason counts, a per-type
+// count restricted to evaporation-reason expirations, and the SET of
+// evaporation-reason expired ids (used by the detailed branch to attribute the
+// hard-deleted metric to the points ACTUALLY deleted, not the whole candidate
+// set).
+func scanExpiring(ctx context.Context, store memory.Store, t time.Time) (byCollection, byReason, evapByType map[string]int, evapIDs map[string]struct{}) {
 	byCollection = map[string]int{}
 	byReason = map[string]int{}
 	evapByType = map[string]int{}
+	evapIDs = map[string]struct{}{}
 
 	nowUnix := float64(t.Unix())
 	var offset string
@@ -146,6 +273,7 @@ func scanExpiring(ctx context.Context, store memory.Store, t time.Time) (byColle
 			byReason[reason]++
 			if reason == "evaporation" {
 				evapByType[string(mem.Type)]++
+				evapIDs[mem.ID] = struct{}{}
 			}
 		}
 		if next == "" {
@@ -153,5 +281,5 @@ func scanExpiring(ctx context.Context, store memory.Store, t time.Time) (byColle
 		}
 		offset = next
 	}
-	return byCollection, byReason, evapByType
+	return byCollection, byReason, evapByType, evapIDs
 }

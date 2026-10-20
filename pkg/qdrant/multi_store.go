@@ -355,19 +355,37 @@ func (m *MultiStore) ScrollExpired(ctx context.Context, opts memory.ScrollOption
 }
 
 // DeleteExpired removes expired memories from all physical collections. Each
-// underlying Store applies its own expiry dwell window (G4): expired points are
-// only hard-deleted after clearing the decision-age grace. The returned count
-// is the number of points actually deleted this tick across all collections.
+// underlying Store applies its own expiry dwell window (G4) and the P17
+// importance guard / self-heal. It is a thin wrapper over DeleteExpiredDetailed;
+// the returned count is the number of points actually deleted this tick across
+// all collections.
 func (m *MultiStore) DeleteExpired(ctx context.Context) (int, error) {
-	total := 0
-	for _, s := range m.stores {
-		n, err := s.DeleteExpired(ctx)
-		if err != nil {
-			return total, err
-		}
-		total += n
+	records, err := m.DeleteExpiredDetailed(ctx)
+	if err != nil {
+		return 0, err
 	}
-	return total, nil
+	n := 0
+	for i := range records {
+		if records[i].Action == ExpiryActionDeleted {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// DeleteExpiredDetailed runs DeleteExpiredDetailed across every physical
+// collection and aggregates the per-collection ExpiryRecords. On the first
+// per-store error it returns the records gathered so far plus the error.
+func (m *MultiStore) DeleteExpiredDetailed(ctx context.Context) ([]ExpiryRecord, error) {
+	var all []ExpiryRecord
+	for _, s := range m.stores {
+		recs, err := s.DeleteExpiredDetailed(ctx)
+		if err != nil {
+			return all, err
+		}
+		all = append(all, recs...)
+	}
+	return all, nil
 }
 
 // PerCollectionStats returns the point count for each physical collection.

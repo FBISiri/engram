@@ -1344,6 +1344,8 @@ func (s *Server) handleUpdate(ctx context.Context, request mcp.CallToolRequest) 
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("delete error: %v", err)), nil
 		}
+		// P17 R3: id-level audit of the memory_update old-id hard delete.
+		writeDeleteAudit(scoredDeleteAudits("memory_update", deletedMemories)...)
 	}
 
 	// Step 3: Create new memory
@@ -1494,10 +1496,12 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 		ValidUntil float64 `json:"valid_until,omitempty"`
 	}
 	var deletedItems []deletedItem
+	var deletedMems []memory.ScoredMemory
 
 	for _, r := range results {
 		if r.Score >= threshold {
 			toDelete = append(toDelete, r.ID)
+			deletedMems = append(deletedMems, r)
 			deletedItems = append(deletedItems, deletedItem{
 				ID:         r.ID,
 				Content:    r.Content,
@@ -1545,6 +1549,8 @@ func (s *Server) handleDelete(ctx context.Context, request mcp.CallToolRequest) 
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("delete error: %v", err)), nil
 	}
+	// P17 R3: id-level audit of the memory_delete hard delete.
+	writeDeleteAudit(scoredDeleteAudits("memory_delete", deletedMems)...)
 
 	if s.metrics != nil {
 		s.metrics.MemoryOps.WithLabelValues("delete", CollectionFromContext(ctx), "unknown").Inc()
