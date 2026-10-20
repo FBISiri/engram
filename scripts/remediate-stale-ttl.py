@@ -82,6 +82,49 @@ FILTER = {
     ]
 }
 
+# PERMANENT_VU_THRESHOLD: epoch seconds for 2100-01-01T00:00:00Z. A valid_until
+# at or beyond this is treated as a hand-set permanent / far-future sentinel
+# (NOT a stale snapshotted finite TTL) and is left UNTOUCHED by remediation.
+# This guards values like valid_until=2100-01-01 that an operator set on purpose.
+PERMANENT_VU_THRESHOLD = 4102444800.0
+
+
+def is_permanent_vu(vu):
+    """True if valid_until is a hand-set permanent/far-future sentinel to skip."""
+    return float(vu or 0) >= PERMANENT_VU_THRESHOLD
+
+
+def partition_candidates(points, now):
+    """Classify scrolled points into (rows_to_patch, skipped_permanent).
+
+    points: iterable of (id, payload) as yielded by scroll_candidates.
+    Returns two lists of row dicts. A point whose valid_until is a permanent /
+    far-future sentinel (>= PERMANENT_VU_THRESHOLD) goes to skipped_permanent
+    and is never patched; everything else (in-window stale finite TTL) goes to
+    rows_to_patch. Pure + network-free so it is unit-testable with fixtures.
+    """
+    rows, skipped = [], []
+    for pid, payload in points:
+        vu = float(payload.get("valid_until") or 0)
+        ca = float(payload.get("created_at") or 0)
+        imp = float(payload.get("importance") or 0)
+        days = int(round((vu - ca) / 86400)) if ca > 0 else -1
+        row = {
+            "id": pid,
+            "collection": payload.get("_collection", ""),
+            "importance": imp,
+            "valid_until": vu,
+            "created_at": ca,
+            "ttl_days": days,
+            "expires_in_days": (vu - now) / 86400,
+            "content_prefix": _content_prefix(payload),
+        }
+        if is_permanent_vu(vu):
+            skipped.append(row)
+        else:
+            rows.append(row)
+    return rows, skipped
+
 
 def _request(method, path, body=None):
     url = f"{REST_URL}{path}"
@@ -141,26 +184,18 @@ def main():
     print(f"Qdrant REST: {REST_URL}")
 
     rows = []
+    skipped = []
     for coll in list_engram_collections():
+        points = []
         for pid, payload in scroll_candidates(coll):
-            vu = float(payload.get("valid_until") or 0)
-            ca = float(payload.get("created_at") or 0)
-            imp = float(payload.get("importance") or 0)
-            days = int(round((vu - ca) / 86400)) if ca > 0 else -1
-            rows.append(
-                {
-                    "id": pid,
-                    "collection": coll,
-                    "importance": imp,
-                    "valid_until": vu,
-                    "created_at": ca,
-                    "ttl_days": days,
-                    "expires_in_days": (vu - now) / 86400,
-                    "content_prefix": _content_prefix(payload),
-                }
-            )
+            payload["_collection"] = coll
+            points.append((pid, payload))
+        r_rows, r_skipped = partition_candidates(points, now)
+        rows.extend(r_rows)
+        skipped.extend(r_skipped)
 
     total = len(rows)
+    n_skipped = len(skipped)
     hist = {}
     for r in rows:
         hist[r["ttl_days"]] = hist.get(r["ttl_days"], 0) + 1
@@ -172,7 +207,11 @@ def main():
         f.write(f"- generated: {dt.datetime.now().isoformat(timespec='seconds')}\n")
         f.write(f"- Qdrant REST: {REST_URL}\n")
         f.write("- target set: type=insight && importance>=8 && valid_until>0\n")
+        f.write(
+            "- skip rule: valid_until >= 2100-01-01 (permanent/far-future) left untouched\n"
+        )
         f.write(f"- total matching records: **{total}**\n")
+        f.write(f"- skipped (permanent/far-future): **{n_skipped}**\n")
         f.write(f"- expiring within 14 days: **{len(soon)}**\n\n")
         f.write("## TTL histogram (valid_until - created_at, whole days)\n\n")
         f.write("| days | count |\n|---|---|\n")
@@ -188,6 +227,7 @@ def main():
             )
 
     print(f"total matching: {total}")
+    print(f"skipped (permanent/far-future): {n_skipped}")
     print(f"expiring within 14 days: {len(soon)}")
     print(f"histogram (ttl_days -> count): {dict(sorted(hist.items()))}")
     print(f"report written: {report_path}")

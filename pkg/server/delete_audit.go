@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FBISiri/engram/pkg/memory"
+	"github.com/FBISiri/engram/pkg/statedir"
 )
 
 // deleteAuditRecord is one JSON line in the append-only id-level delete audit
@@ -32,16 +33,21 @@ type deleteAuditRecord struct {
 var deleteAuditMu sync.Mutex
 
 // deleteAuditPath resolves the audit file path: ENGRAM_DELETE_AUDIT_PATH when
-// set, else $HOME/.siri/engram_deletes.jsonl.
-func deleteAuditPath() string {
+// set, else <statedir.Dir()>/engram_deletes.jsonl.
+//
+// It returns an error (instead of a bare $HOME fallback) so that under `go
+// test` statedir.Dir() refuses the /root/.siri fallback and the audit write is
+// skipped rather than clobbering the production audit log. Tests must set
+// ENGRAM_DELETE_AUDIT_PATH or ENGRAM_STATE_DIR (e.g. t.TempDir()).
+func deleteAuditPath() (string, error) {
 	if p := os.Getenv("ENGRAM_DELETE_AUDIT_PATH"); p != "" {
-		return p
+		return p, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		home = os.Getenv("HOME")
+	dir, err := statedir.Dir()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(home, ".siri", "engram_deletes.jsonl")
+	return filepath.Join(dir, "engram_deletes.jsonl"), nil
 }
 
 // writeDeleteAudit appends records to the audit log as JSONL. It is
@@ -51,7 +57,11 @@ func writeDeleteAudit(records ...deleteAuditRecord) {
 	if len(records) == 0 {
 		return
 	}
-	path := deleteAuditPath()
+	path, err := deleteAuditPath()
+	if err != nil {
+		stderrf("[delete-audit] resolve path: %v\n", err)
+		return
+	}
 
 	deleteAuditMu.Lock()
 	defer deleteAuditMu.Unlock()

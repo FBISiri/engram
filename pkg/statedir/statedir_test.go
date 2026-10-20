@@ -42,32 +42,42 @@ func TestDirSiriHomeOverride(t *testing.T) {
 	}
 }
 
-func TestDirHomeUnsetFallback(t *testing.T) {
+// TestDirRefusesFallbackUnderTest proves the P17 test-safety guard: with no
+// override and $HOME unset, Dir() refuses the production /root/.siri fallback
+// while running under `go test`, so a test can NEVER resolve (and thus write
+// to) the production state dir /root/.siri.
+func TestDirRefusesFallbackUnderTest(t *testing.T) {
 	t.Setenv("ENGRAM_STATE_DIR", "")
 	t.Setenv("SIRI_HOME", "")
-	t.Setenv("HOME", "")
+	t.Setenv("HOME", "") // registers restore; unset below
 	if err := os.Unsetenv("HOME"); err != nil {
 		t.Fatalf("unset HOME: %v", err)
 	}
 
-	if os.Geteuid() != 0 {
-		t.Skip("fallback path /root/.siri requires root to create; skipping on non-root runner")
+	got, err := Dir()
+	if err == nil {
+		t.Fatalf("Dir() = %q, want error refusing the production fallback under go test", got)
 	}
-
-	// Sanity: verify os.UserHomeDir actually errors with HOME unset on linux.
-	if _, err := os.UserHomeDir(); err == nil {
-		t.Skip("os.UserHomeDir did not error with HOME unset on this platform")
+	if got != "" {
+		t.Fatalf("Dir() returned path %q on refusal; want empty", got)
 	}
+}
 
+// TestDirAllowsTempHomeUnderTest proves the refined guard does NOT break the
+// common test-isolation pattern of pointing $HOME at a t.TempDir(): that
+// resolves to <tmp>/.siri (not the production dir) and is allowed.
+func TestDirAllowsTempHomeUnderTest(t *testing.T) {
+	t.Setenv("ENGRAM_STATE_DIR", "")
+	t.Setenv("SIRI_HOME", "")
+	base := t.TempDir()
+	t.Setenv("HOME", base)
+
+	want := filepath.Join(base, ".siri")
 	got, err := Dir()
 	if err != nil {
 		t.Fatalf("Dir() error: %v", err)
 	}
-	want := "/root/.siri"
 	if got != want {
 		t.Fatalf("Dir() = %q, want %q", got, want)
-	}
-	if fi, err := os.Stat(got); err != nil || !fi.IsDir() {
-		t.Fatalf("expected dir created at %q: err=%v", got, err)
 	}
 }
