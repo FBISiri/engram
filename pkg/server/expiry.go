@@ -102,6 +102,12 @@ func runExpiryTick(ctx context.Context, store memory.Store, metrics *engrammetri
 			for typ, count := range evapByType {
 				metrics.EvaporationHardDeletedTotal.WithLabelValues(typ).Add(float64(count))
 			}
+			// Legacy count-only branch: the store returns only n (physical
+			// deletes) with no per-type nor healed/protected breakdown. Record
+			// all n as action=deleted,type=unknown so the tick is still observable
+			// on engram_expiry_action_total. (healed/protected are a
+			// detailedExpirer-only concept and cannot occur on this path.)
+			metrics.ExpiryActionTotal.WithLabelValues("deleted", "unknown").Add(float64(n))
 		}
 		return
 	}
@@ -149,6 +155,11 @@ func runExpiryTickDetailed(
 	nowTS := t.Format(time.RFC3339)
 	for i := range records {
 		r := records[i]
+		// ExpiryActionTotal observes EVERY record of the tick (all actions, all
+		// types), independent of reason. nil-safe: only touched when metrics != nil.
+		if metrics != nil {
+			metrics.ExpiryActionTotal.WithLabelValues(r.Action, r.Type).Inc()
+		}
 		switch r.Action {
 		case qdrant.ExpiryActionDeleted:
 			deletedIDs = append(deletedIDs, r.ID)

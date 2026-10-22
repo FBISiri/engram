@@ -50,6 +50,15 @@ type Metrics struct {
 	// findExpiryCandidates path, by exemption rule (evaporation protection rules
 	// P1..P8, observation_window, no_deprecated_at). Shadow/observability only.
 	ShadowExemptByRule *prometheus.CounterVec // engram_shadow_exempt_by_rule_total
+	// ExpiryActionTotal counts per-action outcomes of the expiry auto-delete tick
+	// (runExpiryTick), labelled by action (deleted|healed|protected) and memory
+	// type. This is distinct from EvaporationHardDeletedTotal (which counts ONLY
+	// evaporation-reason physical deletes by type); ExpiryActionTotal observes
+	// EVERY deleted/healed/protected record of every tick regardless of reason.
+	// The legacy count-only branch (store without DeleteExpiredDetailed) can only
+	// observe the deleted count with no per-type detail, so it increments
+	// action="deleted", type="unknown".
+	ExpiryActionTotal *prometheus.CounterVec // engram_expiry_action_total{action,type}
 	// ImportanceMean/ImportanceP90 export the CP2 importance-monitor rolling
 	// statistics per collection.
 	ImportanceMean *prometheus.GaugeVec // engram_importance_mean{collection}
@@ -145,19 +154,27 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		Name: "engram_shadow_exempt_by_rule_total",
 		Help: "Total memories spared from policy-based expiry (findExpiryCandidates), by exemption rule (P1..P8|observation_window|no_deprecated_at).",
 	}, []string{"rule"})
-	reg.MustRegister(evaporationScannedTotal, evaporationExemptedTotal, evaporationDryRunCandidatesTotal, evaporationHardDeletedTotal, shadowExemptByRule)
+	expiryActionTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "engram_expiry_action_total",
+		Help: "Total per-action expiry tick outcomes by action (deleted|healed|protected) and type. Distinct from engram_evaporation_hard_deleted_total; observes every outcome of every tick. The legacy count-only store branch reports action=deleted,type=unknown.",
+	}, []string{"action", "type"})
+	reg.MustRegister(evaporationScannedTotal, evaporationExemptedTotal, evaporationDryRunCandidatesTotal, evaporationHardDeletedTotal, shadowExemptByRule, expiryActionTotal)
 
 	// Pre-declare evaporation counter series at 0 so they appear on /metrics
 	// from process start (before any sweep/expiry has run). Types are read from
 	// memory.ValidTypes (not hardcoded). exemptRules mirrors the inline P1..P8
 	// rule IDs returned by EvaporationExempt in pkg/memory/evaporation.go.
 	exemptRules := []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"}
+	expiryActions := []string{"deleted", "healed", "protected"}
 	for t := range memory.ValidTypes {
 		evaporationDeprecatedTotal.WithLabelValues(string(t)).Add(0)
 		evaporationDryRunCandidatesTotal.WithLabelValues(string(t)).Add(0)
 		evaporationHardDeletedTotal.WithLabelValues(string(t)).Add(0)
 		for _, rule := range exemptRules {
 			evaporationExemptedTotal.WithLabelValues(string(t), rule).Add(0)
+		}
+		for _, a := range expiryActions {
+			expiryActionTotal.WithLabelValues(a, string(t)).Add(0)
 		}
 	}
 	// Pre-declare shadow-exempt series (fixed rule set) so they appear at 0 from
@@ -217,6 +234,7 @@ func New(embedCache memory.EmbedCache, collectionStatsFn func(context.Context) m
 		EvaporationDryRunCandidatesTotal: evaporationDryRunCandidatesTotal,
 		EvaporationHardDeletedTotal:      evaporationHardDeletedTotal,
 		ShadowExemptByRule:               shadowExemptByRule,
+		ExpiryActionTotal:                expiryActionTotal,
 		ImportanceMean:                   importanceMean,
 		ImportanceP90:                    importanceP90,
 		SearchTopScore:                   searchTopScore,

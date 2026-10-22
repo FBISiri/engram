@@ -282,3 +282,39 @@ func TestMemoryCountCollector_EmptyStats(t *testing.T) {
 		t.Errorf("expected 0 metrics for empty stats, got %d", len(metrics))
 	}
 }
+
+// TestExpiryActionTotalPredeclared verifies the new engram_expiry_action_total
+// family is registered, pre-declared at 0 for every valid type across all three
+// actions (so series exist on /metrics from process start), and that
+// EvaporationHardDeletedTotal keeps its own distinct family.
+func TestExpiryActionTotalPredeclared(t *testing.T) {
+	m := New(nil, nil)
+	if m.ExpiryActionTotal == nil {
+		t.Fatal("ExpiryActionTotal not initialized")
+	}
+	names := gatherNames(t, m.Registry)
+	for _, want := range []string{"engram_expiry_action_total", "engram_evaporation_hard_deleted_total"} {
+		if !names[want] {
+			t.Errorf("missing metric family %q", want)
+		}
+	}
+	// Pre-declared at 0 for each action over a known type.
+	for _, action := range []string{"deleted", "healed", "protected"} {
+		dm := &dto.Metric{}
+		if err := m.ExpiryActionTotal.WithLabelValues(action, "insight").Write(dm); err != nil {
+			t.Fatal(err)
+		}
+		if got := dm.GetCounter().GetValue(); got != 0 {
+			t.Errorf("ExpiryActionTotal{action=%s,type=insight}=%v, want 0 at init", action, got)
+		}
+	}
+	// Incrementing one series must not disturb EvaporationHardDeletedTotal.
+	m.ExpiryActionTotal.WithLabelValues("deleted", "event").Inc()
+	dm := &dto.Metric{}
+	if err := m.EvaporationHardDeletedTotal.WithLabelValues("event").Write(dm); err != nil {
+		t.Fatal(err)
+	}
+	if got := dm.GetCounter().GetValue(); got != 0 {
+		t.Errorf("EvaporationHardDeletedTotal{event}=%v, want 0 (must be independent)", got)
+	}
+}
