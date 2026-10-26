@@ -7,7 +7,7 @@ require (
 	github.com/mark3labs/mcp-go v1.2.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
-	github.com/qdrant/go-client v1.19.4
+	github.com/qdrant/go-client v1.20.0
 	go.etcd.io/bbolt v1.4.3
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.46.0
