@@ -112,6 +112,15 @@ func loadConfig() (*config, error) {
 	return &config{Provider: provider, APIKey: key, BaseURL: baseURL, Model: model}, nil
 }
 
+// Preflight validates that the configured LLM provider is usable WITHOUT making
+// a network call: it runs loadConfig() and returns its error. The anthropic
+// provider always passes (credentials are resolved per-call); openrouter passes
+// only when ENGRAM_LLM_API_KEY is set.
+func Preflight() error {
+	_, err := loadConfig()
+	return err
+}
+
 // Meta carries observability metadata about a single LLM call. Token counts use
 // -1 as a sentinel meaning "provider did not report this value".
 type Meta struct {

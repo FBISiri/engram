@@ -5,6 +5,7 @@ package dream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,13 +19,22 @@ import (
 )
 
 const (
-	lastRunFile      = "dream_last_run"
-	pidFile          = "dream.pid"
+	lastRunFile = "dream_last_run"
+	pidFile     = "dream.pid"
 
-	gateTimeInterval    = 20 * time.Hour // Reduced from 24h for 20:00 daily trigger flexibility
-	gateNewMemoriesMin  = 20             // Min new memories since last run (replaces session count)
-	pidStaleTimeout     = 2 * time.Hour
+	gateTimeInterval   = 20 * time.Hour // Reduced from 24h for 20:00 daily trigger flexibility
+	gateNewMemoriesMin = 20             // Min new memories since last run (replaces session count)
+	pidStaleTimeout    = 2 * time.Hour
+
+	// firstRunGuardMaxPoints is the max number of existing memories tolerated when
+	// last_run=never. Any memory above this count means the store is NOT fresh, so
+	// a "never" last_run is treated as lost state and the run is blocked (item B).
+	firstRunGuardMaxPoints = 0
 )
+
+// ErrFirstRunGuard is returned by the LIVE dream-run path when the first-run
+// guard blocks a run (last_run=never but the store already has memories).
+var ErrFirstRunGuard = errors.New("first-run guard")
 
 // GateResult is the JSON output of dream-check.
 type GateResult struct {
@@ -36,6 +46,9 @@ type GateResult struct {
 	Gate1Time               bool    `json:"gate1_time"`
 	Gate2Memories           bool    `json:"gate2_memories"`
 	Gate3Pid                bool    `json:"gate3_pid"`
+	StateDir                string  `json:"state_dir"`
+	StoreTotal              int     `json:"store_total"`
+	FirstRunGuard           bool    `json:"first_run_guard,omitempty"`
 }
 
 // siriDirPath returns the Siri state dir, creating it if needed.
@@ -53,6 +66,7 @@ func CheckGates(store memory.Store) (*GateResult, error) {
 	}
 
 	result := &GateResult{}
+	result.StateDir = dir
 
 	// Gate 1: Time interval >= 20h since last run.
 	lastRun, err := readLastRun(filepath.Join(dir, lastRunFile))
@@ -69,15 +83,35 @@ func CheckGates(store memory.Store) (*GateResult, error) {
 	gate1 := lastRun.IsZero() || time.Since(lastRun) >= gateTimeInterval
 	result.Gate1Time = gate1
 
+	// Store total (gate2 input + first-run guard). A Stats error is captured so the
+	// first-run guard can fail CLOSED when last_run=never (lost-state case).
+	var statsErr error
+	if store != nil {
+		if total, serr := storePointCount(store); serr != nil {
+			statsErr = serr
+		} else {
+			result.StoreTotal = total
+		}
+	}
+
 	// Gate 2: New memories since last run >= gateNewMemoriesMin.
 	var newMemCount int
 	gate2 := true // default pass if no store provided
+	gate2Reason := ""
 	if store != nil {
-		newMemCount, err = countNewMemoriesSince(store, lastRun)
-		if err != nil {
-			// Non-fatal: log and treat as gate2 pass to avoid blocking Dream Engine
-			fmt.Fprintf(os.Stderr, "warning: gate2 memory count failed: %v (treating as pass)\n", err)
-			gate2 = true
+		var cerr error
+		newMemCount, cerr = countNewMemoriesSince(store, lastRun)
+		if cerr != nil {
+			if lastRun.IsZero() {
+				// never + count error: do NOT silently pass. A fresh-looking run that
+				// cannot even count the store must fail closed (item B).
+				gate2 = false
+				gate2Reason = fmt.Sprintf("gate2 fail: memory count failed on first run (last_run=never): %v", cerr)
+			} else {
+				// last_run is set: keep the existing lenient behaviour.
+				fmt.Fprintf(os.Stderr, "warning: gate2 memory count failed: %v (treating as pass)\n", cerr)
+				gate2 = true
+			}
 		} else {
 			gate2 = newMemCount >= gateNewMemoriesMin
 		}
@@ -89,13 +123,33 @@ func CheckGates(store memory.Store) (*GateResult, error) {
 	gate3, pidReason := checkPIDLock(filepath.Join(dir, pidFile))
 	result.Gate3Pid = gate3
 
+	// First-run guard (item B): when last_run=never, refuse unless explicitly
+	// allowed. Fail CLOSED on both signals — a store that already has memories
+	// (lost state), OR a store whose Stats() could not even be read (so we cannot
+	// prove it is fresh).
+	firstRunNever := lastRun.IsZero() && store != nil && !allowFirstRun()
+	firstRunStatsFailed := firstRunNever && statsErr != nil
+	firstRunBlocked := firstRunNever && result.StoreTotal > firstRunGuardMaxPoints
+
 	// Evaluate.
 	switch {
+	case firstRunStatsFailed:
+		result.FirstRunGuard = true
+		result.ShouldRun = false
+		result.Reason = fmt.Sprintf("first-run guard: last_run=never and store stats failed (%v); refusing (set ENGRAM_DREAM_ALLOW_FIRST_RUN=1 to override)", statsErr)
+	case firstRunBlocked:
+		result.FirstRunGuard = true
+		result.ShouldRun = false
+		result.Reason = fmt.Sprintf("first-run guard: last_run=never but store already has %d memories (state_dir=%s); refusing — if this really is a fresh store run with ENGRAM_DREAM_ALLOW_FIRST_RUN=1", result.StoreTotal, dir)
 	case !gate1:
 		elapsed := time.Since(lastRun).Truncate(time.Minute)
 		result.Reason = fmt.Sprintf("gate1 fail: only %s since last run (need %s)", elapsed, gateTimeInterval)
 	case !gate2:
-		result.Reason = fmt.Sprintf("gate2 fail: only %d new memories since last run (need %d)", newMemCount, gateNewMemoriesMin)
+		if gate2Reason != "" {
+			result.Reason = gate2Reason
+		} else {
+			result.Reason = fmt.Sprintf("gate2 fail: only %d new memories since last run (need %d)", newMemCount, gateNewMemoriesMin)
+		}
 	case !gate3:
 		result.Reason = fmt.Sprintf("gate3 fail: %s", pidReason)
 	default:
@@ -104,6 +158,49 @@ func CheckGates(store memory.Store) (*GateResult, error) {
 	}
 
 	return result, nil
+}
+
+// allowFirstRun reports whether the first-run guard is bypassed via env.
+func allowFirstRun() bool {
+	return os.Getenv("ENGRAM_DREAM_ALLOW_FIRST_RUN") == "1"
+}
+
+// storePointCount returns the store's total point count (0 when store is nil).
+func storePointCount(store memory.Store) (int, error) {
+	if store == nil {
+		return 0, nil
+	}
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	return int(stats.PointCount), nil
+}
+
+// FirstRunGuard reports whether a LIVE dream-run must be blocked because
+// last_run is "never" yet the store already has memories (the never-gate
+// incident, item B). Bypassable via ENGRAM_DREAM_ALLOW_FIRST_RUN=1.
+func FirstRunGuard(store memory.Store) (blocked bool, reason string, err error) {
+	dir, derr := siriDirPath()
+	if derr != nil {
+		return false, "", derr
+	}
+	lastRun, lerr := readLastRun(filepath.Join(dir, lastRunFile))
+	if lerr != nil {
+		return false, "", lerr
+	}
+	if !lastRun.IsZero() || store == nil || allowFirstRun() {
+		return false, "", nil
+	}
+	total, serr := storePointCount(store)
+	if serr != nil {
+		// Fail CLOSED: cannot prove the store is fresh, and last_run=never.
+		return true, fmt.Sprintf("first-run guard: last_run=never and store stats failed (%v); refusing (set ENGRAM_DREAM_ALLOW_FIRST_RUN=1 to override)", serr), nil
+	}
+	if total > firstRunGuardMaxPoints {
+		return true, fmt.Sprintf("first-run guard: last_run=never but store already has %d memories (state_dir=%s); refusing — if this really is a fresh store run with ENGRAM_DREAM_ALLOW_FIRST_RUN=1", total, dir), nil
+	}
+	return false, "", nil
 }
 
 // countNewMemoriesSince counts memories created after the given time.

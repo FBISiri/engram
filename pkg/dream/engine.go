@@ -36,11 +36,27 @@ var AllPhases = []Phase{PhaseOrient, PhaseGather, PhaseConsolidate, PhasePrune}
 // a mostly-empty run does not waste the 20h window.
 const skillDiffHoldThreshold = 0.5
 
+// consolidateHoldThreshold is the maximum tolerated consolidate failure rate.
+// When the fraction of consolidation candidates whose insight generation failed
+// exceeds this value the run is degraded and last_run is HELD, so a run that
+// could not actually consolidate anything does not waste the gate window.
+const consolidateHoldThreshold = 0.5
+
 // ErrSkillDiffPartial is returned by Run when one or more skill-diff proposals
 // failed. It is a sentinel so main() can map it to a dedicated non-zero exit
 // code — a LIVE dream-run whose skill-diff sub-step was (partially) broken must
 // not be able to exit 0.
 var ErrSkillDiffPartial = errors.New("skill-diff partial failure")
+
+// ErrConsolidateDegraded is returned by Run when more than
+// consolidateHoldThreshold of the consolidation candidates failed (last_run was
+// HELD). main() maps it to a dedicated non-zero exit code.
+var ErrConsolidateDegraded = errors.New("consolidate degraded")
+
+// ErrLLMUnavailable is returned by Run when a LIVE run that would consolidate is
+// aborted up-front because the LLM provider is not usable (llm.Preflight
+// failed). No phases run, no PID lock is written, and last_run is HELD.
+var ErrLLMUnavailable = errors.New("llm unavailable")
 
 // Config holds Dream Engine runtime configuration.
 type Config struct {
@@ -72,6 +88,13 @@ type Log struct {
 	SkillDiffTotal       int      `json:"skill_diff_total,omitempty"`        // candidate skills attempted (ok+failed)
 	SkillDiffFailedNames []string `json:"skill_diff_failed_names,omitempty"` // names of skills whose proposal failed
 	LastRunAdvanced      bool     `json:"last_run_advanced,omitempty"`       // whether UpdateRunTimestamp was called
+
+	// Consolidate observability (item A): counts and degraded decision.
+	ConsolidateCandidates int    `json:"consolidate_candidates,omitempty"` // live groups with >=3 events attempted
+	ConsolidateFailed     int    `json:"consolidate_failed,omitempty"`     // candidates whose insight generation errored
+	ConsolidateMerged     int    `json:"consolidate_merged,omitempty"`     // new insights successfully created
+	Degraded              bool   `json:"degraded,omitempty"`               // true when the run was degraded (held/aborted)
+	DegradedReason        string `json:"degraded_reason,omitempty"`        // human-readable degradation cause
 }
 
 // PhaseLog records a single phase's execution.
@@ -115,10 +138,43 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	if !e.cfg.DryRun {
+		// Item A: for a LIVE run that would consolidate, verify the LLM is usable
+		// BEFORE anything runs. Aborting up-front (no PID lock, no phases, last_run
+		// HELD) prevents the silent false-success where every consolidate candidate
+		// errored on a missing LLM key yet last_run still advanced.
+		phasesIncludeConsolidate := false
+		for _, p := range phases {
+			if p == PhaseConsolidate {
+				phasesIncludeConsolidate = true
+				break
+			}
+		}
+		if phasesIncludeConsolidate {
+			if err := llm.Preflight(); err != nil {
+				e.log.Degraded = true
+				e.log.DegradedReason = "llm unavailable: " + err.Error()
+				e.log.Summary = fmt.Sprintf("Dream run ABORTED: llm unavailable: %v; last_run HELD", err)
+				e.log.LastRunAdvanced = false
+				fmt.Fprintf(os.Stderr, "dream-run ABORTED: llm unavailable: %v; last_run HELD\n", err)
+				return fmt.Errorf("%w: %v", ErrLLMUnavailable, err)
+			}
+		}
+
 		if err := WritePIDLock(); err != nil {
 			return fmt.Errorf("write pid lock: %w", err)
 		}
 		defer ReleasePIDLock()
+	} else {
+		// Dry-run keeps its always-succeed contract; surface an LLM-unavailable
+		// warning so the preview still signals that a LIVE run would abort.
+		for _, p := range phases {
+			if p == PhaseConsolidate {
+				if err := llm.Preflight(); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: dream dry-run: llm preflight failed (%v); a LIVE run would ABORT\n", err)
+				}
+				break
+			}
+		}
 	}
 
 	for _, p := range phases {
@@ -186,10 +242,19 @@ func (e *Engine) Run(ctx context.Context) error {
 	// R3: HOLD last_run (skip the write) when skill-diff was too broken to justify
 	// consuming the gate budget, so a degraded run doesn't waste the 20h window.
 	if e.cfg.Phase == "" && !e.cfg.DryRun {
-		hold := shouldHoldLastRun(e.log.SkillDiffRan, e.log.SkillDiffFailed, e.log.SkillDiffTotal)
-		if hold {
-			fmt.Fprintf(os.Stderr, "last_run HELD: skill-diff %d/%d failed (>%.0f%% threshold); gate budget NOT consumed\n",
-				e.log.SkillDiffFailed, e.log.SkillDiffTotal, skillDiffHoldThreshold*100)
+		holdSkill := shouldHoldLastRun(e.log.SkillDiffRan, e.log.SkillDiffFailed, e.log.SkillDiffTotal)
+		holdConsolidate := shouldHoldForConsolidate(e.log.ConsolidateFailed, e.log.ConsolidateCandidates)
+		if holdSkill || holdConsolidate {
+			if holdConsolidate {
+				e.log.Degraded = true
+				e.log.DegradedReason = fmt.Sprintf("consolidate: %d/%d candidates failed", e.log.ConsolidateFailed, e.log.ConsolidateCandidates)
+				fmt.Fprintf(os.Stderr, "last_run HELD: consolidate %d/%d candidates failed (>%.0f%% threshold); gate budget NOT consumed\n",
+					e.log.ConsolidateFailed, e.log.ConsolidateCandidates, consolidateHoldThreshold*100)
+			}
+			if holdSkill {
+				fmt.Fprintf(os.Stderr, "last_run HELD: skill-diff %d/%d failed (>%.0f%% threshold); gate budget NOT consumed\n",
+					e.log.SkillDiffFailed, e.log.SkillDiffTotal, skillDiffHoldThreshold*100)
+			}
 			e.log.LastRunAdvanced = false
 		} else {
 			if err := UpdateRunTimestamp(); err != nil {
@@ -213,8 +278,22 @@ func (e *Engine) Run(ctx context.Context) error {
 	// (its degradation is still visible in the summary counts and the draft
 	// Coverage header) — the exit-3 signal is reserved for LIVE runs, the
 	// dangerous case that advances last_run.
-	if !e.cfg.DryRun && e.log.SkillDiffFailed > 0 {
-		return fmt.Errorf("%w: %d of %d skill-diff proposals failed", ErrSkillDiffPartial, e.log.SkillDiffFailed, e.log.SkillDiffTotal)
+	// Surface degraded/partial-failure signals as a non-zero exit. The report and
+	// log have already been written above so observability is preserved. Gated on
+	// !DryRun: a --dry-run preview keeps its always-succeed contract. Both signals
+	// are joined so errors.Is matches either; exitFor() gives skill-diff (exit 3)
+	// precedence over the consolidate-degraded signal (exit 4).
+	if !e.cfg.DryRun {
+		var errs []error
+		if e.log.SkillDiffFailed > 0 {
+			errs = append(errs, fmt.Errorf("%w: %d of %d skill-diff proposals failed", ErrSkillDiffPartial, e.log.SkillDiffFailed, e.log.SkillDiffTotal))
+		}
+		if shouldHoldForConsolidate(e.log.ConsolidateFailed, e.log.ConsolidateCandidates) {
+			errs = append(errs, fmt.Errorf("%w: %d of %d consolidation candidates failed", ErrConsolidateDegraded, e.log.ConsolidateFailed, e.log.ConsolidateCandidates))
+		}
+		if len(errs) > 0 {
+			return errors.Join(errs...)
+		}
 	}
 
 	return nil
@@ -375,6 +454,9 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 
 	// Track consolidation stats.
 	var mergedCount, newInsights, skipped int
+	// Item A: count LIVE consolidation candidates and their failures so Run() can
+	// HOLD last_run when the LLM could not actually consolidate anything.
+	var liveCandidates, liveFailed int
 
 	// Find groups with 3+ events (consolidation candidates).
 	for _, tag := range sortedTags {
@@ -391,9 +473,12 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 			continue
 		}
 
+		liveCandidates++
+
 		// Build prompt for the LLM.
 		insight, sourceIDs, err := e.generateInsight(ctx, tag, group)
 		if err != nil {
+			liveFailed++
 			items = append(items, fmt.Sprintf("  error generating insight for tag=%q: %v", tag, err))
 			skipped++
 			continue
@@ -478,6 +563,11 @@ func (e *Engine) consolidate(ctx context.Context) ([]string, error) {
 	} else {
 		items = append(items, fmt.Sprintf("consolidation result: merged_count=%d, new_insights=%d, skipped=%d", mergedCount, newInsights, skipped))
 	}
+
+	// Item A: record candidate/failure counts for the HOLD decision in Run().
+	e.log.ConsolidateCandidates = liveCandidates
+	e.log.ConsolidateFailed = liveFailed
+	e.log.ConsolidateMerged = newInsights
 
 	// Usage-frequency weighting (Cognee-inspired).
 	// Paginate through the full collection — single Scroll(Limit=500) silently
@@ -851,6 +941,9 @@ func (e *Engine) buildSummary() string {
 			summary += "; last_run HELD (degraded run)"
 		}
 	}
+	if e.log.Degraded && e.log.DegradedReason != "" {
+		summary += "; DEGRADED: " + e.log.DegradedReason
+	}
 	return summary
 }
 
@@ -863,6 +956,16 @@ func shouldHoldLastRun(ran bool, failed, total int) bool {
 		return false
 	}
 	return float64(failed)/float64(total) > skillDiffHoldThreshold
+}
+
+// shouldHoldForConsolidate reports whether last_run must be HELD because more
+// than consolidateHoldThreshold of the LIVE consolidation candidates failed
+// (item A). Zero candidates never holds.
+func shouldHoldForConsolidate(failed, total int) bool {
+	if total <= 0 {
+		return false
+	}
+	return float64(failed)/float64(total) > consolidateHoldThreshold
 }
 
 // buildDraftHeader builds the skill-diff draft header (R4). Reading only this
@@ -884,6 +987,9 @@ func buildDraftHeader(date, modeLabel string, ok, total int, failedNames []strin
 // writeReport writes the dream run report to workspace.
 func (e *Engine) writeReport() error {
 	wsDir := "/data/armyoftheagent/workspace"
+	if d := os.Getenv("ENGRAM_DREAM_REPORT_DIR"); d != "" {
+		wsDir = d
+	}
 	if err := os.MkdirAll(wsDir, 0755); err != nil {
 		return err
 	}
@@ -943,6 +1049,9 @@ func (e *Engine) skillDiff(ctx context.Context) (*skillDiffResult, []string, err
 
 	skillsDir := "/data/armyoftheagent/skills"
 	wsDir := "/data/armyoftheagent/workspace"
+	if d := os.Getenv("ENGRAM_DREAM_REPORT_DIR"); d != "" {
+		wsDir = d
+	}
 
 	// List all skill directories.
 	entries, err := os.ReadDir(skillsDir)

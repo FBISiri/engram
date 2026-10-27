@@ -91,8 +91,46 @@ var errUnknownFlag = errors.New("unknown flag")
 // The usage text has already been printed to stdout; main() maps it to exit 0.
 var errHelp = errors.New("help requested")
 
-// exitFor centralises exit-code mapping for subcommands that support the
-// help/unknown-flag protocol: help -> 0, unknown flag -> 2, other error -> 1.
+// exitCodeFor centralises exit-code mapping for subcommands that support the
+// help/unknown-flag protocol. It is pure (no I/O) so it can be unit-tested.
+//
+//	nil / errHelp        -> 0
+//	errUnknownFlag       -> 2
+//	ErrSkillDiffPartial  -> 3 (checked FIRST: a run that is both skill-diff
+//	                          partial and consolidate-degraded exits 3)
+//	ErrLLMUnavailable |
+//	ErrConsolidateDegraded |
+//	ErrFirstRunGuard     -> 4 (degraded / refused LIVE run; last_run HELD)
+//	anything else        -> 1
+func exitCodeFor(err error) int {
+	if err == nil || errors.Is(err, errHelp) {
+		return 0
+	}
+	if errors.Is(err, errUnknownFlag) {
+		return 2
+	}
+	// Exit code 3 is dedicated to a skill-diff partial failure: the run itself
+	// completed (report + log written) but one or more skill-diff proposals
+	// failed, so the run must not be able to look successful. Checked before the
+	// exit-4 family so skill-diff keeps precedence when both signals are joined.
+	if errors.Is(err, dream.ErrSkillDiffPartial) {
+		return 3
+	}
+	// Exit code 4 covers the "degraded / refused LIVE run" family: the LLM was
+	// unavailable up-front (ErrLLMUnavailable), too many consolidation candidates
+	// failed (ErrConsolidateDegraded), or the first-run guard blocked the run
+	// (ErrFirstRunGuard). In all three cases last_run was HELD / the run did not
+	// proceed, so the caller must not treat it as a clean success.
+	if errors.Is(err, dream.ErrLLMUnavailable) ||
+		errors.Is(err, dream.ErrConsolidateDegraded) ||
+		errors.Is(err, dream.ErrFirstRunGuard) {
+		return 4
+	}
+	return 1
+}
+
+// exitFor maps err to an exit code (see exitCodeFor) and exits. Non-help errors
+// are printed to stderr first.
 func exitFor(err error) {
 	if err == nil {
 		return
@@ -101,16 +139,7 @@ func exitFor(err error) {
 		os.Exit(0)
 	}
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
-	if errors.Is(err, errUnknownFlag) {
-		os.Exit(2)
-	}
-	// Exit code 3 is dedicated to a skill-diff partial failure: the run itself
-	// completed (report + log written) but one or more skill-diff proposals
-	// failed, so the run must not be able to look successful.
-	if errors.Is(err, dream.ErrSkillDiffPartial) {
-		os.Exit(3)
-	}
-	os.Exit(1)
+	os.Exit(exitCodeFor(err))
 }
 
 type reflectionOpts struct {
@@ -435,6 +464,18 @@ func dreamRun(cfg *config.Config) error {
 		return fmt.Errorf("ensure collections: %w", err)
 	}
 
+	// Item B: before a LIVE run, refuse if last_run=never but the store already
+	// has memories (lost-state never-gate). Dry-run only warns.
+	if blocked, reason, gerr := dream.FirstRunGuard(store); gerr != nil {
+		fmt.Fprintf(os.Stderr, "warning: first-run guard check failed: %v\n", gerr)
+	} else if blocked {
+		if dryRun {
+			fmt.Fprintf(os.Stderr, "warning: dream dry-run: %s (a LIVE run would be BLOCKED)\n", reason)
+		} else {
+			return fmt.Errorf("%w: %s", dream.ErrFirstRunGuard, reason)
+		}
+	}
+
 	// Create embedder for consolidate phase (stores new insights with proper vectors).
 	var embedder embedding.Embedder
 	switch cfg.EmbedderProvider {
@@ -474,6 +515,7 @@ Commands:
   serve                        Start the memory server (MCP and/or REST)
   dream-check                  Check Triple Gate (outputs JSON: should_run, reason, etc.)
   dream-run                    Run Dream Engine (--dry-run, --phase <name>)
+                               Exit codes: 3 = skill-diff partial failure; 4 = llm unavailable / consolidate degraded (last_run HELD) / first-run guard refused
   reflection-check             Check if Reflection Engine should run (outputs JSON)
   reflection-run               Run Reflection Engine (--dry-run, --force, --mode <v1|v2>)
   migrate                      Migrate from chat2mem to Engram
