@@ -87,6 +87,12 @@ type targetedUpdater interface {
 	UpdateInCollection(ctx context.Context, id string, fields map[string]any, sourceCollection string) error
 }
 
+// scopedIDReader is satisfied by qdrant.MultiStore. It reads by id from ONE
+// physical collection (error on an unknown collection).
+type scopedIDReader interface {
+	SearchByIDsIn(ctx context.Context, ids []string, col string) ([]memory.Memory, error)
+}
+
 // PerCollectionStats returns per-collection memory counts if the backing store
 // supports it; returns nil otherwise.
 func (s *Server) PerCollectionStats(ctx context.Context) map[string]uint64 {
@@ -238,8 +244,9 @@ func (s *Server) registerTools() {
 
 	// Tool 4b-get: memory_get_by_id — read-only fetch by exact id (no cosine, no hide filters).
 	getByIDTool := mcp.NewTool("memory_get_by_id",
-		mcp.WithDescription("Read a single memory by its exact id (READ-ONLY, non-destructive). Bypasses all similarity thresholds AND the superseded/archived hide filters, so it can retrieve a superseded or soft-deleted memory that memory_search/memory_list will not surface. The returned object includes superseded_by (non-empty => this memory was replaced; follow it to the successor). Unlike memory_delete_by_id / memory_update_by_id this makes NO changes."),
+		mcp.WithDescription("Read a single memory by its exact id (READ-ONLY, non-destructive). Bypasses all similarity thresholds AND the superseded/archived hide filters, so it can retrieve a superseded or soft-deleted memory that memory_search/memory_list will not surface. The returned object includes superseded_by (non-empty => this memory was replaced; follow it to the successor) and source_collection. If the same id is stored in more than one collection, pass collection to pick a specific copy; without it the copy in your own collection is returned when present, otherwise the first hit in the fixed order engram_user, engram_agent_self, engram_reflection. The optional also_in array lists the OTHER collections that hold the same id (omitted when there are none). Unlike memory_delete_by_id / memory_update_by_id this makes NO changes."),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Exact id of the memory to fetch.")),
+		mcp.WithString("collection", mcp.Description("Optional collection to read the id from (e.g. engram_user, engram_agent_self). Must be a known collection; returns null when the id is not in that collection.")),
 	)
 	s.mcpServer.AddTool(getByIDTool, s.handleGetByID)
 
@@ -1736,30 +1743,101 @@ func toMemoryReadItem(m memory.Memory) memoryReadItem {
 	}
 }
 
+// getByIDItem is the memory_get_by_id response: the usual read item plus the
+// additive also_in list of OTHER collections holding the same id.
+type getByIDItem struct {
+	memoryReadItem
+	AlsoIn []string `json:"also_in,omitempty"`
+}
+
+// searchByIDIn returns the copies of id stored in col, via the store's
+// collection-scoped reader when available, else by filtering the fan-out.
+func (s *Server) searchByIDIn(ctx context.Context, id, col string) ([]memory.Memory, error) {
+	if r, ok := s.store.(scopedIDReader); ok {
+		return r.SearchByIDsIn(ctx, []string{id}, col)
+	}
+	mems, err := s.store.SearchByIDs(ctx, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	var out []memory.Memory
+	for _, m := range mems {
+		if collectionOrFallback(m.Collection, collection.CollectionUser) == col {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
 // handleGetByID implements memory_get_by_id: a READ-ONLY fetch by exact id via
 // SearchByIDs (no vector search, no cosine, no superseded/archived hide filter).
-// Respects isolation: an isolated caller may only read its own collection.
+// Respects isolation: an isolated caller may only read its own collection and
+// never sees also_in. Copy selection: explicit collection param, else the
+// caller's own collection, else the first hit in the store's fixed order.
 func (s *Server) handleGetByID(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := request.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
+	reqCol := request.GetString("collection", "")
+	if reqCol != "" {
+		if _, ok := collection.DefaultRegistry.Get(reqCol); !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("unknown collection: %s", reqCol)), nil
+		}
+	}
 
-	mems, err := s.store.SearchByIDs(ctx, []string{id})
+	// ISOLATION: an isolated caller may only read its own collection by id.
+	if own, isolated := isolatedCaller(ctx); isolated {
+		if reqCol != "" && reqCol != own {
+			return mcp.NewToolResultText("null"), nil
+		}
+		mems, err := s.searchByIDIn(ctx, id, own)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+		}
+		if len(mems) == 0 || mems[0].Collection != own {
+			return mcp.NewToolResultText("null"), nil
+		}
+		return marshalGetByID(getByIDItem{memoryReadItem: toMemoryReadItem(mems[0])})
+	}
+
+	all, err := s.store.SearchByIDs(ctx, []string{id})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
 	}
-	if len(mems) == 0 {
+
+	var picked *memory.Memory
+	if reqCol != "" {
+		mems, err := s.searchByIDIn(ctx, id, reqCol)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("store error: %v", err)), nil
+		}
+		if len(mems) > 0 {
+			picked = &mems[0]
+		}
+	} else if len(all) > 0 {
+		m := pickCopy(all, CollectionFromContext(ctx))
+		picked = &m
+	}
+	if picked == nil {
 		return mcp.NewToolResultText("null"), nil
 	}
 
-	m := mems[0]
-	// ISOLATION: an isolated caller may not read another collection by id.
-	if own, isolated := isolatedCaller(ctx); isolated && m.Collection != own {
-		return mcp.NewToolResultText("null"), nil
+	item := getByIDItem{memoryReadItem: toMemoryReadItem(*picked)}
+	seen := map[string]struct{}{item.SourceCollection: {}}
+	for _, m := range all {
+		col := collectionOrFallback(m.Collection, collection.CollectionUser)
+		if _, dup := seen[col]; dup {
+			continue
+		}
+		seen[col] = struct{}{}
+		item.AlsoIn = append(item.AlsoIn, col)
 	}
+	return marshalGetByID(item)
+}
 
-	data, err := json.Marshal(toMemoryReadItem(m))
+func marshalGetByID(item getByIDItem) (*mcp.CallToolResult, error) {
+	data, err := json.Marshal(item)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("json marshal error: %v", err)), nil
 	}

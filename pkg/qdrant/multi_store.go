@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/FBISiri/engram/pkg/collection"
 	"github.com/FBISiri/engram/pkg/memory"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -76,17 +77,22 @@ func (m *MultiStore) EnsureCollection(ctx context.Context) error {
 // If mem.Collection is empty or unknown, it falls back to defaultCol and
 // stamps mem.Collection so the payload reflects the actual physical collection.
 func (m *MultiStore) Insert(ctx context.Context, mem *memory.Memory, vector []float32) error {
-	col := mem.Collection
-	if col == "" {
-		col = m.defaultCol
-	}
-	s, ok := m.stores[col]
-	if !ok {
-		col = m.defaultCol
-		s = m.stores[col]
-	}
+	col, s := m.insertTarget(mem.Collection)
 	mem.Collection = col
 	return s.Insert(ctx, mem, vector)
+}
+
+// insertTarget resolves the physical collection an Insert writes to: a known
+// mem.Collection is honoured; empty or unknown falls back to defaultCol.
+func (m *MultiStore) insertTarget(col string) (string, *Store) {
+	if col == "" {
+		return m.defaultCol, m.stores[m.defaultCol]
+	}
+	if s, ok := m.stores[col]; ok {
+		return col, s
+	}
+	log.Printf("WARN multi_store Insert: unknown collection %q, falling back to %s", col, m.defaultCol)
+	return m.defaultCol, m.stores[m.defaultCol]
 }
 
 // Search fans out to all stores matching the collection filter (or all stores
@@ -259,8 +265,9 @@ func (m *MultiStore) UpdateInCollection(ctx context.Context, id string, fields m
 // engram_agent_self at 0 points) from blocking updates to the correct store.
 func (m *MultiStore) Update(ctx context.Context, id string, fields map[string]any) error {
 	var firstRealErr error
-	for _, s := range m.stores {
-		if err := s.Update(ctx, id, fields); err != nil {
+	for _, col := range m.idLookupOrder() {
+		s := m.stores[col]
+		if err := storeUpdate(ctx, s, id, fields); err != nil {
 			if !isGRPCNotFound(err) && firstRealErr == nil {
 				firstRealErr = err
 			}
@@ -272,6 +279,49 @@ func (m *MultiStore) Update(ctx context.Context, id string, fields map[string]an
 	// (orphan — the memory was deleted). Treat as success so the engine can
 	// advance; the orphan won't appear in future Scroll results.
 	return firstRealErr
+}
+
+// Per-store by-id calls used by MultiStore.SearchByIDs / Update. Indirected
+// only so tests can observe the visiting order without a Qdrant connection.
+var (
+	storeSearchByIDs = func(ctx context.Context, s *Store, ids []string) ([]memory.Memory, error) {
+		return s.SearchByIDs(ctx, ids)
+	}
+	storeUpdate = func(ctx context.Context, s *Store, id string, fields map[string]any) error {
+		return s.Update(ctx, id, fields)
+	}
+)
+
+// idLookupPrecedence is the explicit, fixed order in which by-id operations
+// (SearchByIDs, Update) visit the physical collections. It is deliberately NOT
+// alphabetical and NOT map order: when the same id exists in more than one
+// collection, the first copy must be deterministic.
+var idLookupPrecedence = []string{
+	collection.CollectionUser,
+	collection.CollectionAgentSelf,
+	collection.CollectionReflection,
+}
+
+// idLookupOrder returns the configured collection names in deterministic
+// by-id lookup order: idLookupPrecedence first (those that exist), then any
+// remaining stores sorted by name.
+func (m *MultiStore) idLookupOrder() []string {
+	out := make([]string, 0, len(m.stores))
+	seen := make(map[string]struct{}, len(m.stores))
+	for _, col := range idLookupPrecedence {
+		if _, ok := m.stores[col]; ok {
+			out = append(out, col)
+			seen[col] = struct{}{}
+		}
+	}
+	rest := make([]string, 0, len(m.stores))
+	for col := range m.stores {
+		if _, ok := seen[col]; !ok {
+			rest = append(rest, col)
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 // isGRPCNotFound walks the error chain looking for a gRPC NotFound status.
@@ -303,15 +353,41 @@ func isGRPCNotFound(err error) bool {
 // filterExistingIDs) partial results are preferable to a hard error.
 func (m *MultiStore) SearchByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
 	var all []memory.Memory
-	for _, s := range m.stores {
-		results, err := s.SearchByIDs(ctx, ids)
+	for _, col := range m.idLookupOrder() {
+		s := m.stores[col]
+		results, err := storeSearchByIDs(ctx, s, ids)
 		if err != nil {
-			log.Printf("WARN SearchByIDs fan-out: store=%s err=%v (skipping)", s.CollectionName(), err)
+			log.Printf("WARN SearchByIDs fan-out: store=%s err=%v (skipping)", col, err)
 			continue // partial results — don't let one broken store block others
 		}
-		all = append(all, results...)
+		all = append(all, stampCollection(results, col)...)
 	}
 	return all, nil
+}
+
+// stampCollection sets each memory's Collection to the physical collection it
+// was read from. The physical location is authoritative for by-id routing
+// (e.g. an in-place by-id replace must write back where the copy lives), even
+// when a legacy point's payload lacks or mislabels the collection field.
+func stampCollection(mems []memory.Memory, col string) []memory.Memory {
+	for i := range mems {
+		mems[i].Collection = col
+	}
+	return mems
+}
+
+// SearchByIDsIn retrieves memories by id from ONE physical collection only.
+// Returns an error when col is not a configured collection.
+func (m *MultiStore) SearchByIDsIn(ctx context.Context, ids []string, col string) ([]memory.Memory, error) {
+	s, ok := m.stores[col]
+	if !ok {
+		return nil, fmt.Errorf("multi_store: unknown collection %q", col)
+	}
+	mems, err := s.SearchByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	return stampCollection(mems, col), nil
 }
 
 // Stats returns aggregated statistics across all physical collections.

@@ -310,9 +310,10 @@ func (h *HTTPServer) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		memory.Memory
 		SourceType string `json:"source_type,omitempty"`
 	}
+	m := pickCopy(mems, preferredCollection(r))
 	writeJSON(w, http.StatusOK, memoryWithSourceType{
-		Memory:     mems[0],
-		SourceType: sourceTypeFromMetadata(mems[0].Metadata),
+		Memory:     m,
+		SourceType: sourceTypeFromMetadata(m.Metadata),
 	})
 }
 
@@ -358,7 +359,7 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	current := mems[0]
+	current := pickCopy(mems, preferredCollection(r))
 
 	updates := map[string]any{
 		"updated_at": float64(time.Now().Unix()),
@@ -476,7 +477,7 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[WARN] engram REST PATCH /memories/%s: source_type not provided, defaulting to 'unknown'", id)
 	}
 
-	if err := h.srv.store.Update(r.Context(), id, updates); err != nil {
+	if err := h.srv.updateInCollection(r.Context(), id, updates, current.Collection); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update error: %v", err)})
 		return
 	}
@@ -484,7 +485,7 @@ func (h *HTTPServer) handlePatchMemory(w http.ResponseWriter, r *http.Request) {
 	// Return updated memory.
 	mems, _ = h.srv.store.SearchByIDs(r.Context(), []string{id})
 	if len(mems) > 0 {
-		writeJSON(w, http.StatusOK, mems[0])
+		writeJSON(w, http.StatusOK, pickCopy(mems, current.Collection))
 	} else {
 		writeJSON(w, http.StatusOK, map[string]string{"id": id})
 	}
@@ -538,12 +539,57 @@ func (s *Server) byIDAllowed(ctx context.Context, id string) (bool, error) {
 	if len(mems) == 0 {
 		return true, nil // let the core helper report not_found
 	}
-	return mems[0].Collection == own, nil
+	for _, m := range mems {
+		if m.Collection == own {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// pickCopy selects which copy of a (possibly multi-collection) id a by-id
+// operation reads AND writes: the copy whose collection == preferred when
+// present, else mems[0] (the store's deterministic first hit). mems must be
+// non-empty. Shared by memory_get_by_id, REST GET/PATCH/PUT/reset and
+// updateByID so read and write always target the same copy.
+func pickCopy(mems []memory.Memory, preferred string) memory.Memory {
+	for _, m := range mems {
+		if collectionOrFallback(m.Collection, collection.CollectionUser) == preferred {
+			return m
+		}
+	}
+	return mems[0]
+}
+
+// preferredCollection is the collection whose copy a by-id request targets:
+// an isolated caller's own collection; else the REST path collection of
+// /collections/{name}/memories/{id} when present; else the caller's
+// collection (CollectionFromContext).
+func preferredCollection(r *http.Request) string {
+	if own, isolated := isolatedCaller(r.Context()); isolated {
+		return own
+	}
+	if name := r.PathValue("name"); name != "" {
+		return name
+	}
+	return CollectionFromContext(r.Context())
+}
+
+// updateInCollection applies a payload-only update to the copy of id that lives
+// in col, via the store's targeted UpdateInCollection when available. Falls
+// back to the fan-out store.Update when the store lacks it or col is empty.
+func (s *Server) updateInCollection(ctx context.Context, id string, fields map[string]any, col string) error {
+	if tu, ok := s.store.(targetedUpdater); ok && col != "" {
+		return tu.UpdateInCollection(ctx, id, fields, col)
+	}
+	return s.store.Update(ctx, id, fields)
 }
 
 // deleteByID soft-deletes (archives) the memory with the given id via the by-id
 // escape hatch: SearchByIDs (no vector search, no cosine threshold) then
-// store.Update to lifecycle_status=archived. Returns the new lifecycle status,
+// store.Update to lifecycle_status=archived. When the same id lives in more
+// than one collection, EVERY copy is archived (delete intent must not leave a
+// live copy behind). Returns the new lifecycle status,
 // or errMemoryNotFound / *byIDError on failure.
 func (s *Server) deleteByID(ctx context.Context, id string) (string, error) {
 	mems, err := s.store.SearchByIDs(ctx, []string{id})
@@ -555,19 +601,40 @@ func (s *Server) deleteByID(ctx context.Context, id string) (string, error) {
 	}
 
 	now := float64(time.Now().Unix())
-	updates := map[string]any{
-		"lifecycle_status": memory.LifecycleArchived,
-		"archived_at":      now,
-		"updated_at":       now,
+	own, isolated := isolatedCaller(ctx)
+	archived := 0
+	var errs []error
+	for _, m := range mems {
+		// An isolated caller may only ever touch its own collection's copy.
+		if isolated && m.Collection != own {
+			continue
+		}
+		updates := map[string]any{
+			"lifecycle_status": memory.LifecycleArchived,
+			"archived_at":      now,
+			"updated_at":       now,
+		}
+		// Guard: stamp reflected_at so this memory exits the unreflected pool.
+		// Without this, archived memories with reflected_at=0 would keep appearing
+		// in fetchUnreflected on every reflection run.
+		if m.ReflectedAt == 0 {
+			updates["reflected_at"] = now
+		}
+		// Try EVERY eligible copy; one failing collection must not leave the
+		// others live. Errors are combined and reported after the loop.
+		if err := s.updateInCollection(ctx, id, updates, m.Collection); err != nil {
+			log.Printf("[WARN] engram deleteByID %s: archive in collection %q failed: %v", id, m.Collection, err)
+			errs = append(errs, fmt.Errorf("%s: %w", m.Collection, err))
+			continue
+		}
+		archived++
 	}
-	// Guard: stamp reflected_at so this memory exits the unreflected pool.
-	// Without this, archived memories with reflected_at=0 would keep appearing
-	// in fetchUnreflected on every reflection run.
-	if mems[0].ReflectedAt == 0 {
-		updates["reflected_at"] = now
+	if len(errs) > 0 {
+		return "", &byIDError{http.StatusInternalServerError, fmt.Sprintf("update error: %v", errors.Join(errs...))}
 	}
-	if err := s.store.Update(ctx, id, updates); err != nil {
-		return "", &byIDError{http.StatusInternalServerError, fmt.Sprintf("update error: %v", err)}
+	if archived == 0 {
+		// e.g. an isolated caller whose own collection holds no copy.
+		return "", errMemoryNotFound
 	}
 	return memory.LifecycleArchived, nil
 }
@@ -585,7 +652,10 @@ func (s *Server) updateByID(ctx context.Context, id string, p updateByIDParams) 
 	if len(existing) == 0 {
 		return nil, nil, errMemoryNotFound
 	}
-	prev := existing[0]
+	// Same copy selection as get_by_id: the caller's own collection (for REST
+	// /collections/{name}/... requireCollectionMatch guarantees name ==
+	// CollectionFromContext) else the deterministic first hit.
+	prev := pickCopy(existing, CollectionFromContext(ctx))
 
 	if p.Content == "" {
 		return nil, nil, &byIDError{http.StatusBadRequest, "content is required"}
@@ -637,6 +707,10 @@ func (s *Server) updateByID(ctx context.Context, id string, p updateByIDParams) 
 		LastAccessedSource: prev.LastAccessedSource,
 		ReflectedAt:        prev.ReflectedAt,
 		Confidence:         prev.Confidence,
+		// In-place replace: write back into the collection that holds the
+		// copy being replaced. Leaving this empty made MultiStore.Insert fall
+		// back to engram_user and double-store the id (dup-uuid bug).
+		Collection: prev.Collection,
 	}
 	if mem.Metadata == nil {
 		mem.Metadata = map[string]any{}
@@ -676,11 +750,15 @@ func (s *Server) updateByID(ctx context.Context, id string, p updateByIDParams) 
 	}
 
 	// Write Discipline Checkpoints (R10): an update, so CP2/CP4 apply
-	// (CP1/CP3 do not).
-	mem.Collection = CollectionFromContext(ctx)
+	// (CP1/CP3 do not). The caller's collection is advisory-only here; it never
+	// decides where the point was written (mem.Collection above does).
+	callerCol := CollectionFromContext(ctx)
+	if mem.Collection == "" {
+		mem.Collection = callerCol
+	}
 	var advisories []Advisory
 	if s.writeCheckpointsEnabled() {
-		if a := s.cp2Importance(mem.Collection, importance); a != nil {
+		if a := s.cp2Importance(callerCol, importance); a != nil {
 			advisories = append(advisories, *a)
 		}
 		advisories = append(advisories, s.cp4Content(p.Content, tags, sourceType)...)
@@ -813,7 +891,7 @@ func (h *HTTPServer) handleResetMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	cur := mems[0]
+	cur := pickCopy(mems, preferredCollection(r))
 
 	curStatus := cur.LifecycleStatus
 	if curStatus == "" {
@@ -830,7 +908,7 @@ func (h *HTTPServer) handleResetMemory(w http.ResponseWriter, r *http.Request) {
 		"lifecycle_status": memory.LifecycleActive,
 		"updated_at":       float64(time.Now().Unix()),
 	}
-	if err := h.srv.store.Update(r.Context(), id, updates); err != nil {
+	if err := h.srv.updateInCollection(r.Context(), id, updates, cur.Collection); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("update error: %v", err)})
 		return
 	}
